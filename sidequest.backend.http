@@ -1,0 +1,6 @@
+@sidequest.backend_HostAddress = http://localhost:5079
+
+GET {{sidequest.backend_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
