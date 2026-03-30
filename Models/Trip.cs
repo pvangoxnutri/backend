@@ -9,4 +9,7 @@ public class Trip
     public DateOnly StartDate { get; set; }
     public DateOnly EndDate { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    public Guid OwnerId { get; set; }
+    public User Owner { get; set; } = null!;
 }
