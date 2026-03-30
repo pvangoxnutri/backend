@@ -9,6 +9,8 @@ obj/
 appsettings.Development.json
 appsettings.*.json
 !appsettings.json
+.env.local
+.env*.local
 
 ## Rider / JetBrains
 .idea/
