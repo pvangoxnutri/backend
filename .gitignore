@@ -1,0 +1,17 @@
+## .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+## Secrets / local config — never commit these
+appsettings.Development.json
+appsettings.*.json
+!appsettings.json
+
+## Rider / JetBrains
+.idea/
+
+## VS Code
+.vscode/

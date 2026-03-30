@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("sidequest.backend")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+9ae1e0dd210376f4efadaf55ce23be805fc294a5")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+fa6a1207dede10efb6a5630f53bb10c45829d669")]
 [assembly: System.Reflection.AssemblyProductAttribute("sidequest.backend")]
 [assembly: System.Reflection.AssemblyTitleAttribute("sidequest.backend")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "fLqt4KcyJ/A=",
+  "dgSpecHash": "3DvkQ+tmUxw=",
   "success": true,
-  "projectFilePath": "C:\\Users\\oscar\\Desktop\\Sidequest\\sidequest.backend\\sidequest.backend.csproj",
+  "projectFilePath": "C:\\Users\\oscar\\Desktop\\sidequest\\sidequest.backend\\sidequest.backend.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\oscar\\.nuget\\packages\\humanizer.core\\2.14.1\\humanizer.core.2.14.1.nupkg.sha512",
     "C:\\Users\\oscar\\.nuget\\packages\\microsoft.aspnetcore.openapi\\9.0.9\\microsoft.aspnetcore.openapi.9.0.9.nupkg.sha512",
