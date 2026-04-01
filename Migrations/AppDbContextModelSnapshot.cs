@@ -151,6 +151,12 @@ namespace sidequest.backend.Migrations
                     b.Property<string>("AvatarUrl")
                         .HasColumnType("text");
 
+                    b.Property<string>("AuthProvider")
+                        .HasColumnType("text");
+
+                    b.Property<string>("AuthProviderSubject")
+                        .HasColumnType("text");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 

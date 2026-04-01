@@ -8,6 +8,7 @@ using Microsoft.IdentityModel.Tokens;
 using sidequest.backend.Data;
 using sidequest.backend.Dtos;
 using sidequest.backend.Models;
+using sidequest.backend.Services;
 
 namespace sidequest.backend.Controllers;
 
@@ -17,11 +18,13 @@ public class AuthController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly IConfiguration _config;
+    private readonly GoogleTokenVerifier _googleTokenVerifier;
 
-    public AuthController(AppDbContext db, IConfiguration config)
+    public AuthController(AppDbContext db, IConfiguration config, GoogleTokenVerifier googleTokenVerifier)
     {
         _db = db;
         _config = config;
+        _googleTokenVerifier = googleTokenVerifier;
     }
 
     [HttpPost("register")]
@@ -56,10 +59,74 @@ public class AuthController : ControllerBase
     {
         var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == dto.Email);
 
-        if (user == null || !BCrypt.Net.BCrypt.Verify(dto.Password, user.PasswordHash))
+        if (user == null)
             return Unauthorized("Invalid email or password.");
 
-        return Ok(new AuthResponseDto
+        if (string.IsNullOrWhiteSpace(user.PasswordHash))
+            return Unauthorized("This account uses Google sign-in.");
+
+        if (!BCrypt.Net.BCrypt.Verify(dto.Password, user.PasswordHash))
+            return Unauthorized("Invalid email or password.");
+
+        return Ok(CreateAuthResponse(user));
+    }
+
+    [HttpPost("google")]
+    public async Task<ActionResult<AuthResponseDto>> GoogleLogin([FromBody] GoogleLoginDto dto, CancellationToken cancellationToken)
+    {
+        var clientId = _config["GoogleAuth:ClientId"];
+        if (string.IsNullOrWhiteSpace(clientId))
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, "Google sign-in is not configured.");
+
+        var payload = await _googleTokenVerifier.VerifyAsync(dto.IdToken, clientId, cancellationToken);
+        if (payload == null)
+            return Unauthorized("Google sign-in could not be verified.");
+
+        var normalizedEmail = payload.Email.Trim().ToLowerInvariant();
+
+        var user = await _db.Users.FirstOrDefaultAsync(
+            u => u.AuthProvider == "google" && u.AuthProviderSubject == payload.Subject,
+            cancellationToken);
+
+        if (user == null)
+        {
+            user = await _db.Users.FirstOrDefaultAsync(u => u.Email == normalizedEmail, cancellationToken);
+        }
+
+        if (user == null)
+        {
+            user = new User
+            {
+                Name = payload.Name.Trim(),
+                Email = normalizedEmail,
+                PasswordHash = string.Empty,
+                AuthProvider = "google",
+                AuthProviderSubject = payload.Subject,
+                AvatarUrl = payload.Picture
+            };
+
+            _db.Users.Add(user);
+        }
+        else
+        {
+            user.AuthProvider = "google";
+            user.AuthProviderSubject = payload.Subject;
+
+            if (string.IsNullOrWhiteSpace(user.Name))
+                user.Name = payload.Name.Trim();
+
+            if (string.IsNullOrWhiteSpace(user.AvatarUrl) && !string.IsNullOrWhiteSpace(payload.Picture))
+                user.AvatarUrl = payload.Picture;
+        }
+
+        await _db.SaveChangesAsync(cancellationToken);
+
+        return Ok(CreateAuthResponse(user));
+    }
+
+    private AuthResponseDto CreateAuthResponse(User user)
+    {
+        return new AuthResponseDto
         {
             Token = GenerateToken(user),
             Id = user.Id,
@@ -67,7 +134,7 @@ public class AuthController : ControllerBase
             Email = user.Email,
             AvatarUrl = user.AvatarUrl,
             Role = user.Role
-        });
+        };
     }
 
     [HttpGet("me")]
@@ -78,15 +145,7 @@ public class AuthController : ControllerBase
         var user = await _db.Users.FindAsync(userId);
         if (user == null) return NotFound();
 
-        return Ok(new AuthResponseDto
-        {
-            Token = string.Empty,
-            Id = user.Id,
-            Name = user.Name,
-            Email = user.Email,
-            AvatarUrl = user.AvatarUrl,
-            Role = user.Role
-        });
+        return Ok(CreateProfileResponse(user));
     }
 
     [HttpPatch("profile")]
@@ -102,15 +161,7 @@ public class AuthController : ControllerBase
 
         await _db.SaveChangesAsync();
 
-        return Ok(new AuthResponseDto
-        {
-            Token = GenerateToken(user),
-            Id = user.Id,
-            Name = user.Name,
-            Email = user.Email,
-            AvatarUrl = user.AvatarUrl,
-            Role = user.Role
-        });
+        return Ok(CreateAuthResponse(user));
     }
 
     [HttpPatch("password")]
@@ -128,6 +179,19 @@ public class AuthController : ControllerBase
         await _db.SaveChangesAsync();
 
         return Ok();
+    }
+
+    private AuthResponseDto CreateProfileResponse(User user)
+    {
+        return new AuthResponseDto
+        {
+            Token = string.Empty,
+            Id = user.Id,
+            Name = user.Name,
+            Email = user.Email,
+            AvatarUrl = user.AvatarUrl,
+            Role = user.Role
+        };
     }
 
     private string GenerateToken(User user)
