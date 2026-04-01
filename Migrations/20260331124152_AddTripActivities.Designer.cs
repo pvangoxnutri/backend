@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using sidequest.backend.Data;
@@ -11,9 +12,11 @@ using sidequest.backend.Data;
 namespace sidequest.backend.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260331124152_AddTripActivities")]
+    partial class AddTripActivities
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -47,20 +50,10 @@ namespace sidequest.backend.Migrations
                     b.Property<Guid>("OwnerId")
                         .HasColumnType("uuid");
 
-                    b.Property<DateTime?>("RevealAt")
-                        .HasColumnType("timestamp with time zone");
-
                     b.Property<DateOnly>("StartDate")
                         .HasColumnType("date");
 
-                    b.Property<string>("Teaser")
-                        .HasColumnType("text");
-
                     b.Property<string>("Title")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("Visibility")
                         .IsRequired()
                         .HasColumnType("text");
 
@@ -77,9 +70,6 @@ namespace sidequest.backend.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
-                    b.Property<Guid?>("AssignedToUserId")
-                        .HasColumnType("uuid");
-
                     b.Property<string>("Category")
                         .HasColumnType("text");
 
@@ -91,9 +81,6 @@ namespace sidequest.backend.Migrations
 
                     b.Property<string>("Description")
                         .HasColumnType("text");
-
-                    b.Property<bool>("IsHidden")
-                        .HasColumnType("boolean");
 
                     b.Property<string>("Time")
                         .HasColumnType("text");
@@ -107,8 +94,6 @@ namespace sidequest.backend.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("AssignedToUserId");
-
                     b.HasIndex("TripId");
 
                     b.ToTable("TripActivities");
@@ -119,9 +104,6 @@ namespace sidequest.backend.Migrations
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
-
-                    b.Property<bool>("IsOwner")
-                        .HasColumnType("boolean");
 
                     b.Property<DateTime>("JoinedAt")
                         .HasColumnType("timestamp with time zone");
@@ -166,10 +148,6 @@ namespace sidequest.backend.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<string>("Role")
-                        .IsRequired()
-                        .HasColumnType("text");
-
                     b.HasKey("Id");
 
                     b.HasIndex("Email")
@@ -191,18 +169,11 @@ namespace sidequest.backend.Migrations
 
             modelBuilder.Entity("sidequest.backend.Models.TripActivity", b =>
                 {
-                    b.HasOne("sidequest.backend.Models.User", "AssignedTo")
-                        .WithMany()
-                        .HasForeignKey("AssignedToUserId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
                     b.HasOne("sidequest.backend.Models.Trip", "Trip")
                         .WithMany()
                         .HasForeignKey("TripId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
-
-                    b.Navigation("AssignedTo");
 
                     b.Navigation("Trip");
                 });

@@ -14,9 +14,16 @@ public class CreateTripDto
     [MaxLength(200)]
     public string Destination { get; set; } = string.Empty;
 
+    public string? ImageUrl { get; set; }
+
     [Required]
     public DateOnly StartDate { get; set; }
 
     [Required]
     public DateOnly EndDate { get; set; }
+
+    // Hidden SideQuest fields
+    public string Visibility { get; set; } = "public"; // "public" | "hidden"
+    public DateTime? RevealAt { get; set; }
+    public string? Teaser { get; set; }
 }

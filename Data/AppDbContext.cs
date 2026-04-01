@@ -10,6 +10,7 @@ public class AppDbContext : DbContext
     public DbSet<Trip> Trips => Set<Trip>();
     public DbSet<User> Users => Set<User>();
     public DbSet<TripMember> TripMembers => Set<TripMember>();
+    public DbSet<TripActivity> TripActivities => Set<TripActivity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -38,5 +39,18 @@ public class AppDbContext : DbContext
             .WithMany()
             .HasForeignKey(tm => tm.UserId)
             .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<TripActivity>()
+            .HasOne(a => a.Trip)
+            .WithMany()
+            .HasForeignKey(a => a.TripId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<TripActivity>()
+            .HasOne(a => a.AssignedTo)
+            .WithMany()
+            .HasForeignKey(a => a.AssignedToUserId)
+            .OnDelete(DeleteBehavior.SetNull)
+            .IsRequired(false);
     }
 }

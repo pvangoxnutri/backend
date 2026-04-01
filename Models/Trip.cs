@@ -10,6 +10,13 @@ public class Trip
     public DateOnly EndDate { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
+    public string? ImageUrl { get; set; }
+
+    // Hidden SideQuest fields
+    public string Visibility { get; set; } = "public"; // "public" | "hidden"
+    public DateTime? RevealAt { get; set; }
+    public string? Teaser { get; set; }
+
     public Guid OwnerId { get; set; }
     public User Owner { get; set; } = null!;
 }

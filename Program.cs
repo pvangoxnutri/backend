@@ -43,11 +43,24 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
+// Run pending migrations and ensure uploads directory exists
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    db.Database.Migrate();
+}
+
+var uploadsPath = Path.Combine(
+    app.Environment.WebRootPath ?? Path.Combine(Directory.GetCurrentDirectory(), "wwwroot"),
+    "uploads");
+Directory.CreateDirectory(uploadsPath);
+
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
 }
 
+app.UseStaticFiles();
 app.UseHttpsRedirection();
 app.UseCors("LocalFrontend");
 app.UseAuthentication();

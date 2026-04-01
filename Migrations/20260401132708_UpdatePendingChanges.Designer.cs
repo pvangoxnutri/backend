@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using sidequest.backend.Data;
@@ -11,9 +12,11 @@ using sidequest.backend.Data;
 namespace sidequest.backend.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260401132708_UpdatePendingChanges")]
+    partial class UpdatePendingChanges
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -47,20 +50,10 @@ namespace sidequest.backend.Migrations
                     b.Property<Guid>("OwnerId")
                         .HasColumnType("uuid");
 
-                    b.Property<DateTime?>("RevealAt")
-                        .HasColumnType("timestamp with time zone");
-
                     b.Property<DateOnly>("StartDate")
                         .HasColumnType("date");
 
-                    b.Property<string>("Teaser")
-                        .HasColumnType("text");
-
                     b.Property<string>("Title")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("Visibility")
                         .IsRequired()
                         .HasColumnType("text");
 
@@ -120,9 +113,6 @@ namespace sidequest.backend.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
-                    b.Property<bool>("IsOwner")
-                        .HasColumnType("boolean");
-
                     b.Property<DateTime>("JoinedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -163,10 +153,6 @@ namespace sidequest.backend.Migrations
                         .HasColumnType("text");
 
                     b.Property<string>("PasswordHash")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("Role")
                         .IsRequired()
                         .HasColumnType("text");
 

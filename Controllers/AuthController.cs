@@ -1,6 +1,7 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -45,7 +46,8 @@ public class AuthController : ControllerBase
             Id = user.Id,
             Name = user.Name,
             Email = user.Email,
-            AvatarUrl = user.AvatarUrl
+            AvatarUrl = user.AvatarUrl,
+            Role = user.Role
         });
     }
 
@@ -63,8 +65,69 @@ public class AuthController : ControllerBase
             Id = user.Id,
             Name = user.Name,
             Email = user.Email,
-            AvatarUrl = user.AvatarUrl
+            AvatarUrl = user.AvatarUrl,
+            Role = user.Role
         });
+    }
+
+    [HttpGet("me")]
+    [Authorize]
+    public async Task<ActionResult<AuthResponseDto>> GetMe()
+    {
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        var user = await _db.Users.FindAsync(userId);
+        if (user == null) return NotFound();
+
+        return Ok(new AuthResponseDto
+        {
+            Token = string.Empty,
+            Id = user.Id,
+            Name = user.Name,
+            Email = user.Email,
+            AvatarUrl = user.AvatarUrl,
+            Role = user.Role
+        });
+    }
+
+    [HttpPatch("profile")]
+    [Authorize]
+    public async Task<ActionResult<AuthResponseDto>> UpdateProfile([FromBody] UpdateProfileDto dto)
+    {
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        var user = await _db.Users.FindAsync(userId);
+        if (user == null) return NotFound();
+
+        if (!string.IsNullOrWhiteSpace(dto.Name)) user.Name = dto.Name.Trim();
+        if (dto.AvatarUrl != null) user.AvatarUrl = dto.AvatarUrl;
+
+        await _db.SaveChangesAsync();
+
+        return Ok(new AuthResponseDto
+        {
+            Token = GenerateToken(user),
+            Id = user.Id,
+            Name = user.Name,
+            Email = user.Email,
+            AvatarUrl = user.AvatarUrl,
+            Role = user.Role
+        });
+    }
+
+    [HttpPatch("password")]
+    [Authorize]
+    public async Task<ActionResult> ChangePassword([FromBody] ChangePasswordDto dto)
+    {
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        var user = await _db.Users.FindAsync(userId);
+        if (user == null) return NotFound();
+
+        if (!BCrypt.Net.BCrypt.Verify(dto.CurrentPassword, user.PasswordHash))
+            return BadRequest("Current password is incorrect.");
+
+        user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(dto.NewPassword);
+        await _db.SaveChangesAsync();
+
+        return Ok();
     }
 
     private string GenerateToken(User user)
@@ -76,7 +139,8 @@ public class AuthController : ControllerBase
         {
             new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
             new Claim(ClaimTypes.Email, user.Email),
-            new Claim(ClaimTypes.Name, user.Name)
+            new Claim(ClaimTypes.Name, user.Name),
+            new Claim(ClaimTypes.Role, user.Role)
         };
 
         var token = new JwtSecurityToken(
