@@ -16,7 +16,7 @@ public class ImagesController : ControllerBase
 
     [HttpPost("upload")]
     [Authorize]
-    public async Task<ActionResult<object>> Upload(IFormFile file)
+    public async Task<ActionResult<object>> Upload([FromForm] IFormFile file)
     {
         if (file == null || file.Length == 0)
             return BadRequest("No file uploaded.");

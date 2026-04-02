@@ -1,31 +1,72 @@
-using System.Text;
+using System.Security.Claims;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using sidequest.backend.Data;
-using sidequest.backend.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
-builder.Services.AddSingleton<GoogleTokenVerifier>();
 
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
 
+var supabaseUrl = builder.Configuration["Supabase:Url"]?.TrimEnd('/');
+var supabaseAudience = builder.Configuration["Supabase:JwtAudience"] ?? "authenticated";
+
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
+        if (string.IsNullOrWhiteSpace(supabaseUrl))
+            throw new InvalidOperationException("Supabase:Url must be configured.");
+
+        options.Authority = $"{supabaseUrl}/auth/v1";
+        options.MapInboundClaims = false;
         options.TokenValidationParameters = new TokenValidationParameters
         {
             ValidateIssuer = true,
             ValidateAudience = true,
             ValidateLifetime = true,
             ValidateIssuerSigningKey = true,
-            ValidIssuer = builder.Configuration["Jwt:Issuer"],
-            ValidAudience = builder.Configuration["Jwt:Audience"],
-            IssuerSigningKey = new SymmetricSecurityKey(
-                Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"]!))
+            ValidIssuer = $"{supabaseUrl}/auth/v1",
+            ValidAudience = supabaseAudience,
+            NameClaimType = ClaimTypes.NameIdentifier,
+            RoleClaimType = ClaimTypes.Role
+        };
+        options.Events = new JwtBearerEvents
+        {
+            OnTokenValidated = async context =>
+            {
+                var identity = context.Principal?.Identity as ClaimsIdentity;
+                if (identity == null)
+                    return;
+
+                var subject = context.Principal?.FindFirst("sub")?.Value;
+                if (!string.IsNullOrWhiteSpace(subject) && !identity.HasClaim(ClaimTypes.NameIdentifier, subject))
+                {
+                    identity.AddClaim(new Claim(ClaimTypes.NameIdentifier, subject));
+                }
+
+                var email = context.Principal?.FindFirst("email")?.Value;
+                if (!string.IsNullOrWhiteSpace(email) && !identity.HasClaim(ClaimTypes.Email, email))
+                {
+                    identity.AddClaim(new Claim(ClaimTypes.Email, email));
+                }
+
+                var db = context.HttpContext.RequestServices.GetRequiredService<AppDbContext>();
+                if (Guid.TryParse(subject, out var userId))
+                {
+                    var role = await db.Users
+                        .Where(u => u.Id == userId)
+                        .Select(u => u.Role)
+                        .FirstOrDefaultAsync(context.HttpContext.RequestAborted);
+
+                    if (!string.IsNullOrWhiteSpace(role) && !identity.HasClaim(ClaimTypes.Role, role))
+                    {
+                        identity.AddClaim(new Claim(ClaimTypes.Role, role));
+                    }
+                }
+            }
         };
     });
 
@@ -63,7 +104,10 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseStaticFiles();
-app.UseHttpsRedirection();
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHttpsRedirection();
+}
 app.UseCors("LocalFrontend");
 app.UseAuthentication();
 app.UseAuthorization();

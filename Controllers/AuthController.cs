@@ -1,14 +1,10 @@
-using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
-using System.Text;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.IdentityModel.Tokens;
 using sidequest.backend.Data;
 using sidequest.backend.Dtos;
 using sidequest.backend.Models;
-using sidequest.backend.Services;
 
 namespace sidequest.backend.Controllers;
 
@@ -17,171 +13,80 @@ namespace sidequest.backend.Controllers;
 public class AuthController : ControllerBase
 {
     private readonly AppDbContext _db;
-    private readonly IConfiguration _config;
-    private readonly GoogleTokenVerifier _googleTokenVerifier;
 
-    public AuthController(AppDbContext db, IConfiguration config, GoogleTokenVerifier googleTokenVerifier)
+    public AuthController(AppDbContext db)
     {
         _db = db;
-        _config = config;
-        _googleTokenVerifier = googleTokenVerifier;
     }
 
-    [HttpPost("register")]
-    public async Task<ActionResult<AuthResponseDto>> Register([FromBody] RegisterDto dto)
+    [HttpPost("sync")]
+    [Authorize]
+    public async Task<ActionResult<AuthResponseDto>> Sync([FromBody] SyncAuthUserDto? dto, CancellationToken cancellationToken)
     {
-        if (await _db.Users.AnyAsync(u => u.Email == dto.Email))
-            return Conflict("A user with this email already exists.");
-
-        var user = new User
-        {
-            Name = dto.Name,
-            Email = dto.Email,
-            PasswordHash = BCrypt.Net.BCrypt.HashPassword(dto.Password)
-        };
-
-        _db.Users.Add(user);
-        await _db.SaveChangesAsync();
-
-        return Ok(new AuthResponseDto
-        {
-            Token = GenerateToken(user),
-            Id = user.Id,
-            Name = user.Name,
-            Email = user.Email,
-            AvatarUrl = user.AvatarUrl,
-            Role = user.Role
-        });
-    }
-
-    [HttpPost("login")]
-    public async Task<ActionResult<AuthResponseDto>> Login([FromBody] LoginDto dto)
-    {
-        var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == dto.Email);
-
-        if (user == null)
-            return Unauthorized("Invalid email or password.");
-
-        if (string.IsNullOrWhiteSpace(user.PasswordHash))
-            return Unauthorized("This account uses Google sign-in.");
-
-        if (!BCrypt.Net.BCrypt.Verify(dto.Password, user.PasswordHash))
-            return Unauthorized("Invalid email or password.");
-
+        var user = await GetOrCreateCurrentUserAsync(dto, cancellationToken);
         return Ok(CreateAuthResponse(user));
     }
 
-    [HttpPost("google")]
-    public async Task<ActionResult<AuthResponseDto>> GoogleLogin([FromBody] GoogleLoginDto dto, CancellationToken cancellationToken)
+    [HttpGet("me")]
+    [Authorize]
+    public async Task<ActionResult<AuthResponseDto>> GetMe(CancellationToken cancellationToken)
     {
-        var clientId = _config["GoogleAuth:ClientId"];
-        if (string.IsNullOrWhiteSpace(clientId))
-            return StatusCode(StatusCodes.Status503ServiceUnavailable, "Google sign-in is not configured.");
+        var user = await GetOrCreateCurrentUserAsync(null, cancellationToken);
+        return Ok(CreateAuthResponse(user));
+    }
 
-        var payload = await _googleTokenVerifier.VerifyAsync(dto.IdToken, clientId, cancellationToken);
-        if (payload == null)
-            return Unauthorized("Google sign-in could not be verified.");
+    [HttpPatch("profile")]
+    [Authorize]
+    public async Task<ActionResult<AuthResponseDto>> UpdateProfile([FromBody] UpdateProfileDto dto, CancellationToken cancellationToken)
+    {
+        var user = await GetOrCreateCurrentUserAsync(null, cancellationToken);
 
-        var normalizedEmail = payload.Email.Trim().ToLowerInvariant();
-
-        var user = await _db.Users.FirstOrDefaultAsync(
-            u => u.AuthProvider == "google" && u.AuthProviderSubject == payload.Subject,
-            cancellationToken);
-
-        if (user == null)
-        {
-            user = await _db.Users.FirstOrDefaultAsync(u => u.Email == normalizedEmail, cancellationToken);
-        }
-
-        if (user == null)
-        {
-            user = new User
-            {
-                Name = payload.Name.Trim(),
-                Email = normalizedEmail,
-                PasswordHash = string.Empty,
-                AuthProvider = "google",
-                AuthProviderSubject = payload.Subject,
-                AvatarUrl = payload.Picture
-            };
-
-            _db.Users.Add(user);
-        }
-        else
-        {
-            user.AuthProvider = "google";
-            user.AuthProviderSubject = payload.Subject;
-
-            if (string.IsNullOrWhiteSpace(user.Name))
-                user.Name = payload.Name.Trim();
-
-            if (string.IsNullOrWhiteSpace(user.AvatarUrl) && !string.IsNullOrWhiteSpace(payload.Picture))
-                user.AvatarUrl = payload.Picture;
-        }
+        if (!string.IsNullOrWhiteSpace(dto.Name)) user.Name = dto.Name.Trim();
+        if (dto.AvatarUrl != null) user.AvatarUrl = dto.AvatarUrl;
 
         await _db.SaveChangesAsync(cancellationToken);
 
         return Ok(CreateAuthResponse(user));
     }
 
-    private AuthResponseDto CreateAuthResponse(User user)
+    private async Task<User> GetOrCreateCurrentUserAsync(SyncAuthUserDto? dto, CancellationToken cancellationToken)
     {
-        return new AuthResponseDto
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        var email = User.FindFirstValue(ClaimTypes.Email)?.Trim().ToLowerInvariant();
+
+        if (string.IsNullOrWhiteSpace(email))
+            throw new InvalidOperationException("Authenticated Supabase user is missing an email claim.");
+
+        var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
+        if (user == null)
         {
-            Token = GenerateToken(user),
-            Id = user.Id,
-            Name = user.Name,
-            Email = user.Email,
-            AvatarUrl = user.AvatarUrl,
-            Role = user.Role
-        };
+            user = new User
+            {
+                Id = userId,
+                Email = email,
+                Name = dto?.Name?.Trim() ?? User.FindFirstValue(ClaimTypes.Name) ?? email,
+                AvatarUrl = dto?.AvatarUrl,
+                Role = "user"
+            };
+
+            _db.Users.Add(user);
+        }
+        else
+        {
+            user.Email = email;
+
+            if (!string.IsNullOrWhiteSpace(dto?.Name))
+                user.Name = dto.Name.Trim();
+
+            if (dto?.AvatarUrl != null)
+                user.AvatarUrl = dto.AvatarUrl;
+        }
+
+        await _db.SaveChangesAsync(cancellationToken);
+        return user;
     }
 
-    [HttpGet("me")]
-    [Authorize]
-    public async Task<ActionResult<AuthResponseDto>> GetMe()
-    {
-        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
-        var user = await _db.Users.FindAsync(userId);
-        if (user == null) return NotFound();
-
-        return Ok(CreateProfileResponse(user));
-    }
-
-    [HttpPatch("profile")]
-    [Authorize]
-    public async Task<ActionResult<AuthResponseDto>> UpdateProfile([FromBody] UpdateProfileDto dto)
-    {
-        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
-        var user = await _db.Users.FindAsync(userId);
-        if (user == null) return NotFound();
-
-        if (!string.IsNullOrWhiteSpace(dto.Name)) user.Name = dto.Name.Trim();
-        if (dto.AvatarUrl != null) user.AvatarUrl = dto.AvatarUrl;
-
-        await _db.SaveChangesAsync();
-
-        return Ok(CreateAuthResponse(user));
-    }
-
-    [HttpPatch("password")]
-    [Authorize]
-    public async Task<ActionResult> ChangePassword([FromBody] ChangePasswordDto dto)
-    {
-        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
-        var user = await _db.Users.FindAsync(userId);
-        if (user == null) return NotFound();
-
-        if (!BCrypt.Net.BCrypt.Verify(dto.CurrentPassword, user.PasswordHash))
-            return BadRequest("Current password is incorrect.");
-
-        user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(dto.NewPassword);
-        await _db.SaveChangesAsync();
-
-        return Ok();
-    }
-
-    private AuthResponseDto CreateProfileResponse(User user)
+    private static AuthResponseDto CreateAuthResponse(User user)
     {
         return new AuthResponseDto
         {
@@ -189,31 +94,9 @@ public class AuthController : ControllerBase
             Id = user.Id,
             Name = user.Name,
             Email = user.Email,
+            EmailVerified = true,
             AvatarUrl = user.AvatarUrl,
             Role = user.Role
         };
-    }
-
-    private string GenerateToken(User user)
-    {
-        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_config["Jwt:Key"]!));
-        var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-
-        var claims = new[]
-        {
-            new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
-            new Claim(ClaimTypes.Email, user.Email),
-            new Claim(ClaimTypes.Name, user.Name),
-            new Claim(ClaimTypes.Role, user.Role)
-        };
-
-        var token = new JwtSecurityToken(
-            issuer: _config["Jwt:Issuer"],
-            audience: _config["Jwt:Audience"],
-            claims: claims,
-            expires: DateTime.UtcNow.AddDays(7),
-            signingCredentials: creds);
-
-        return new JwtSecurityTokenHandler().WriteToken(token);
     }
 }

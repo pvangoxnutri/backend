@@ -6,8 +6,6 @@ public class User
     public string Name { get; set; } = string.Empty;
     public string Email { get; set; } = string.Empty;
     public string PasswordHash { get; set; } = string.Empty;
-    public string? AuthProvider { get; set; }
-    public string? AuthProviderSubject { get; set; }
     public string? AvatarUrl { get; set; }
     public string Role { get; set; } = "user"; // "user" | "admin"
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;

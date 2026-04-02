@@ -15,6 +15,7 @@ public class CreateTripDto
     public string Destination { get; set; } = string.Empty;
 
     public string? ImageUrl { get; set; }
+    public string? InviteCode { get; set; }
 
     [Required]
     public DateOnly StartDate { get; set; }

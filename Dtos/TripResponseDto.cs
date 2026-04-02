@@ -16,6 +16,7 @@ public class TripResponseDto
     public Guid OwnerId { get; set; }
     public string? ImageUrl { get; set; }
     public string? Destination { get; set; }
+    public string InviteCode { get; set; } = string.Empty;
 
     // Only returned when canViewFull
     public string? Title { get; set; }

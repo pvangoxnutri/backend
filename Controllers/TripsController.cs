@@ -34,6 +34,19 @@ public class TripsController : ControllerBase
     private static bool CanEdit(Guid userId, Trip trip, List<Guid> ownerIds)
         => ownerIds.Contains(userId) && !IsRevealedNow(trip);
 
+    private static string NormalizeInviteCode(string? inviteCode)
+    {
+        var normalized = (inviteCode ?? string.Empty)
+            .Trim()
+            .ToUpperInvariant()
+            .Replace(" ", string.Empty);
+
+        return normalized.Length >= 6 ? normalized[..6] : normalized;
+    }
+
+    private static string GenerateInviteCode()
+        => Convert.ToHexString(Guid.NewGuid().ToByteArray())[..6];
+
     /// canAdminOverride: user has admin role in their JWT
     private bool IsAdmin()
         => User.FindFirstValue(ClaimTypes.Role) == "admin";
@@ -59,6 +72,7 @@ public class TripsController : ControllerBase
             OwnerId = trip.OwnerId,
             ImageUrl = trip.ImageUrl,        // always (frontend blurs when hidden)
             Destination = trip.Destination,  // always (shown in date/location row)
+            InviteCode = trip.InviteCode,
             Title = canViewFull ? trip.Title : null,
             Description = canViewFull ? trip.Description : null,
         };
@@ -111,11 +125,17 @@ public class TripsController : ControllerBase
             StartDate = dto.StartDate,
             EndDate = dto.EndDate,
             ImageUrl = dto.ImageUrl,
+            InviteCode = NormalizeInviteCode(dto.InviteCode),
             OwnerId = userId,
             Visibility = dto.Visibility == "hidden" ? "hidden" : "public",
             RevealAt = dto.RevealAt,
             Teaser = dto.Teaser,
         };
+
+        if (string.IsNullOrWhiteSpace(trip.InviteCode))
+        {
+            trip.InviteCode = GenerateInviteCode();
+        }
 
         _db.Trips.Add(trip);
         // Creator is always an owner
@@ -241,6 +261,76 @@ public class TripsController : ControllerBase
     }
 
     // ── POST /api/trips/{id}/invite ───────────────────────────────────────────
+
+    [HttpGet("{id}/invites")]
+    [Authorize]
+    public async Task<ActionResult<List<TripInviteDto>>> GetTripInvites(Guid id)
+    {
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+
+        if (!await _db.Trips.AnyAsync(t => t.Id == id))
+            return NotFound();
+
+        if (!await _db.TripMembers.AnyAsync(tm => tm.TripId == id && tm.UserId == userId))
+            return Forbid();
+
+        var invites = await _db.TripInvites
+            .Where(ti => ti.TripId == id)
+            .OrderBy(ti => ti.CreatedAt)
+            .Select(ti => new TripInviteDto
+            {
+                Id = ti.Id,
+                Email = ti.Email,
+                Status = ti.Status,
+                CreatedAt = ti.CreatedAt
+            })
+            .ToListAsync();
+
+        return Ok(invites);
+    }
+
+    [HttpPost("{id}/invites")]
+    [Authorize]
+    public async Task<ActionResult<TripInviteDto>> CreateTripInvite(Guid id, [FromBody] CreateTripInviteDto dto)
+    {
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+
+        var trip = await _db.Trips.FindAsync(id);
+        if (trip == null) return NotFound();
+
+        var ownerIds = await GetOwnerIds(id);
+        if (!ownerIds.Contains(userId)) return Forbid();
+
+        var normalizedEmail = dto.Email.Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(normalizedEmail))
+            return BadRequest("Email is required.");
+
+        var existingUser = await _db.Users.FirstOrDefaultAsync(u => u.Email == normalizedEmail);
+        if (existingUser != null && await _db.TripMembers.AnyAsync(tm => tm.TripId == id && tm.UserId == existingUser.Id))
+            return Conflict("User is already a member of this trip.");
+
+        if (await _db.TripInvites.AnyAsync(ti => ti.TripId == id && ti.Email == normalizedEmail))
+            return Conflict("That email is already invited.");
+
+        var invite = new TripInvite
+        {
+            TripId = id,
+            InvitedByUserId = userId,
+            Email = normalizedEmail,
+            Status = "pending"
+        };
+
+        _db.TripInvites.Add(invite);
+        await _db.SaveChangesAsync();
+
+        return Ok(new TripInviteDto
+        {
+            Id = invite.Id,
+            Email = invite.Email,
+            Status = invite.Status,
+            CreatedAt = invite.CreatedAt
+        });
+    }
 
     [HttpPost("{id}/invite")]
     [Authorize]
