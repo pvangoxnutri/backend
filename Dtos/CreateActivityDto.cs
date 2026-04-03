@@ -16,4 +16,14 @@ public class CreateActivityDto
     public string? Time { get; set; }
 
     public string? Category { get; set; }
+
+    public string? ImageUrl { get; set; }
+
+    public string Visibility { get; set; } = "public";
+
+    public DateTime? RevealAt { get; set; }
+
+    public string? Teaser { get; set; }
+
+    public int? TeaserOffsetMinutes { get; set; }
 }

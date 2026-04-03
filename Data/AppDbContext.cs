@@ -52,6 +52,12 @@ public class AppDbContext : DbContext
             .OnDelete(DeleteBehavior.Cascade);
 
         modelBuilder.Entity<TripActivity>()
+            .HasOne(a => a.Owner)
+            .WithMany()
+            .HasForeignKey(a => a.OwnerId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        modelBuilder.Entity<TripActivity>()
             .HasOne(a => a.AssignedTo)
             .WithMany()
             .HasForeignKey(a => a.AssignedToUserId)

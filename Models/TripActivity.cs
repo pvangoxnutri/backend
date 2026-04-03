@@ -10,7 +10,14 @@ public class TripActivity
     public string? Description { get; set; }
     public string? Time { get; set; }
     public string? Category { get; set; }
+    public string? ImageUrl { get; set; }
+    public string Visibility { get; set; } = "public";
+    public DateTime? RevealAt { get; set; }
+    public string? Teaser { get; set; }
+    public int? TeaserOffsetMinutes { get; set; }
     public bool IsHidden { get; set; } = false;
+    public Guid OwnerId { get; set; }
+    public User Owner { get; set; } = null!;
     public Guid? AssignedToUserId { get; set; }
     public User? AssignedTo { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;

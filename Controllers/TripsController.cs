@@ -24,15 +24,121 @@ public class TripsController : ControllerBase
     private static bool IsRevealedNow(Trip trip)
         => trip.RevealAt.HasValue && DateTime.UtcNow >= trip.RevealAt.Value;
 
+    private static bool IsActivityRevealedNow(TripActivity activity)
+        => activity.RevealAt.HasValue && DateTime.UtcNow >= activity.RevealAt.Value;
+
     /// canViewFull: owner, OR public visibility, OR already revealed
     private static bool CanViewFull(Guid userId, Trip trip, List<Guid> ownerIds)
         => ownerIds.Contains(userId)
         || trip.Visibility == "public"
         || IsRevealedNow(trip);
 
-    /// canEdit: must be owner AND not yet revealed
-    private static bool CanEdit(Guid userId, Trip trip, List<Guid> ownerIds)
-        => ownerIds.Contains(userId) && !IsRevealedNow(trip);
+    private static bool CanViewActivityFull(Guid userId, TripActivity activity)
+        => activity.OwnerId == userId
+        || activity.Visibility == "public"
+        || IsActivityRevealedNow(activity);
+
+    private static bool CanEditActivity(Guid userId, TripActivity activity)
+        => activity.OwnerId == userId;
+
+    private static bool IsTeaserVisibleNow(TripActivity activity)
+    {
+        if (activity.Visibility != "hidden"
+            || string.IsNullOrWhiteSpace(activity.Teaser)
+            || !activity.RevealAt.HasValue
+            || !activity.TeaserOffsetMinutes.HasValue
+            || activity.TeaserOffsetMinutes.Value <= 0)
+        {
+            return false;
+        }
+
+        var teaserStart = activity.RevealAt.Value.AddMinutes(-activity.TeaserOffsetMinutes.Value);
+        var now = DateTime.UtcNow;
+        return now >= teaserStart && now < activity.RevealAt.Value;
+    }
+
+    private static string NormalizeVisibility(string? visibility)
+        => visibility == "hidden" ? "hidden" : "public";
+
+    private static string? NormalizeOptionalText(string? value)
+        => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    private static ActivityResponseDto BuildActivityResponse(Guid userId, TripActivity activity)
+    {
+        var canViewFull = CanViewActivityFull(userId, activity);
+        var teaserVisible = !canViewFull && IsTeaserVisibleNow(activity);
+
+        return new ActivityResponseDto
+        {
+            Id = activity.Id,
+            TripId = activity.TripId,
+            Date = activity.Date,
+            Title = canViewFull ? activity.Title : null,
+            Description = canViewFull ? activity.Description : null,
+            Time = activity.Time,
+            Category = activity.Category,
+            ImageUrl = activity.ImageUrl,
+            Visibility = activity.Visibility,
+            RevealAt = activity.RevealAt,
+            IsRevealed = IsActivityRevealedNow(activity),
+            Teaser = canViewFull || teaserVisible ? activity.Teaser : null,
+            TeaserOffsetMinutes = activity.TeaserOffsetMinutes,
+            IsHiddenForViewer = !canViewFull,
+            TeaserVisible = teaserVisible,
+            CanEdit = CanEditActivity(userId, activity),
+            IsHidden = activity.Visibility == "hidden",
+            OwnerId = activity.OwnerId,
+            OwnerName = activity.Owner?.Name,
+            OwnerAvatarUrl = activity.Owner?.AvatarUrl,
+            AssignedToUserId = activity.AssignedToUserId,
+            AssignedToName = activity.AssignedTo?.Name,
+            CreatedAt = activity.CreatedAt,
+        };
+    }
+
+    private static string? ValidateActivityPayload(
+        string visibility,
+        DateTime? revealAt,
+        string? teaser,
+        int? teaserOffsetMinutes)
+    {
+        if (visibility == "hidden" && !revealAt.HasValue)
+        {
+            return "Hidden SideQuests need a reveal date and time.";
+        }
+
+        if (visibility != "hidden" && (revealAt.HasValue || !string.IsNullOrWhiteSpace(teaser) || teaserOffsetMinutes.HasValue))
+        {
+            return "Reveal and teaser settings are only available for hidden SideQuests.";
+        }
+
+        if (!string.IsNullOrWhiteSpace(teaser) && !teaserOffsetMinutes.HasValue)
+        {
+            return "Choose when the teaser should appear before reveal.";
+        }
+
+        if (teaserOffsetMinutes.HasValue && teaserOffsetMinutes.Value <= 0)
+        {
+            return "Teaser timing must be greater than zero.";
+        }
+
+        if (teaserOffsetMinutes.HasValue && !revealAt.HasValue)
+        {
+            return "Teaser timing needs a reveal date and time.";
+        }
+
+        return null;
+    }
+
+    private static string? ValidateTripDateRange(DateOnly? startDate, DateOnly? endDate)
+    {
+        if (startDate.HasValue && endDate.HasValue && endDate.Value < startDate.Value)
+        {
+            return "End date must be the same day or later than start date.";
+        }
+
+        return null;
+    }
 
     private static string NormalizeInviteCode(string? inviteCode)
     {
@@ -184,13 +290,28 @@ public class TripsController : ControllerBase
 
         if (!isOwner && !isAdmin) return Forbid();
 
+        var nextStartDate = dto.StartDate ?? trip.StartDate;
+        var nextEndDate = dto.EndDate ?? trip.EndDate;
+        var tripDateError = ValidateTripDateRange(nextStartDate, nextEndDate);
+        if (tripDateError != null) return BadRequest(tripDateError);
+
+        var outOfRangeActivityExists = await _db.TripActivities.AnyAsync(activity =>
+            activity.TripId == id
+            && (activity.Date < nextStartDate || activity.Date > nextEndDate));
+
+        if (outOfRangeActivityExists)
+        {
+            return BadRequest("One or more SideQuests fall outside the updated trip dates.");
+        }
+
         if (isOwner && !revealed)
         {
             // Owners can edit all fields before reveal
             if (dto.Title != null) trip.Title = dto.Title;
             if (dto.Description != null) trip.Description = dto.Description;
             if (dto.Destination != null) trip.Destination = dto.Destination;
-            if (dto.ImageUrl != null) trip.ImageUrl = dto.ImageUrl;
+            if (dto.ClearImage) trip.ImageUrl = null;
+            else if (dto.ImageUrl != null) trip.ImageUrl = dto.ImageUrl;
             if (dto.Visibility != null) trip.Visibility = dto.Visibility;
             if (dto.Teaser != null) trip.Teaser = dto.Teaser;
             if (dto.StartDate.HasValue) trip.StartDate = dto.StartDate.Value;
@@ -436,6 +557,50 @@ public class TripsController : ControllerBase
         return NoContent();
     }
 
+    [HttpDelete("{id}/members/{targetUserId}")]
+    [Authorize]
+    public async Task<ActionResult> RemoveMember(Guid id, Guid targetUserId)
+    {
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        var isAdmin = IsAdmin();
+
+        var trip = await _db.Trips.FindAsync(id);
+        if (trip == null) return NotFound();
+
+        var ownerIds = await GetOwnerIds(id);
+        if (!ownerIds.Contains(userId) && !isAdmin) return Forbid();
+
+        var member = await _db.TripMembers
+            .FirstOrDefaultAsync(tm => tm.TripId == id && tm.UserId == targetUserId);
+        if (member == null) return NotFound("Member not found.");
+
+        if (member.IsOwner)
+        {
+            return BadRequest("Remove owner access first before removing this member.");
+        }
+
+        _db.TripMembers.Remove(member);
+        await _db.SaveChangesAsync();
+        return NoContent();
+    }
+
+    [HttpDelete("{id}/invites/{inviteId}")]
+    [Authorize]
+    public async Task<ActionResult> DeleteTripInvite(Guid id, Guid inviteId)
+    {
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        var ownerIds = await GetOwnerIds(id);
+        if (!ownerIds.Contains(userId)) return Forbid();
+
+        var invite = await _db.TripInvites
+            .FirstOrDefaultAsync(ti => ti.Id == inviteId && ti.TripId == id);
+        if (invite == null) return NotFound();
+
+        _db.TripInvites.Remove(invite);
+        await _db.SaveChangesAsync();
+        return NoContent();
+    }
+
     // ── POST /api/trips/{id}/admin/claim-ownership ────────────────────────────
     // Admin takeover when a trip has no owners left
 
@@ -486,23 +651,30 @@ public class TripsController : ControllerBase
             .OrderBy(a => a.Date)
             .ThenBy(a => a.Time)
             .ThenBy(a => a.CreatedAt)
-            .Select(a => new ActivityResponseDto
-            {
-                Id = a.Id,
-                TripId = a.TripId,
-                Date = a.Date,
-                Title = a.Title,
-                Description = a.Description,
-                Time = a.Time,
-                Category = a.Category,
-                IsHidden = a.IsHidden,
-                AssignedToUserId = a.AssignedToUserId,
-                AssignedToName = a.AssignedTo != null ? a.AssignedTo.Name : null,
-                CreatedAt = a.CreatedAt
-            })
+            .Include(a => a.Owner)
+            .Include(a => a.AssignedTo)
             .ToListAsync();
 
-        return Ok(activities);
+        return Ok(activities.Select(activity => BuildActivityResponse(userId, activity)).ToList());
+    }
+
+    [HttpGet("{id}/activities/{activityId}")]
+    [Authorize]
+    public async Task<ActionResult<ActivityResponseDto>> GetActivity(Guid id, Guid activityId)
+    {
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+
+        if (!await _db.TripMembers.AnyAsync(tm => tm.TripId == id && tm.UserId == userId))
+            return Forbid();
+
+        var activity = await _db.TripActivities
+            .Include(a => a.Owner)
+            .Include(a => a.AssignedTo)
+            .FirstOrDefaultAsync(a => a.Id == activityId && a.TripId == id);
+
+        if (activity == null) return NotFound();
+
+        return Ok(BuildActivityResponse(userId, activity));
     }
 
     // ── POST /api/trips/{id}/activities ───────────────────────────────────────
@@ -516,36 +688,40 @@ public class TripsController : ControllerBase
         if (!await _db.TripMembers.AnyAsync(tm => tm.TripId == id && tm.UserId == userId))
             return Forbid();
 
-        var user = await _db.Users.FindAsync(userId);
+        var visibility = NormalizeVisibility(dto.Visibility);
+        var teaser = NormalizeOptionalText(dto.Teaser);
+        var validationError = ValidateActivityPayload(visibility, dto.RevealAt, teaser, dto.TeaserOffsetMinutes);
+
+        if (validationError != null)
+            return BadRequest(validationError);
 
         var activity = new TripActivity
         {
             TripId = id,
             Date = dto.Date,
-            Title = dto.Title,
-            Description = dto.Description,
-            Time = dto.Time,
-            Category = dto.Category,
+            Title = dto.Title.Trim(),
+            Description = NormalizeOptionalText(dto.Description),
+            Time = NormalizeOptionalText(dto.Time),
+            Category = NormalizeOptionalText(dto.Category),
+            ImageUrl = NormalizeOptionalText(dto.ImageUrl),
+            Visibility = visibility,
+            RevealAt = visibility == "hidden" ? dto.RevealAt : null,
+            Teaser = visibility == "hidden" ? teaser : null,
+            TeaserOffsetMinutes = visibility == "hidden" ? dto.TeaserOffsetMinutes : null,
+            IsHidden = visibility == "hidden",
+            OwnerId = userId,
             AssignedToUserId = userId
         };
 
         _db.TripActivities.Add(activity);
         await _db.SaveChangesAsync();
 
-        return Ok(new ActivityResponseDto
-        {
-            Id = activity.Id,
-            TripId = activity.TripId,
-            Date = activity.Date,
-            Title = activity.Title,
-            Description = activity.Description,
-            Time = activity.Time,
-            Category = activity.Category,
-            IsHidden = activity.IsHidden,
-            AssignedToUserId = activity.AssignedToUserId,
-            AssignedToName = user?.Name,
-            CreatedAt = activity.CreatedAt
-        });
+        var created = await _db.TripActivities
+            .Include(a => a.Owner)
+            .Include(a => a.AssignedTo)
+            .FirstAsync(a => a.Id == activity.Id);
+
+        return Ok(BuildActivityResponse(userId, created));
     }
 
     // ── PATCH /api/trips/{id}/activities/{activityId} ─────────────────────────
@@ -559,9 +735,30 @@ public class TripsController : ControllerBase
         var activity = await _db.TripActivities
             .FirstOrDefaultAsync(a => a.Id == activityId && a.TripId == id);
         if (activity == null) return NotFound();
-        if (activity.AssignedToUserId != userId) return Forbid();
+        if (!CanEditActivity(userId, activity)) return Forbid();
 
-        if (dto.IsHidden.HasValue) activity.IsHidden = dto.IsHidden.Value;
+        var nextVisibility = dto.Visibility != null ? NormalizeVisibility(dto.Visibility) : activity.Visibility;
+        var nextRevealAt = dto.ClearRevealAt ? null : dto.RevealAt ?? activity.RevealAt;
+        var nextTeaser = dto.ClearTeaser ? null : dto.Teaser != null ? NormalizeOptionalText(dto.Teaser) : activity.Teaser;
+        var nextTeaserOffset = dto.ClearTeaserOffset ? null : dto.TeaserOffsetMinutes ?? activity.TeaserOffsetMinutes;
+        var validationError = ValidateActivityPayload(nextVisibility, nextRevealAt, nextTeaser, nextTeaserOffset);
+
+        if (validationError != null)
+            return BadRequest(validationError);
+
+        if (dto.Date.HasValue) activity.Date = dto.Date.Value;
+        if (dto.Title != null) activity.Title = dto.Title.Trim();
+        if (dto.Description != null) activity.Description = NormalizeOptionalText(dto.Description);
+        if (dto.Time != null) activity.Time = NormalizeOptionalText(dto.Time);
+        if (dto.Category != null) activity.Category = NormalizeOptionalText(dto.Category);
+        if (dto.ClearImage) activity.ImageUrl = null;
+        else if (dto.ImageUrl != null) activity.ImageUrl = NormalizeOptionalText(dto.ImageUrl);
+
+        activity.Visibility = nextVisibility;
+        activity.IsHidden = nextVisibility == "hidden";
+        activity.RevealAt = nextVisibility == "hidden" ? nextRevealAt : null;
+        activity.Teaser = nextVisibility == "hidden" ? nextTeaser : null;
+        activity.TeaserOffsetMinutes = nextVisibility == "hidden" ? nextTeaserOffset : null;
 
         await _db.SaveChangesAsync();
         return NoContent();
@@ -581,6 +778,7 @@ public class TripsController : ControllerBase
         var activity = await _db.TripActivities
             .FirstOrDefaultAsync(a => a.Id == activityId && a.TripId == id);
         if (activity == null) return NotFound();
+        if (!CanEditActivity(userId, activity)) return Forbid();
 
         _db.TripActivities.Remove(activity);
         await _db.SaveChangesAsync();

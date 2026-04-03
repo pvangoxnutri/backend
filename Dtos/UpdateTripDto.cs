@@ -6,6 +6,7 @@ public class UpdateTripDto
     public string? Description { get; set; }
     public string? Destination { get; set; }
     public string? ImageUrl { get; set; }
+    public bool ClearImage { get; set; }
     public DateOnly? StartDate { get; set; }
     public DateOnly? EndDate { get; set; }
 
