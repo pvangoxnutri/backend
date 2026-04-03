@@ -1,6 +1,7 @@
 ## .NET
 bin/
 obj/
+bin-temp/
 *.user
 *.suo
 .vs/
@@ -17,3 +18,7 @@ appsettings.*.json
 
 ## VS Code
 .vscode/
+
+## Runtime uploads / local generated media
+wwwroot/uploads/
+!wwwroot/uploads/.gitkeep
