@@ -22,3 +22,5 @@ appsettings.*.json
 ## Runtime uploads / local generated media
 wwwroot/uploads/
 !wwwroot/uploads/.gitkeep
+.backend.out.log
+.backend.err.log
