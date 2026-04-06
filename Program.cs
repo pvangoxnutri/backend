@@ -78,7 +78,25 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("LocalFrontend", policy =>
     {
-        policy.WithOrigins("http://localhost:3000")
+        policy.SetIsOriginAllowed(origin =>
+              {
+                  if (string.IsNullOrWhiteSpace(origin))
+                      return false;
+
+                  if (origin.StartsWith("http://localhost:", StringComparison.OrdinalIgnoreCase) ||
+                      origin.StartsWith("https://localhost:", StringComparison.OrdinalIgnoreCase))
+                  {
+                      return true;
+                  }
+
+                  if (origin.Contains(".exp.direct", StringComparison.OrdinalIgnoreCase) ||
+                      origin.Contains(".trycloudflare.com", StringComparison.OrdinalIgnoreCase))
+                  {
+                      return true;
+                  }
+
+                  return false;
+              })
               .AllowAnyHeader()
               .AllowAnyMethod();
     });

@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using sidequest.backend.Data;
@@ -11,9 +12,11 @@ using sidequest.backend.Data;
 namespace sidequest.backend.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260405132343_AddSpotifyUrlToTripActivities")]
+    partial class AddSpotifyUrlToTripActivities
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -53,9 +56,6 @@ namespace sidequest.backend.Migrations
 
                     b.Property<DateTime?>("RevealAt")
                         .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("SpotifyUrl")
-                        .HasColumnType("text");
 
                     b.Property<DateOnly>("StartDate")
                         .HasColumnType("date");

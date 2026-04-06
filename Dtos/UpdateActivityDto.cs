@@ -8,7 +8,9 @@ public class UpdateActivityDto
     public string? Time { get; set; }
     public string? Category { get; set; }
     public string? ImageUrl { get; set; }
+    public string? SpotifyUrl { get; set; }
     public bool ClearImage { get; set; }
+    public bool ClearSpotifyUrl { get; set; }
     public string? Visibility { get; set; }
     public DateTime? RevealAt { get; set; }
     public bool ClearRevealAt { get; set; }

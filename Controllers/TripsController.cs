@@ -63,6 +63,20 @@ public class TripsController : ControllerBase
     private static string? NormalizeOptionalText(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
+    private static bool IsValidSpotifyUrl(string? value)
+    {
+        var normalized = NormalizeOptionalText(value);
+        if (normalized == null)
+            return true;
+
+        if (!Uri.TryCreate(normalized, UriKind.Absolute, out var uri))
+            return false;
+
+        var host = uri.Host.ToLowerInvariant();
+        return uri.Scheme is "http" or "https"
+            && (host == "open.spotify.com" || host.EndsWith(".spotify.com") || host == "spotify.link" || host.EndsWith(".spotify.link"));
+    }
+
     private static ActivityResponseDto BuildActivityResponse(Guid userId, TripActivity activity)
     {
         var canViewFull = CanViewActivityFull(userId, activity);
@@ -78,6 +92,7 @@ public class TripsController : ControllerBase
             Time = activity.Time,
             Category = activity.Category,
             ImageUrl = activity.ImageUrl,
+            SpotifyUrl = activity.SpotifyUrl,
             Visibility = activity.Visibility,
             RevealAt = activity.RevealAt,
             IsRevealed = IsActivityRevealedNow(activity),
@@ -177,6 +192,7 @@ public class TripsController : ControllerBase
             CreatedAt = trip.CreatedAt,
             OwnerId = trip.OwnerId,
             ImageUrl = trip.ImageUrl,        // always (frontend blurs when hidden)
+            SpotifyUrl = trip.SpotifyUrl,
             Destination = trip.Destination,  // always (shown in date/location row)
             InviteCode = trip.InviteCode,
             Title = canViewFull ? trip.Title : null,
@@ -312,6 +328,13 @@ public class TripsController : ControllerBase
             if (dto.Destination != null) trip.Destination = dto.Destination;
             if (dto.ClearImage) trip.ImageUrl = null;
             else if (dto.ImageUrl != null) trip.ImageUrl = dto.ImageUrl;
+            if (dto.ClearSpotifyUrl) trip.SpotifyUrl = null;
+            else if (dto.SpotifyUrl != null)
+            {
+                if (!IsValidSpotifyUrl(dto.SpotifyUrl))
+                    return BadRequest("Spotify link must be a valid public Spotify URL.");
+                trip.SpotifyUrl = NormalizeOptionalText(dto.SpotifyUrl);
+            }
             if (dto.Visibility != null) trip.Visibility = dto.Visibility;
             if (dto.Teaser != null) trip.Teaser = dto.Teaser;
             if (dto.StartDate.HasValue) trip.StartDate = dto.StartDate.Value;
@@ -336,6 +359,29 @@ public class TripsController : ControllerBase
 
         await _db.SaveChangesAsync();
         return NoContent();
+    }
+
+    [HttpPatch("{id}/spotify")]
+    [Authorize]
+    public async Task<ActionResult<TripResponseDto>> UpdateTripSpotify(Guid id, [FromBody] UpdateTripSpotifyDto dto)
+    {
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+
+        var trip = await _db.Trips.FindAsync(id);
+        if (trip == null) return NotFound();
+
+        if (!await _db.TripMembers.AnyAsync(tm => tm.TripId == id && tm.UserId == userId))
+            return Forbid();
+
+        var nextSpotifyUrl = dto.ClearSpotifyUrl ? null : NormalizeOptionalText(dto.SpotifyUrl);
+        if (!IsValidSpotifyUrl(nextSpotifyUrl))
+            return BadRequest("Spotify link must be a valid public Spotify URL.");
+
+        trip.SpotifyUrl = nextSpotifyUrl;
+        await _db.SaveChangesAsync();
+
+        var ownerIds = await GetOwnerIds(id);
+        return Ok(BuildResponse(trip, ownerIds, CanViewFull(userId, trip, ownerIds)));
     }
 
     // ── DELETE /api/trips/{id} ────────────────────────────────────────────────
@@ -695,6 +741,9 @@ public class TripsController : ControllerBase
         if (validationError != null)
             return BadRequest(validationError);
 
+        if (!IsValidSpotifyUrl(dto.SpotifyUrl))
+            return BadRequest("Spotify link must be a valid public Spotify URL.");
+
         var activity = new TripActivity
         {
             TripId = id,
@@ -704,6 +753,7 @@ public class TripsController : ControllerBase
             Time = NormalizeOptionalText(dto.Time),
             Category = NormalizeOptionalText(dto.Category),
             ImageUrl = NormalizeOptionalText(dto.ImageUrl),
+            SpotifyUrl = NormalizeOptionalText(dto.SpotifyUrl),
             Visibility = visibility,
             RevealAt = visibility == "hidden" ? dto.RevealAt : null,
             Teaser = visibility == "hidden" ? teaser : null,
@@ -746,6 +796,10 @@ public class TripsController : ControllerBase
         if (validationError != null)
             return BadRequest(validationError);
 
+        var nextSpotifyUrl = dto.ClearSpotifyUrl ? null : dto.SpotifyUrl != null ? NormalizeOptionalText(dto.SpotifyUrl) : activity.SpotifyUrl;
+        if (!IsValidSpotifyUrl(nextSpotifyUrl))
+            return BadRequest("Spotify link must be a valid public Spotify URL.");
+
         if (dto.Date.HasValue) activity.Date = dto.Date.Value;
         if (dto.Title != null) activity.Title = dto.Title.Trim();
         if (dto.Description != null) activity.Description = NormalizeOptionalText(dto.Description);
@@ -753,6 +807,7 @@ public class TripsController : ControllerBase
         if (dto.Category != null) activity.Category = NormalizeOptionalText(dto.Category);
         if (dto.ClearImage) activity.ImageUrl = null;
         else if (dto.ImageUrl != null) activity.ImageUrl = NormalizeOptionalText(dto.ImageUrl);
+        activity.SpotifyUrl = nextSpotifyUrl;
 
         activity.Visibility = nextVisibility;
         activity.IsHidden = nextVisibility == "hidden";
@@ -762,6 +817,31 @@ public class TripsController : ControllerBase
 
         await _db.SaveChangesAsync();
         return NoContent();
+    }
+
+    [HttpPatch("{id}/activities/{activityId}/spotify")]
+    [Authorize]
+    public async Task<ActionResult<ActivityResponseDto>> UpdateActivitySpotify(Guid id, Guid activityId, [FromBody] UpdateActivitySpotifyDto dto)
+    {
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+
+        if (!await _db.TripMembers.AnyAsync(tm => tm.TripId == id && tm.UserId == userId))
+            return Forbid();
+
+        var activity = await _db.TripActivities
+            .Include(a => a.Owner)
+            .Include(a => a.AssignedTo)
+            .FirstOrDefaultAsync(a => a.Id == activityId && a.TripId == id);
+        if (activity == null) return NotFound();
+
+        var nextSpotifyUrl = dto.ClearSpotifyUrl ? null : NormalizeOptionalText(dto.SpotifyUrl);
+        if (!IsValidSpotifyUrl(nextSpotifyUrl))
+            return BadRequest("Spotify link must be a valid public Spotify URL.");
+
+        activity.SpotifyUrl = nextSpotifyUrl;
+        await _db.SaveChangesAsync();
+
+        return Ok(BuildActivityResponse(userId, activity));
     }
 
     // ── DELETE /api/trips/{id}/activities/{activityId} ────────────────────────

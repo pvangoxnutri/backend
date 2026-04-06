@@ -11,6 +11,7 @@ public class Trip
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     public string? ImageUrl { get; set; }
+    public string? SpotifyUrl { get; set; }
     public string InviteCode { get; set; } = string.Empty;
 
     // Hidden SideQuest fields
