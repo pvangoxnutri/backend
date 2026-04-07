@@ -24,3 +24,4 @@ wwwroot/uploads/
 !wwwroot/uploads/.gitkeep
 .backend.out.log
 .backend.err.log
+backend*.log
