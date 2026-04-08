@@ -38,9 +38,6 @@ public class TripsController : ControllerBase
         || activity.Visibility == "public"
         || IsActivityRevealedNow(activity);
 
-    private static bool CanEditActivity(Guid userId, TripActivity activity)
-        => activity.OwnerId == userId;
-
     private static bool IsTeaserVisibleNow(TripActivity activity)
     {
         if (activity.Visibility != "hidden"
@@ -77,7 +74,7 @@ public class TripsController : ControllerBase
             && (host == "open.spotify.com" || host.EndsWith(".spotify.com") || host == "spotify.link" || host.EndsWith(".spotify.link"));
     }
 
-    private static ActivityResponseDto BuildActivityResponse(Guid userId, TripActivity activity)
+    private static ActivityResponseDto BuildActivityResponse(Guid userId, TripActivity activity, bool canEdit)
     {
         var canViewFull = CanViewActivityFull(userId, activity);
         var teaserVisible = !canViewFull && IsTeaserVisibleNow(activity);
@@ -100,7 +97,7 @@ public class TripsController : ControllerBase
             TeaserOffsetMinutes = activity.TeaserOffsetMinutes,
             IsHiddenForViewer = !canViewFull,
             TeaserVisible = teaserVisible,
-            CanEdit = CanEditActivity(userId, activity),
+            CanEdit = canEdit,
             IsHidden = activity.Visibility == "hidden",
             OwnerId = activity.OwnerId,
             OwnerName = activity.Owner?.Name,
@@ -178,6 +175,9 @@ public class TripsController : ControllerBase
             .Select(tm => tm.UserId)
             .ToListAsync();
 
+    private async Task<bool> IsTripMember(Guid tripId, Guid userId)
+        => await _db.TripMembers.AnyAsync(tm => tm.TripId == tripId && tm.UserId == userId);
+
     private TripResponseDto BuildResponse(Trip trip, List<Guid> ownerIds, bool canViewFull)
         => new()
         {
@@ -206,17 +206,22 @@ public class TripsController : ControllerBase
     public async Task<ActionResult<List<TripResponseDto>>> GetMyTrips()
     {
         var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        var now = DateTime.UtcNow;
 
-        var tripIds = await _db.TripMembers
+        var memberTripIds = await _db.TripMembers
             .Where(tm => tm.UserId == userId)
             .Select(tm => tm.TripId)
             .ToListAsync();
 
         var trips = await _db.Trips
-            .Where(t => tripIds.Contains(t.Id))
+            .Where(t =>
+                memberTripIds.Contains(t.Id) ||
+                t.Visibility == "public" ||
+                (t.RevealAt.HasValue && t.RevealAt.Value <= now))
             .OrderByDescending(t => t.CreatedAt)
             .ToListAsync();
 
+        var tripIds = trips.Select(t => t.Id).ToList();
         var ownerMap = await _db.TripMembers
             .Where(tm => tripIds.Contains(tm.TripId) && tm.IsOwner)
             .GroupBy(tm => tm.TripId)
@@ -280,8 +285,8 @@ public class TripsController : ControllerBase
         var trip = await _db.Trips.FindAsync(id);
         if (trip == null) return NotFound();
 
-        // Must be a member to access the trip
-        if (!await _db.TripMembers.AnyAsync(tm => tm.TripId == id && tm.UserId == userId))
+        var isMember = await IsTripMember(id, userId);
+        if (!isMember && trip.Visibility != "public" && !IsRevealedNow(trip))
             return Forbid();
 
         var ownerIds = await GetOwnerIds(id);
@@ -688,8 +693,11 @@ public class TripsController : ControllerBase
     public async Task<ActionResult<List<ActivityResponseDto>>> GetActivities(Guid id)
     {
         var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        var trip = await _db.Trips.FindAsync(id);
+        if (trip == null) return NotFound();
 
-        if (!await _db.TripMembers.AnyAsync(tm => tm.TripId == id && tm.UserId == userId))
+        var isMember = await IsTripMember(id, userId);
+        if (!isMember && trip.Visibility != "public" && !IsRevealedNow(trip))
             return Forbid();
 
         var activities = await _db.TripActivities
@@ -701,7 +709,7 @@ public class TripsController : ControllerBase
             .Include(a => a.AssignedTo)
             .ToListAsync();
 
-        return Ok(activities.Select(activity => BuildActivityResponse(userId, activity)).ToList());
+        return Ok(activities.Select(activity => BuildActivityResponse(userId, activity, isMember)).ToList());
     }
 
     [HttpGet("{id}/activities/{activityId}")]
@@ -709,8 +717,11 @@ public class TripsController : ControllerBase
     public async Task<ActionResult<ActivityResponseDto>> GetActivity(Guid id, Guid activityId)
     {
         var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        var trip = await _db.Trips.FindAsync(id);
+        if (trip == null) return NotFound();
 
-        if (!await _db.TripMembers.AnyAsync(tm => tm.TripId == id && tm.UserId == userId))
+        var isMember = await IsTripMember(id, userId);
+        if (!isMember && trip.Visibility != "public" && !IsRevealedNow(trip))
             return Forbid();
 
         var activity = await _db.TripActivities
@@ -720,7 +731,7 @@ public class TripsController : ControllerBase
 
         if (activity == null) return NotFound();
 
-        return Ok(BuildActivityResponse(userId, activity));
+        return Ok(BuildActivityResponse(userId, activity, isMember));
     }
 
     // ── POST /api/trips/{id}/activities ───────────────────────────────────────
@@ -771,7 +782,7 @@ public class TripsController : ControllerBase
             .Include(a => a.AssignedTo)
             .FirstAsync(a => a.Id == activity.Id);
 
-        return Ok(BuildActivityResponse(userId, created));
+        return Ok(BuildActivityResponse(userId, created, canEdit: true));
     }
 
     // ── PATCH /api/trips/{id}/activities/{activityId} ─────────────────────────
@@ -781,11 +792,12 @@ public class TripsController : ControllerBase
     public async Task<ActionResult> UpdateActivity(Guid id, Guid activityId, [FromBody] UpdateActivityDto dto)
     {
         var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        var isMember = await IsTripMember(id, userId);
+        if (!isMember) return Forbid();
 
         var activity = await _db.TripActivities
             .FirstOrDefaultAsync(a => a.Id == activityId && a.TripId == id);
         if (activity == null) return NotFound();
-        if (!CanEditActivity(userId, activity)) return Forbid();
 
         var nextVisibility = dto.Visibility != null ? NormalizeVisibility(dto.Visibility) : activity.Visibility;
         var nextRevealAt = dto.ClearRevealAt ? null : dto.RevealAt ?? activity.RevealAt;
@@ -841,7 +853,7 @@ public class TripsController : ControllerBase
         activity.SpotifyUrl = nextSpotifyUrl;
         await _db.SaveChangesAsync();
 
-        return Ok(BuildActivityResponse(userId, activity));
+        return Ok(BuildActivityResponse(userId, activity, canEdit: true));
     }
 
     // ── DELETE /api/trips/{id}/activities/{activityId} ────────────────────────
@@ -851,14 +863,12 @@ public class TripsController : ControllerBase
     public async Task<ActionResult> DeleteActivity(Guid id, Guid activityId)
     {
         var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
-
-        if (!await _db.TripMembers.AnyAsync(tm => tm.TripId == id && tm.UserId == userId))
-            return Forbid();
+        var isMember = await IsTripMember(id, userId);
+        if (!isMember) return Forbid();
 
         var activity = await _db.TripActivities
             .FirstOrDefaultAsync(a => a.Id == activityId && a.TripId == id);
         if (activity == null) return NotFound();
-        if (!CanEditActivity(userId, activity)) return Forbid();
 
         _db.TripActivities.Remove(activity);
         await _db.SaveChangesAsync();

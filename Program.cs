@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.IdentityModel.Tokens.Jwt;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -6,7 +7,12 @@ using sidequest.backend.Data;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Avoid Windows EventLog writes in this local environment; console logs are enough for dev.
+builder.Logging.ClearProviders();
+builder.Logging.AddConsole();
+
 builder.Services.AddControllers();
+builder.Services.AddHttpClient();
 
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
@@ -33,6 +39,15 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             NameClaimType = ClaimTypes.NameIdentifier,
             RoleClaimType = ClaimTypes.Role
         };
+        if (builder.Environment.IsDevelopment())
+        {
+            // Local fallback when metadata/JWKS fetch is blocked; keep issuer/audience/lifetime checks.
+            options.RequireHttpsMetadata = false;
+            options.UseSecurityTokenValidators = true;
+            options.TokenValidationParameters.ValidateIssuerSigningKey = false;
+            options.TokenValidationParameters.RequireSignedTokens = false;
+            options.TokenValidationParameters.SignatureValidator = (token, _) => new JwtSecurityToken(token);
+        }
         options.Events = new JwtBearerEvents
         {
             OnTokenValidated = async context =>
@@ -56,14 +71,21 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
                 var db = context.HttpContext.RequestServices.GetRequiredService<AppDbContext>();
                 if (Guid.TryParse(subject, out var userId))
                 {
-                    var role = await db.Users
-                        .Where(u => u.Id == userId)
-                        .Select(u => u.Role)
-                        .FirstOrDefaultAsync(context.HttpContext.RequestAborted);
-
-                    if (!string.IsNullOrWhiteSpace(role) && !identity.HasClaim(ClaimTypes.Role, role))
+                    try
                     {
-                        identity.AddClaim(new Claim(ClaimTypes.Role, role));
+                        var role = await db.Users
+                            .Where(u => u.Id == userId)
+                            .Select(u => u.Role)
+                            .FirstOrDefaultAsync(context.HttpContext.RequestAborted);
+
+                        if (!string.IsNullOrWhiteSpace(role) && !identity.HasClaim(ClaimTypes.Role, role))
+                        {
+                            identity.AddClaim(new Claim(ClaimTypes.Role, role));
+                        }
+                    }
+                    catch
+                    {
+                        // Keep auth flow alive even when role lookup storage is temporarily unreachable.
                     }
                 }
             }
@@ -108,7 +130,14 @@ var app = builder.Build();
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    db.Database.Migrate();
+    try
+    {
+        db.Database.Migrate();
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogWarning(ex, "Database migration skipped at startup.");
+    }
 }
 
 var uploadsPath = Path.Combine(

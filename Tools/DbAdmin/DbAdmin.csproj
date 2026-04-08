@@ -11,4 +11,8 @@
       <HintPath>C:\Users\pontu\.nuget\packages\npgsql\9.0.3\lib\net8.0\Npgsql.dll</HintPath>
     </Reference>
   </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="QueryUsers.cs" />
+  </ItemGroup>
 </Project>
