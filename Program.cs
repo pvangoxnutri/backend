@@ -6,6 +6,7 @@ using Microsoft.IdentityModel.Tokens;
 using sidequest.backend.Data;
 
 var builder = WebApplication.CreateBuilder(args);
+LoadLocalEnvFile(Path.Combine(builder.Environment.ContentRootPath, ".env.local"));
 
 // Avoid Windows EventLog writes in this local environment; console logs are enough for dev.
 builder.Logging.ClearProviders();
@@ -14,8 +15,11 @@ builder.Logging.AddConsole();
 builder.Services.AddControllers();
 builder.Services.AddHttpClient();
 
+var configuredConnectionString = builder.Configuration.GetConnectionString("DefaultConnection")
+    ?? throw new InvalidOperationException("ConnectionStrings:DefaultConnection must be configured.");
+
 builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
+    options.UseNpgsql(configuredConnectionString));
 
 var supabaseUrl = builder.Configuration["Supabase:Url"]?.TrimEnd('/');
 var supabaseAudience = builder.Configuration["Supabase:JwtAudience"] ?? "authenticated";
@@ -161,3 +165,30 @@ app.UseAuthorization();
 app.MapControllers();
 
 app.Run();
+
+static void LoadLocalEnvFile(string path)
+{
+    if (!File.Exists(path))
+        return;
+
+    foreach (var rawLine in File.ReadAllLines(path))
+    {
+        var line = rawLine.Trim();
+        if (string.IsNullOrWhiteSpace(line) || line.StartsWith("#"))
+            continue;
+
+        var separator = line.IndexOf('=');
+        if (separator <= 0)
+            continue;
+
+        var key = line[..separator].Trim();
+        if (string.IsNullOrWhiteSpace(key))
+            continue;
+
+        var value = line[(separator + 1)..].Trim().Trim('"');
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable(key)))
+        {
+            Environment.SetEnvironmentVariable(key, value);
+        }
+    }
+}

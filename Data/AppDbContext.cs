@@ -12,6 +12,11 @@ public class AppDbContext : DbContext
     public DbSet<TripMember> TripMembers => Set<TripMember>();
     public DbSet<TripActivity> TripActivities => Set<TripActivity>();
     public DbSet<TripInvite> TripInvites => Set<TripInvite>();
+    public DbSet<ActivityComment> ActivityComments => Set<ActivityComment>();
+    public DbSet<Expense> Expenses => Set<Expense>();
+    public DbSet<ExpensePayer> ExpensePayers => Set<ExpensePayer>();
+    public DbSet<ExpenseParticipant> ExpenseParticipants => Set<ExpenseParticipant>();
+    public DbSet<Settlement> Settlements => Set<Settlement>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -74,6 +79,72 @@ public class AppDbContext : DbContext
             .HasOne(ti => ti.InvitedByUser)
             .WithMany()
             .HasForeignKey(ti => ti.InvitedByUserId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        modelBuilder.Entity<ActivityComment>()
+            .HasOne(c => c.Activity)
+            .WithMany()
+            .HasForeignKey(c => c.ActivityId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<ActivityComment>()
+            .HasOne(c => c.User)
+            .WithMany()
+            .HasForeignKey(c => c.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<Expense>()
+            .HasOne(e => e.Trip)
+            .WithMany()
+            .HasForeignKey(e => e.TripId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<Expense>()
+            .HasOne(e => e.CreatedBy)
+            .WithMany()
+            .HasForeignKey(e => e.CreatedByUserId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        modelBuilder.Entity<ExpensePayer>()
+            .HasOne(ep => ep.Expense)
+            .WithMany(e => e.Payers)
+            .HasForeignKey(ep => ep.ExpenseId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<ExpensePayer>()
+            .HasOne(ep => ep.User)
+            .WithMany()
+            .HasForeignKey(ep => ep.UserId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        modelBuilder.Entity<ExpenseParticipant>()
+            .HasOne(ep => ep.Expense)
+            .WithMany(e => e.Participants)
+            .HasForeignKey(ep => ep.ExpenseId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<ExpenseParticipant>()
+            .HasOne(ep => ep.User)
+            .WithMany()
+            .HasForeignKey(ep => ep.UserId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        modelBuilder.Entity<Settlement>()
+            .HasOne(s => s.Trip)
+            .WithMany()
+            .HasForeignKey(s => s.TripId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<Settlement>()
+            .HasOne(s => s.FromUser)
+            .WithMany()
+            .HasForeignKey(s => s.FromUserId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        modelBuilder.Entity<Settlement>()
+            .HasOne(s => s.ToUser)
+            .WithMany()
+            .HasForeignKey(s => s.ToUserId)
             .OnDelete(DeleteBehavior.Restrict);
     }
 }

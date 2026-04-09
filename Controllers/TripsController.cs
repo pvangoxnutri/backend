@@ -206,7 +206,6 @@ public class TripsController : ControllerBase
     public async Task<ActionResult<List<TripResponseDto>>> GetMyTrips()
     {
         var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
-        var now = DateTime.UtcNow;
 
         var memberTripIds = await _db.TripMembers
             .Where(tm => tm.UserId == userId)
@@ -214,10 +213,7 @@ public class TripsController : ControllerBase
             .ToListAsync();
 
         var trips = await _db.Trips
-            .Where(t =>
-                memberTripIds.Contains(t.Id) ||
-                t.Visibility == "public" ||
-                (t.RevealAt.HasValue && t.RevealAt.Value <= now))
+            .Where(t => memberTripIds.Contains(t.Id))
             .OrderByDescending(t => t.CreatedAt)
             .ToListAsync();
 
@@ -709,7 +705,18 @@ public class TripsController : ControllerBase
             .Include(a => a.AssignedTo)
             .ToListAsync();
 
-        return Ok(activities.Select(activity => BuildActivityResponse(userId, activity, isMember)).ToList());
+        var activityIds = activities.Select(a => a.Id).ToList();
+        var commentCounts = await _db.ActivityComments
+            .Where(c => activityIds.Contains(c.ActivityId))
+            .GroupBy(c => c.ActivityId)
+            .ToDictionaryAsync(g => g.Key, g => g.Count());
+
+        return Ok(activities.Select(activity =>
+        {
+            var dto = BuildActivityResponse(userId, activity, isMember);
+            dto.CommentCount = commentCounts.GetValueOrDefault(activity.Id, 0);
+            return dto;
+        }).ToList());
     }
 
     [HttpGet("{id}/activities/{activityId}")]
@@ -731,7 +738,9 @@ public class TripsController : ControllerBase
 
         if (activity == null) return NotFound();
 
-        return Ok(BuildActivityResponse(userId, activity, isMember));
+        var dto = BuildActivityResponse(userId, activity, isMember);
+        dto.CommentCount = await _db.ActivityComments.CountAsync(c => c.ActivityId == activityId);
+        return Ok(dto);
     }
 
     // ── POST /api/trips/{id}/activities ───────────────────────────────────────
@@ -873,5 +882,80 @@ public class TripsController : ControllerBase
         _db.TripActivities.Remove(activity);
         await _db.SaveChangesAsync();
         return NoContent();
+    }
+
+    // ── GET /api/trips/{id}/activities/{activityId}/comments ─────────────────
+
+    [HttpGet("{id}/activities/{activityId}/comments")]
+    [Authorize]
+    public async Task<ActionResult<List<ActivityCommentDto>>> GetComments(Guid id, Guid activityId)
+    {
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+
+        var activity = await _db.TripActivities.FirstOrDefaultAsync(a => a.Id == activityId && a.TripId == id);
+        if (activity == null) return NotFound();
+
+        var isMember = await IsTripMember(id, userId);
+        if (activity.Visibility != "public" && !isMember)
+            return Forbid();
+
+        var comments = await _db.ActivityComments
+            .Where(c => c.ActivityId == activityId)
+            .OrderBy(c => c.CreatedAt)
+            .Include(c => c.User)
+            .ToListAsync();
+
+        return Ok(comments.Select(c => new ActivityCommentDto
+        {
+            Id = c.Id,
+            ActivityId = c.ActivityId,
+            UserId = c.UserId,
+            UserName = c.User.Name,
+            UserAvatarUrl = c.User.AvatarUrl,
+            Text = c.Text,
+            CreatedAt = c.CreatedAt,
+        }).ToList());
+    }
+
+    // ── POST /api/trips/{id}/activities/{activityId}/comments ─────────────────
+
+    [HttpPost("{id}/activities/{activityId}/comments")]
+    [Authorize]
+    public async Task<ActionResult<ActivityCommentDto>> AddComment(Guid id, Guid activityId, [FromBody] CreateCommentDto dto)
+    {
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+
+        var activity = await _db.TripActivities.FirstOrDefaultAsync(a => a.Id == activityId && a.TripId == id);
+        if (activity == null) return NotFound();
+
+        if (activity.Visibility != "public")
+            return BadRequest("Comments are only allowed on public activities.");
+
+        var text = dto.Text.Trim();
+        if (string.IsNullOrEmpty(text))
+            return BadRequest("Comment cannot be empty.");
+
+        var comment = new ActivityComment
+        {
+            ActivityId = activityId,
+            UserId = userId,
+            Text = text,
+        };
+
+        _db.ActivityComments.Add(comment);
+        await _db.SaveChangesAsync();
+
+        var user = await _db.Users.FindAsync(userId);
+
+        return Ok(new ActivityCommentDto
+        {
+            Id = comment.Id,
+            ActivityId = comment.ActivityId,
+            UserId = comment.UserId,
+            UserName = user?.Name ?? "",
+            UserAvatarUrl = user?.AvatarUrl,
+            Text = comment.Text,
+            CreatedAt = comment.CreatedAt,
+        });
     }
 }

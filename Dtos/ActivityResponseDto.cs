@@ -26,4 +26,5 @@ public class ActivityResponseDto
     public Guid? AssignedToUserId { get; set; }
     public string? AssignedToName { get; set; }
     public DateTime CreatedAt { get; set; }
+    public int CommentCount { get; set; }
 }

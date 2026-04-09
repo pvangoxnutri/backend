@@ -43,6 +43,16 @@ switch (args[0].ToLowerInvariant())
     case "stats":
         return await PrintStatsAsync(conn);
 
+    case "fix-user-id":
+        if (args.Length < 3)
+        {
+            Console.Error.WriteLine("Missing arguments for fix-user-id.");
+            PrintUsage();
+            return 1;
+        }
+
+        return await FixUserIdAsync(conn, args[1], args[2]);
+
     case "delete-user":
         if (args.Length < 2)
         {
@@ -66,6 +76,7 @@ static void PrintUsage()
     Console.WriteLine("  dotnet run --project Tools/DbAdmin -- stats");
     Console.WriteLine("  dotnet run --project Tools/DbAdmin -- list-user-trips <email>");
     Console.WriteLine("  dotnet run --project Tools/DbAdmin -- grant-all-trips-owner <email>");
+    Console.WriteLine("  dotnet run --project Tools/DbAdmin -- fix-user-id <email> <new-uuid>");
     Console.WriteLine("  dotnet run --project Tools/DbAdmin -- delete-user <email>");
 }
 
@@ -434,5 +445,83 @@ static async Task<int> DeleteUserAsync(NpgsqlConnection conn, string email)
 
     await transaction.CommitAsync();
     Console.WriteLine($"Deleted user {userEmail} ({userName}).");
+    return 0;
+}
+
+static async Task<int> FixUserIdAsync(NpgsqlConnection conn, string email, string newIdStr)
+{
+    if (!Guid.TryParse(newIdStr, out var newId))
+    {
+        Console.Error.WriteLine($"Invalid UUID: {newIdStr}");
+        return 1;
+    }
+
+    var normalizedEmail = email.Trim().ToLowerInvariant();
+
+    Guid oldId;
+    string userName;
+    string? avatarUrl;
+    string role;
+    DateTime createdAt;
+    string passwordHash;
+
+    await using (var lookup = new NpgsqlCommand("""select "Id","Name","AvatarUrl","Role","CreatedAt","PasswordHash" from "Users" where lower("Email")=@email""", conn))
+    {
+        lookup.Parameters.AddWithValue("email", normalizedEmail);
+        await using var r = await lookup.ExecuteReaderAsync();
+        if (!await r.ReadAsync()) { Console.Error.WriteLine($"No user found for {normalizedEmail}."); return 1; }
+        oldId = r.GetGuid(0);
+        userName = r.GetString(1);
+        avatarUrl = r.IsDBNull(2) ? null : r.GetString(2);
+        role = r.GetString(3);
+        createdAt = r.GetDateTime(4);
+        passwordHash = r.IsDBNull(5) ? "" : r.GetString(5);
+    }
+
+    if (oldId == newId) { Console.WriteLine("IDs are already identical, nothing to do."); return 0; }
+
+    await using var tx = await conn.BeginTransactionAsync();
+
+    // 1. Insert shadow row with newId and temp email (avoids unique-email constraint)
+    var tempEmail = $"__migrate__{Guid.NewGuid()}@tmp";
+    await using (var ins = new NpgsqlCommand("""insert into "Users" ("Id","Email","Name","PasswordHash","AvatarUrl","Role","CreatedAt") values (@id,@email,@name,@pw,@avatar,@role,@created)""", conn, tx))
+    {
+        ins.Parameters.AddWithValue("id", newId);
+        ins.Parameters.AddWithValue("email", tempEmail);
+        ins.Parameters.AddWithValue("name", userName);
+        ins.Parameters.AddWithValue("pw", passwordHash);
+        ins.Parameters.AddWithValue("avatar", avatarUrl ?? (object)DBNull.Value);
+        ins.Parameters.AddWithValue("role", role);
+        ins.Parameters.AddWithValue("created", createdAt);
+        await ins.ExecuteNonQueryAsync();
+    }
+
+    // 2. Move all FK references from oldId → newId
+    foreach (var (table, col) in new[] { ("TripMembers","UserId"), ("TripActivities","OwnerId"), ("TripActivities","AssignedToUserId"), ("TripInvites","InvitedByUserId"), ("Trips","OwnerId") })
+    {
+        await using var upd = new NpgsqlCommand($"""update "{table}" set "{col}"=@newId where "{col}"=@oldId""", conn, tx);
+        upd.Parameters.AddWithValue("newId", newId);
+        upd.Parameters.AddWithValue("oldId", oldId);
+        var rows = await upd.ExecuteNonQueryAsync();
+        if (rows > 0) Console.WriteLine($"  Updated {rows} row(s) in {table}.{col}");
+    }
+
+    // 3. Delete old user row (no FKs point to it anymore)
+    await using (var del = new NpgsqlCommand("""delete from "Users" where "Id"=@oldId""", conn, tx))
+    {
+        del.Parameters.AddWithValue("oldId", oldId);
+        await del.ExecuteNonQueryAsync();
+    }
+
+    // 4. Restore real email on new row
+    await using (var fixEmail = new NpgsqlCommand("""update "Users" set "Email"=@email where "Id"=@newId""", conn, tx))
+    {
+        fixEmail.Parameters.AddWithValue("email", normalizedEmail);
+        fixEmail.Parameters.AddWithValue("newId", newId);
+        await fixEmail.ExecuteNonQueryAsync();
+    }
+
+    await tx.CommitAsync();
+    Console.WriteLine($"Fixed {userName} ({normalizedEmail}): {oldId} → {newId}");
     return 0;
 }
