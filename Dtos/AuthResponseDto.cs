@@ -8,5 +8,7 @@ public class AuthResponseDto
     public string Email { get; set; } = string.Empty;
     public bool EmailVerified { get; set; }
     public string? AvatarUrl { get; set; }
+    public string? Bio { get; set; }
+    public bool HasCompletedOnboarding { get; set; }
     public string Role { get; set; } = "user";
 }

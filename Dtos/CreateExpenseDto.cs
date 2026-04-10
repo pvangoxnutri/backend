@@ -15,7 +15,9 @@ public class CreateExpenseDto
     public DateOnly Date { get; set; }
 
     [Required]
-    public string SplitMode { get; set; } = "equal"; // equal | exact | percentage | shares
+    public string SplitMode { get; set; } = "equal";
+
+    public string Currency { get; set; } = string.Empty;
 
     [Required]
     public List<ExpensePayerInputDto> Payers { get; set; } = new();
@@ -33,5 +35,5 @@ public class ExpensePayerInputDto
 public class ExpenseParticipantInputDto
 {
     public Guid UserId { get; set; }
-    public decimal Value { get; set; } // percentage, shares, or exact amount depending on SplitMode
+    public decimal Value { get; set; } // percentage or exact amount depending on SplitMode
 }

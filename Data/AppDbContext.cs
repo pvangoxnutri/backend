@@ -17,9 +17,32 @@ public class AppDbContext : DbContext
     public DbSet<ExpensePayer> ExpensePayers => Set<ExpensePayer>();
     public DbSet<ExpenseParticipant> ExpenseParticipants => Set<ExpenseParticipant>();
     public DbSet<Settlement> Settlements => Set<Settlement>();
+    public DbSet<Theme> Themes => Set<Theme>();
+    public DbSet<TripEvent> TripEvents => Set<TripEvent>();
+    public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
+    public DbSet<ChatPresenceEntry> ChatPresence => Set<ChatPresenceEntry>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<Theme>()
+            .Property(t => t.Id)
+            .ValueGeneratedNever();
+
+        modelBuilder.Entity<TripEvent>()
+            .HasOne(e => e.Trip)
+            .WithMany()
+            .HasForeignKey(e => e.TripId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<ChatMessage>()
+            .HasOne(m => m.Trip)
+            .WithMany()
+            .HasForeignKey(m => m.TripId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<ChatPresenceEntry>()
+            .HasKey(cp => new { cp.TripId, cp.UserId });
+
         modelBuilder.Entity<User>()
             .HasIndex(u => u.Email)
             .IsUnique();

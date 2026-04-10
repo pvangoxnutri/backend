@@ -7,6 +7,12 @@ public class User
     public string Email { get; set; } = string.Empty;
     public string PasswordHash { get; set; } = string.Empty;
     public string? AvatarUrl { get; set; }
+    public string? Bio { get; set; }
+    public bool HasCompletedOnboarding { get; set; } = false;
+    public string? FoundVia { get; set; }
+    public string? Purpose { get; set; }
+    public string? PurposeOtherText { get; set; }
+    public string? ThemeId { get; set; }
     public string Role { get; set; } = "user"; // "user" | "admin"
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }

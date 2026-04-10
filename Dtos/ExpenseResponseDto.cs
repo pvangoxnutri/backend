@@ -8,6 +8,7 @@ public class ExpenseResponseDto
     public decimal TotalAmount { get; set; }
     public DateOnly Date { get; set; }
     public string SplitMode { get; set; } = string.Empty;
+    public string Currency { get; set; } = string.Empty;
     public DateTime CreatedAt { get; set; }
     public string CreatedByName { get; set; } = string.Empty;
     public List<ExpensePayerDto> Payers { get; set; } = new();

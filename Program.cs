@@ -19,7 +19,8 @@ var configuredConnectionString = builder.Configuration.GetConnectionString("Defa
     ?? throw new InvalidOperationException("ConnectionStrings:DefaultConnection must be configured.");
 
 builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseNpgsql(configuredConnectionString));
+    options.UseNpgsql(configuredConnectionString)
+           .ConfigureWarnings(w => w.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning)));
 
 var supabaseUrl = builder.Configuration["Supabase:Url"]?.TrimEnd('/');
 var supabaseAudience = builder.Configuration["Supabase:JwtAudience"] ?? "authenticated";

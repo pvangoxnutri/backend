@@ -71,6 +71,12 @@ public class AuthController : ControllerBase
 
             if (!string.IsNullOrWhiteSpace(dto.Name)) user.Name = dto.Name.Trim();
             if (dto.AvatarUrl != null) user.AvatarUrl = dto.AvatarUrl;
+            if (dto.Bio != null) user.Bio = dto.Bio.Trim().Length > 0 ? dto.Bio.Trim() : null;
+            if (dto.HasCompletedOnboarding.HasValue) user.HasCompletedOnboarding = dto.HasCompletedOnboarding.Value;
+            if (dto.FoundVia != null) user.FoundVia = dto.FoundVia.Trim().Length > 0 ? dto.FoundVia.Trim() : null;
+            if (dto.Purpose != null) user.Purpose = dto.Purpose.Trim().Length > 0 ? dto.Purpose.Trim() : null;
+            if (dto.PurposeOtherText != null) user.PurposeOtherText = dto.PurposeOtherText.Trim().Length > 0 ? dto.PurposeOtherText.Trim() : null;
+            if (dto.ThemeId != null) user.ThemeId = dto.ThemeId.Trim().Length > 0 ? dto.ThemeId.Trim() : null;
 
             await _db.SaveChangesAsync(cancellationToken);
 
@@ -193,6 +199,41 @@ public class AuthController : ControllerBase
             await clearAssignments.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        // Delete activity comments by this user
+        await using (var deleteComments = new NpgsqlCommand("""delete from "ActivityComments" where "UserId" = @userId""", conn, tx))
+        {
+            deleteComments.Parameters.AddWithValue("userId", userId);
+            await deleteComments.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        // Delete settlements involving this user
+        await using (var deleteSettlements = new NpgsqlCommand("""delete from "Settlements" where "FromUserId" = @userId or "ToUserId" = @userId""", conn, tx))
+        {
+            deleteSettlements.Parameters.AddWithValue("userId", userId);
+            await deleteSettlements.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        // Delete expenses created by this user on trips they didn't own
+        // (cascade removes the payers/participants for those expenses)
+        await using (var deleteCreatedExpenses = new NpgsqlCommand("""delete from "Expenses" where "CreatedByUserId" = @userId""", conn, tx))
+        {
+            deleteCreatedExpenses.Parameters.AddWithValue("userId", userId);
+            await deleteCreatedExpenses.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        // Remove this user from payer/participant lists on other people's expenses
+        await using (var deleteExpensePayers = new NpgsqlCommand("""delete from "ExpensePayers" where "UserId" = @userId""", conn, tx))
+        {
+            deleteExpensePayers.Parameters.AddWithValue("userId", userId);
+            await deleteExpensePayers.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var deleteExpenseParticipants = new NpgsqlCommand("""delete from "ExpenseParticipants" where "UserId" = @userId""", conn, tx))
+        {
+            deleteExpenseParticipants.Parameters.AddWithValue("userId", userId);
+            await deleteExpenseParticipants.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         await using (var deleteUser = new NpgsqlCommand("""delete from "Users" where "Id" = @userId""", conn, tx))
         {
             deleteUser.Parameters.AddWithValue("userId", userId);
@@ -284,6 +325,8 @@ public class AuthController : ControllerBase
             Email = user.Email,
             EmailVerified = true,
             AvatarUrl = user.AvatarUrl,
+            Bio = user.Bio,
+            HasCompletedOnboarding = user.HasCompletedOnboarding,
             Role = user.Role
         };
     }

@@ -199,6 +199,126 @@ public class TripsController : ControllerBase
             Description = canViewFull ? trip.Description : null,
         };
 
+    // ── GET /api/trips/invites/me ─────────────────────────────────────────────
+    // Returns all pending trip invitations for the currently signed-in user.
+
+    [HttpGet("invites/me")]
+    [Authorize]
+    public async Task<ActionResult<List<PendingInviteDto>>> GetMyPendingInvites(CancellationToken cancellationToken)
+    {
+        var email = User.FindFirstValue(ClaimTypes.Email)?.Trim().ToLowerInvariant();
+        if (string.IsNullOrEmpty(email)) return Ok(new List<PendingInviteDto>());
+
+        var invites = await _db.TripInvites
+            .Where(i => i.Email == email && i.Status == "pending")
+            .Include(i => i.Trip)
+            .Include(i => i.InvitedByUser)
+            .OrderByDescending(i => i.CreatedAt)
+            .Select(i => new PendingInviteDto
+            {
+                Id = i.Id,
+                TripId = i.TripId,
+                TripTitle = i.Trip.Title,
+                TripDestination = i.Trip.Destination,
+                TripImageUrl = i.Trip.ImageUrl,
+                InvitedByName = i.InvitedByUser.Name,
+                CreatedAt = i.CreatedAt,
+            })
+            .ToListAsync(cancellationToken);
+
+        return Ok(invites);
+    }
+
+    // ── POST /api/trips/join ──────────────────────────────────────────────────
+    // Join a trip by entering its invite code.
+
+    [HttpPost("join")]
+    [Authorize]
+    public async Task<ActionResult> JoinByCode([FromBody] JoinByCodeDto dto, CancellationToken cancellationToken)
+    {
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        var code = dto.Code?.Trim().ToUpperInvariant();
+
+        if (string.IsNullOrEmpty(code))
+            return BadRequest("Invite code is required.");
+
+        var trip = await _db.Trips
+            .FirstOrDefaultAsync(t => t.InviteCode == code, cancellationToken);
+
+        if (trip == null)
+            return NotFound("No adventure found with that invite code. Double-check and try again.");
+
+        var alreadyMember = await _db.TripMembers
+            .AnyAsync(m => m.TripId == trip.Id && m.UserId == userId, cancellationToken);
+
+        if (alreadyMember)
+            return Conflict("You're already part of this adventure.");
+
+        var user = await _db.Users.FindAsync([userId], cancellationToken);
+        var actorName = user?.Name ?? "Someone";
+
+        _db.TripMembers.Add(new TripMember { TripId = trip.Id, UserId = userId, IsOwner = false });
+
+        // Mark any pending email invite for this user on this trip as accepted
+        var email = User.FindFirstValue(ClaimTypes.Email)?.Trim().ToLowerInvariant();
+        if (!string.IsNullOrEmpty(email))
+        {
+            var pendingInvite = await _db.TripInvites
+                .FirstOrDefaultAsync(i => i.TripId == trip.Id && i.Email == email && i.Status == "pending", cancellationToken);
+            if (pendingInvite != null)
+                pendingInvite.Status = "accepted";
+        }
+
+        // Emit member_joined event so existing members are notified
+        _db.TripEvents.Add(new TripEvent
+        {
+            TripId = trip.Id,
+            ActorId = userId,
+            ActorName = actorName,
+            Type = "member_joined",
+            CreatedAt = DateTime.UtcNow,
+        });
+
+        await _db.SaveChangesAsync(cancellationToken);
+
+        return Ok(new { tripId = trip.Id });
+    }
+
+    // ── GET /api/trips/events/me ──────────────────────────────────────────────
+    // Returns recent events (e.g. member_joined) for all trips the user belongs to,
+    // excluding events where the current user was the actor.
+
+    [HttpGet("events/me")]
+    [Authorize]
+    public async Task<ActionResult<List<TripEventDto>>> GetMyTripEvents(CancellationToken cancellationToken)
+    {
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        var cutoff = DateTime.UtcNow.AddDays(-30);
+
+        var memberTripIds = await _db.TripMembers
+            .Where(tm => tm.UserId == userId)
+            .Select(tm => tm.TripId)
+            .ToListAsync(cancellationToken);
+
+        var events = await _db.TripEvents
+            .Where(e => memberTripIds.Contains(e.TripId) && e.ActorId != userId && e.CreatedAt >= cutoff)
+            .Include(e => e.Trip)
+            .OrderByDescending(e => e.CreatedAt)
+            .Take(50)
+            .Select(e => new TripEventDto
+            {
+                Id = e.Id,
+                TripId = e.TripId,
+                TripTitle = e.Trip.Title,
+                ActorName = e.ActorName,
+                Type = e.Type,
+                CreatedAt = e.CreatedAt,
+            })
+            .ToListAsync(cancellationToken);
+
+        return Ok(events);
+    }
+
     // ── GET /api/trips ────────────────────────────────────────────────────────
 
     [HttpGet]
@@ -599,7 +719,20 @@ public class TripsController : ControllerBase
                 return BadRequest("You are the last owner. Promote another member to owner before leaving, or ask an admin to take ownership.");
         }
 
+        var user = await _db.Users.FindAsync([userId]);
+        var actorName = user?.Name ?? "Someone";
+
         _db.TripMembers.Remove(member);
+
+        _db.TripEvents.Add(new TripEvent
+        {
+            TripId = id,
+            ActorId = userId,
+            ActorName = actorName,
+            Type = "member_left",
+            CreatedAt = DateTime.UtcNow,
+        });
+
         await _db.SaveChangesAsync();
         return NoContent();
     }
@@ -646,6 +779,63 @@ public class TripsController : ControllerBase
         _db.TripInvites.Remove(invite);
         await _db.SaveChangesAsync();
         return NoContent();
+    }
+
+    // ── POST /api/trips/{id}/invites/{inviteId}/accept ────────────────────────
+
+    [HttpPost("{id}/invites/{inviteId}/accept")]
+    [Authorize]
+    public async Task<ActionResult> AcceptInvite(Guid id, Guid inviteId, CancellationToken cancellationToken)
+    {
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        var email = User.FindFirstValue(ClaimTypes.Email)?.Trim().ToLowerInvariant();
+
+        var invite = await _db.TripInvites
+            .FirstOrDefaultAsync(i => i.Id == inviteId && i.TripId == id && i.Email == email, cancellationToken);
+
+        if (invite == null) return NotFound();
+
+        var alreadyMember = await _db.TripMembers
+            .AnyAsync(m => m.TripId == id && m.UserId == userId, cancellationToken);
+
+        if (!alreadyMember)
+        {
+            _db.TripMembers.Add(new TripMember { TripId = id, UserId = userId, IsOwner = false });
+        }
+
+        invite.Status = "accepted";
+
+        // Emit member_joined event so existing members are notified
+        var actor = await _db.Users.FindAsync([userId], cancellationToken);
+        _db.TripEvents.Add(new TripEvent
+        {
+            TripId = id,
+            ActorId = userId,
+            ActorName = actor?.Name ?? "Someone",
+            Type = "member_joined",
+            CreatedAt = DateTime.UtcNow,
+        });
+
+        await _db.SaveChangesAsync(cancellationToken);
+        return Ok();
+    }
+
+    // ── POST /api/trips/{id}/invites/{inviteId}/decline ───────────────────────
+
+    [HttpPost("{id}/invites/{inviteId}/decline")]
+    [Authorize]
+    public async Task<ActionResult> DeclineInvite(Guid id, Guid inviteId, CancellationToken cancellationToken)
+    {
+        var email = User.FindFirstValue(ClaimTypes.Email)?.Trim().ToLowerInvariant();
+
+        var invite = await _db.TripInvites
+            .FirstOrDefaultAsync(i => i.Id == inviteId && i.TripId == id && i.Email == email, cancellationToken);
+
+        if (invite == null) return NotFound();
+
+        invite.Status = "declined";
+        await _db.SaveChangesAsync(cancellationToken);
+        return Ok();
     }
 
     // ── POST /api/trips/{id}/admin/claim-ownership ────────────────────────────

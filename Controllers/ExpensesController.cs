@@ -43,6 +43,7 @@ public class ExpensesController : ControllerBase
             TotalAmount = expense.TotalAmount,
             Date = expense.Date,
             SplitMode = expense.SplitMode,
+            Currency = expense.Currency,
             CreatedAt = expense.CreatedAt,
             CreatedByName = expense.CreatedBy?.Name ?? string.Empty,
             Payers = expense.Payers.Select(p => new ExpensePayerDto
@@ -98,7 +99,7 @@ public class ExpensesController : ControllerBase
         if (dto.TotalAmount <= 0)
             return BadRequest("Total amount must be greater than zero.");
 
-        var validModes = new[] { "equal", "exact", "percentage", "shares" };
+        var validModes = new[] { "equal", "exact", "percentage" };
         if (!validModes.Contains(dto.SplitMode))
             return BadRequest("Invalid split mode.");
 
@@ -144,15 +145,6 @@ public class ExpensesController : ControllerBase
                     participantAmounts.Add((p.UserId, Math.Round(dto.TotalAmount * p.Value / 100m, 2, MidpointRounding.ToEven)));
                 break;
             }
-            case "shares":
-            {
-                var totalShares = dto.Participants.Sum(p => p.Value);
-                if (totalShares <= 0)
-                    return BadRequest("Total shares must be greater than zero.");
-                foreach (var p in dto.Participants)
-                    participantAmounts.Add((p.UserId, Math.Round(dto.TotalAmount * (p.Value / totalShares), 2, MidpointRounding.ToEven)));
-                break;
-            }
         }
 
         // Rounding correction: adjust first participant so sum == TotalAmount exactly
@@ -172,6 +164,7 @@ public class ExpensesController : ControllerBase
             TotalAmount = dto.TotalAmount,
             Date = dto.Date,
             SplitMode = dto.SplitMode,
+            Currency = dto.Currency.Trim().ToUpperInvariant(),
             CreatedAt = DateTime.UtcNow,
         };
 
