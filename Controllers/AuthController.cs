@@ -38,7 +38,7 @@ public class AuthController : ControllerBase
         try
         {
             var user = await GetOrCreateCurrentUserAsync(dto, cancellationToken);
-            return Ok(CreateAuthResponse(user));
+            return Ok(await CreateAuthResponseAsync(user, cancellationToken));
         }
         catch
         {
@@ -53,7 +53,7 @@ public class AuthController : ControllerBase
         try
         {
             var user = await GetOrCreateCurrentUserAsync(null, cancellationToken);
-            return Ok(CreateAuthResponse(user));
+            return Ok(await CreateAuthResponseAsync(user, cancellationToken));
         }
         catch
         {
@@ -80,7 +80,7 @@ public class AuthController : ControllerBase
 
             await _db.SaveChangesAsync(cancellationToken);
 
-            return Ok(CreateAuthResponse(user));
+            return Ok(await CreateAuthResponseAsync(user, cancellationToken));
         }
         catch
         {
@@ -315,8 +315,12 @@ public class AuthController : ControllerBase
         return user;
     }
 
-    private static AuthResponseDto CreateAuthResponse(User user)
+    private async Task<AuthResponseDto> CreateAuthResponseAsync(User user, CancellationToken cancellationToken)
     {
+        Theme? theme = null;
+        if (!string.IsNullOrEmpty(user.ThemeId))
+            theme = await _db.Themes.FindAsync([user.ThemeId], cancellationToken);
+
         return new AuthResponseDto
         {
             Token = string.Empty,
@@ -327,7 +331,10 @@ public class AuthController : ControllerBase
             AvatarUrl = user.AvatarUrl,
             Bio = user.Bio,
             HasCompletedOnboarding = user.HasCompletedOnboarding,
-            Role = user.Role
+            Role = user.Role,
+            ThemeId = user.ThemeId,
+            ThemePrimaryColor = theme?.PrimaryColor,
+            ThemeSecondaryColor = theme?.SecondaryColor,
         };
     }
 

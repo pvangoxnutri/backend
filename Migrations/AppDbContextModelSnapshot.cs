@@ -356,6 +356,28 @@ namespace sidequest.backend.Migrations
                     b.ToTable("TripMembers");
                 });
 
+            modelBuilder.Entity("sidequest.backend.Models.Theme", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("PrimaryColor")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("SecondaryColor")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("Themes");
+                });
+
             modelBuilder.Entity("sidequest.backend.Models.User", b =>
                 {
                     b.Property<Guid>("Id")
@@ -382,6 +404,9 @@ namespace sidequest.backend.Migrations
 
                     b.Property<string>("Role")
                         .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("ThemeId")
                         .HasColumnType("text");
 
                     b.HasKey("Id");
