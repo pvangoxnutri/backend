@@ -16,6 +16,7 @@ public class CreateTripDto
 
     public string? ImageUrl { get; set; }
     public string? InviteCode { get; set; }
+    public List<string> Countries { get; set; } = new();
 
     [Required]
     public DateOnly StartDate { get; set; }

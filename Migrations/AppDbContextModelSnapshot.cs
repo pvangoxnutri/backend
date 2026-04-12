@@ -221,6 +221,11 @@ namespace sidequest.backend.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<string>("CountriesJson")
+                        .IsRequired()
+                        .HasDefaultValue("[]")
+                        .HasColumnType("text");
+
                     b.HasKey("Id");
 
                     b.HasIndex("OwnerId");

@@ -11,6 +11,7 @@ public class UpdateTripDto
     public bool ClearSpotifyUrl { get; set; }
     public DateOnly? StartDate { get; set; }
     public DateOnly? EndDate { get; set; }
+    public List<string>? Countries { get; set; }
 
     // Hidden SideQuest fields
     public string? Visibility { get; set; }

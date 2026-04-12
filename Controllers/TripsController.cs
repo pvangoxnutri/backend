@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -194,6 +195,7 @@ public class TripsController : ControllerBase
             ImageUrl = trip.ImageUrl,        // always (frontend blurs when hidden)
             SpotifyUrl = trip.SpotifyUrl,
             Destination = trip.Destination,  // always (shown in date/location row)
+            Countries = JsonSerializer.Deserialize<List<string>>(trip.CountriesJson) ?? new(),
             InviteCode = trip.InviteCode,
             Title = canViewFull ? trip.Title : null,
             Description = canViewFull ? trip.Description : null,
@@ -373,6 +375,7 @@ public class TripsController : ControllerBase
             Visibility = dto.Visibility == "hidden" ? "hidden" : "public",
             RevealAt = dto.RevealAt,
             Teaser = dto.Teaser,
+            CountriesJson = JsonSerializer.Serialize(dto.Countries ?? new()),
         };
 
         if (string.IsNullOrWhiteSpace(trip.InviteCode))
@@ -447,6 +450,7 @@ public class TripsController : ControllerBase
             if (dto.Title != null) trip.Title = dto.Title;
             if (dto.Description != null) trip.Description = dto.Description;
             if (dto.Destination != null) trip.Destination = dto.Destination;
+            if (dto.Countries != null) trip.CountriesJson = JsonSerializer.Serialize(dto.Countries);
             if (dto.ClearImage) trip.ImageUrl = null;
             else if (dto.ImageUrl != null) trip.ImageUrl = dto.ImageUrl;
             if (dto.ClearSpotifyUrl) trip.SpotifyUrl = null;
@@ -563,7 +567,7 @@ public class TripsController : ControllerBase
             return Forbid();
 
         var invites = await _db.TripInvites
-            .Where(ti => ti.TripId == id)
+            .Where(ti => ti.TripId == id && ti.Status == "pending")
             .OrderBy(ti => ti.CreatedAt)
             .Select(ti => new TripInviteDto
             {

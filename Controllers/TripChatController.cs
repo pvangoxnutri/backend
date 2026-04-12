@@ -128,6 +128,15 @@ public class TripChatController : ControllerBase
                 AvatarUrl = user?.AvatarUrl,
                 LastSeenAt = now,
             });
+            _db.ChatMessages.Add(new ChatMessage
+            {
+                TripId = tripId,
+                UserId = userId,
+                UserName = userName,
+                Text = $"{userName} joined.",
+                IsSystem = true,
+                CreatedAt = now,
+            });
         }
         else
         {
@@ -177,15 +186,6 @@ public class TripChatController : ControllerBase
 
         if (presence != null)
         {
-            _db.ChatMessages.Add(new ChatMessage
-            {
-                TripId = tripId,
-                UserId = userId,
-                UserName = presence.UserName,
-                Text = $"{presence.UserName} left the chat.",
-                IsSystem = true,
-                CreatedAt = DateTime.UtcNow,
-            });
             _db.ChatPresence.Remove(presence);
             await _db.SaveChangesAsync(ct);
         }
