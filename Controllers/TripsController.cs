@@ -195,7 +195,7 @@ public class TripsController : ControllerBase
             ImageUrl = trip.ImageUrl,        // always (frontend blurs when hidden)
             SpotifyUrl = trip.SpotifyUrl,
             Destination = trip.Destination,  // always (shown in date/location row)
-            Countries = JsonSerializer.Deserialize<List<string>>(trip.CountriesJson) ?? new(),
+            Countries = new(),
             InviteCode = trip.InviteCode,
             Title = canViewFull ? trip.Title : null,
             Description = canViewFull ? trip.Description : null,
@@ -375,7 +375,6 @@ public class TripsController : ControllerBase
             Visibility = dto.Visibility == "hidden" ? "hidden" : "public",
             RevealAt = dto.RevealAt,
             Teaser = dto.Teaser,
-            CountriesJson = JsonSerializer.Serialize(dto.Countries ?? new()),
         };
 
         if (string.IsNullOrWhiteSpace(trip.InviteCode))
@@ -450,7 +449,6 @@ public class TripsController : ControllerBase
             if (dto.Title != null) trip.Title = dto.Title;
             if (dto.Description != null) trip.Description = dto.Description;
             if (dto.Destination != null) trip.Destination = dto.Destination;
-            if (dto.Countries != null) trip.CountriesJson = JsonSerializer.Serialize(dto.Countries);
             if (dto.ClearImage) trip.ImageUrl = null;
             else if (dto.ImageUrl != null) trip.ImageUrl = dto.ImageUrl;
             if (dto.ClearSpotifyUrl) trip.SpotifyUrl = null;
@@ -1152,4 +1150,252 @@ public class TripsController : ControllerBase
             CreatedAt = comment.CreatedAt,
         });
     }
+
+    // ── GET /api/trips/completed ────────────────────────────────────────────
+
+    [HttpGet("completed")]
+    [Authorize]
+    public async Task<ActionResult<List<TripResponseDto>>> GetCompletedTrips()
+    {
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+
+        var memberTripIds = await _db.TripMembers
+            .Where(tm => tm.UserId == userId)
+            .Select(tm => tm.TripId)
+            .ToListAsync();
+
+        var trips = await _db.Trips
+            .Where(t => memberTripIds.Contains(t.Id) && t.Status == "completed")
+            .OrderByDescending(t => t.EndDate)
+            .ToListAsync();
+
+        var tripIds = trips.Select(t => t.Id).ToList();
+        var ownerMap = await _db.TripMembers
+            .Where(tm => tripIds.Contains(tm.TripId) && tm.IsOwner)
+            .GroupBy(tm => tm.TripId)
+            .ToDictionaryAsync(g => g.Key, g => g.Select(tm => tm.UserId).ToList());
+
+        var result = trips.Select(trip =>
+        {
+            var owners = ownerMap.GetValueOrDefault(trip.Id, new List<Guid>());
+            return BuildResponse(trip, owners, CanViewFull(userId, trip, owners));
+        }).ToList();
+
+        return Ok(result);
+    }
+
+    // ── PATCH /api/trips/{id}/complete ─────────────────────────────────────
+
+    [HttpPatch("{id}/complete")]
+    [Authorize]
+    public async Task<ActionResult> CompleteTrip(Guid id)
+    {
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        var trip = await _db.Trips.FindAsync(id);
+        if (trip == null) return NotFound();
+
+        var ownerIds = await GetOwnerIds(id);
+        if (!ownerIds.Contains(userId)) return Forbid();
+
+        trip.Status = "completed";
+        await _db.SaveChangesAsync();
+        return NoContent();
+    }
+
+    // ── POST /api/trips/{id}/share ──────────────────────────────────────────
+
+    [HttpPost("{id}/share")]
+    [Authorize]
+    public async Task<ActionResult<ShareTripDto>> ShareTrip(Guid id)
+    {
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        var trip = await _db.Trips.FindAsync(id);
+        if (trip == null) return NotFound();
+
+        var ownerIds = await GetOwnerIds(id);
+        if (!ownerIds.Contains(userId)) return Forbid();
+
+        if (trip.Status != "completed")
+            return BadRequest("Only completed adventures can be shared.");
+
+        if (string.IsNullOrEmpty(trip.ShareCode))
+        {
+            trip.ShareCode = GenerateShareCode();
+            trip.SharedAt = DateTime.UtcNow;
+            await _db.SaveChangesAsync();
+        }
+
+        return Ok(new ShareTripDto
+        {
+            ShareCode = trip.ShareCode,
+            ShareUrl = $"sidequest://share/{trip.ShareCode}"
+        });
+    }
+
+    // ── GET /api/trips/share/{code} ─────────────────────────────────────────
+
+    [HttpGet("share/{code}")]
+    public async Task<ActionResult<SharedTripDto>> GetSharedTrip(string code)
+    {
+        var trip = await _db.Trips.FirstOrDefaultAsync(t => t.ShareCode == code);
+        if (trip == null) return NotFound();
+
+        if (trip.Status != "completed")
+            return BadRequest("This adventure is no longer available for viewing.");
+
+        var activities = await _db.TripActivities
+            .Where(a => a.TripId == trip.Id && a.Visibility == "public")
+            .OrderBy(a => a.Date)
+            .ThenBy(a => a.Time)
+            .ToListAsync();
+
+        return Ok(new SharedTripDto
+        {
+            Id = trip.Id,
+            Title = trip.Title,
+            Description = trip.Description,
+            Destination = trip.Destination,
+            StartDate = trip.StartDate,
+            EndDate = trip.EndDate,
+            ImageUrl = trip.ImageUrl,
+            SpotifyUrl = trip.SpotifyUrl,
+            OwnerName = trip.Owner.Name
+        });
+    }
+
+    // ── POST /api/trips/seed ────────────────────────────────────────────────────
+    // Development only: create test adventure with activities for user by email
+    [HttpPost("seed")]
+    [AllowAnonymous]
+    public async Task<ActionResult<object>> SeedTestData([FromQuery] string email)
+    {
+        var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == email);
+        if (user == null)
+            return NotFound($"User with email {email} not found");
+
+        var existingTrips = await _db.Trips.Where(t => t.OwnerId == user.Id).CountAsync();
+        if (existingTrips > 0)
+            return BadRequest("User already has trips. Seeding cancelled.");
+
+        var trip = new Trip
+        {
+            Title = "Barcelona City Adventure",
+            Description = "Explore the vibrant streets of Barcelona, from Gaudí's masterpieces to hidden beachside gems.",
+            Destination = "Barcelona, Spain",
+            StartDate = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(10)),
+            EndDate = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(17)),
+            ImageUrl = "https://images.unsplash.com/photo-1583422409516-2895a77efded?w=800",
+            OwnerId = user.Id,
+            Visibility = "public",
+            InviteCode = GenerateInviteCode()
+        };
+
+        _db.Trips.Add(trip);
+        await _db.SaveChangesAsync();
+
+        var activities = new[]
+        {
+            new TripActivity
+            {
+                TripId = trip.Id,
+                Title = "Sagrada Familia Tour",
+                Description = "Visit Gaudí's most iconic basilica. Arrive early to beat the crowds.",
+                Date = trip.StartDate.AddDays(0),
+                Time = "09:00",
+                Category = "sight",
+                Visibility = "public",
+                ImageUrl = "https://images.unsplash.com/photo-1583422409516-2895a77efded?w=500",
+                OwnerId = user.Id,
+            },
+            new TripActivity
+            {
+                TripId = trip.Id,
+                Title = "Park Güell Sunset",
+                Description = "Explore Gaudí's whimsical park with panoramic city views.",
+                Date = trip.StartDate.AddDays(1),
+                Time = "17:30",
+                Category = "sight",
+                Visibility = "public",
+                ImageUrl = "https://images.unsplash.com/photo-1579174905393-a64d5faf2f06?w=500",
+                OwnerId = user.Id,
+            },
+            new TripActivity
+            {
+                TripId = trip.Id,
+                Title = "Gothic Quarter Wandering",
+                Description = "Get lost in the narrow medieval streets of the Gothic Quarter.",
+                Date = trip.StartDate.AddDays(2),
+                Time = "14:00",
+                Category = "sight",
+                Visibility = "public",
+                ImageUrl = "https://images.unsplash.com/photo-1583422409516-2895a77efded?w=500",
+                OwnerId = user.Id,
+            },
+            new TripActivity
+            {
+                TripId = trip.Id,
+                Title = "Beach Day at Barceloneta",
+                Description = "Relax at the popular city beach. Try some local seafood paella.",
+                Date = trip.StartDate.AddDays(3),
+                Time = "10:00",
+                Category = "food",
+                Visibility = "public",
+                ImageUrl = "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=500",
+                OwnerId = user.Id,
+            },
+            new TripActivity
+            {
+                TripId = trip.Id,
+                Title = "Las Ramblas Street Life",
+                Description = "Walk the famous boulevard lined with shops, cafes, and street performers. No photo - hidden surprise!",
+                Date = trip.StartDate.AddDays(4),
+                Time = "16:00",
+                Category = "sight",
+                Visibility = "hidden",
+                RevealAt = trip.StartDate.AddDays(4).ToDateTime(new TimeOnly(12, 0)),
+                Teaser = "A famous Barcelona boulevard awaits...",
+                OwnerId = user.Id,
+            }
+        };
+
+        _db.TripActivities.AddRange(activities);
+        await _db.SaveChangesAsync();
+
+        return Ok(new
+        {
+            message = "Test adventure created successfully",
+            tripId = trip.Id,
+            tripTitle = trip.Title,
+            activitiesCount = activities.Length
+        });
+    }
+
+    private static string GenerateShareCode()
+    {
+        const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        var random = new Random();
+        var code = new char[8];
+        for (int i = 0; i < 8; i++)
+            code[i] = chars[random.Next(chars.Length)];
+        return new string(code);
+    }
+}
+
+public class ShareTripDto
+{
+    public string ShareCode { get; set; } = "";
+    public string ShareUrl { get; set; } = "";
+}
+
+public class SharedTripDto
+{
+    public Guid Id { get; set; }
+    public string Title { get; set; } = "";
+    public string? Description { get; set; }
+    public string Destination { get; set; } = "";
+    public DateOnly StartDate { get; set; }
+    public DateOnly EndDate { get; set; }
+    public string? ImageUrl { get; set; }
+    public string? SpotifyUrl { get; set; }
+    public string OwnerName { get; set; } = "";
 }

@@ -22,6 +22,7 @@ public class Trip
     public Guid OwnerId { get; set; }
     public User Owner { get; set; } = null!;
 
-    /// <summary>ISO 3166-1 alpha-2 country codes stored as a JSON array, e.g. ["SE","JP"]</summary>
-    public string CountriesJson { get; set; } = "[]";
+    public string Status { get; set; } = "active"; // "active" | "completed"
+    public string? ShareCode { get; set; }
+    public DateTime? SharedAt { get; set; }
 }
