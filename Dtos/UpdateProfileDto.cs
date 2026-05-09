@@ -9,5 +9,4 @@ public class UpdateProfileDto
     public string? FoundVia { get; set; }
     public string? Purpose { get; set; }
     public string? PurposeOtherText { get; set; }
-    public string? ThemeId { get; set; }
 }

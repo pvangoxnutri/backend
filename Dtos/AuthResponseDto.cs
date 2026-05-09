@@ -11,7 +11,4 @@ public class AuthResponseDto
     public string? Bio { get; set; }
     public bool HasCompletedOnboarding { get; set; }
     public string Role { get; set; } = "user";
-    public string? ThemeId { get; set; }
-    public string? ThemePrimaryColor { get; set; }
-    public string? ThemeSecondaryColor { get; set; }
 }

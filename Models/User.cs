@@ -12,7 +12,6 @@ public class User
     public string? FoundVia { get; set; }
     public string? Purpose { get; set; }
     public string? PurposeOtherText { get; set; }
-    public string? ThemeId { get; set; }
     public string Role { get; set; } = "user"; // "user" | "admin"
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }

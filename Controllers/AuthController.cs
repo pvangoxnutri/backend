@@ -76,7 +76,6 @@ public class AuthController : ControllerBase
             if (dto.FoundVia != null) user.FoundVia = dto.FoundVia.Trim().Length > 0 ? dto.FoundVia.Trim() : null;
             if (dto.Purpose != null) user.Purpose = dto.Purpose.Trim().Length > 0 ? dto.Purpose.Trim() : null;
             if (dto.PurposeOtherText != null) user.PurposeOtherText = dto.PurposeOtherText.Trim().Length > 0 ? dto.PurposeOtherText.Trim() : null;
-            if (dto.ThemeId != null) user.ThemeId = dto.ThemeId.Trim().Length > 0 ? dto.ThemeId.Trim() : null;
 
             await _db.SaveChangesAsync(cancellationToken);
 
@@ -317,10 +316,6 @@ public class AuthController : ControllerBase
 
     private async Task<AuthResponseDto> CreateAuthResponseAsync(User user, CancellationToken cancellationToken)
     {
-        Theme? theme = null;
-        if (!string.IsNullOrEmpty(user.ThemeId))
-            theme = await _db.Themes.FindAsync([user.ThemeId], cancellationToken);
-
         return new AuthResponseDto
         {
             Token = string.Empty,
@@ -332,9 +327,6 @@ public class AuthController : ControllerBase
             Bio = user.Bio,
             HasCompletedOnboarding = user.HasCompletedOnboarding,
             Role = user.Role,
-            ThemeId = user.ThemeId,
-            ThemePrimaryColor = theme?.PrimaryColor,
-            ThemeSecondaryColor = theme?.SecondaryColor,
         };
     }
 

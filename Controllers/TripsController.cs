@@ -1370,6 +1370,68 @@ public class TripsController : ControllerBase
         });
     }
 
+    // ── POST /api/trips/add-past-event ──────────────────────────────────────
+    // Test endpoint: add a past event for testing
+    [HttpPost("add-past-event")]
+    [AllowAnonymous]
+    public async Task<ActionResult> AddPastEvent([FromQuery] string email)
+    {
+        var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == email);
+        if (user == null)
+            return NotFound($"User with email {email} not found");
+
+        var trip = await _db.Trips.FirstOrDefaultAsync(t => t.OwnerId == user.Id);
+        if (trip == null)
+            return NotFound("No trip found for this user");
+
+        var pastEvent = new TripEvent
+        {
+            Id = Guid.NewGuid(),
+            TripId = trip.Id,
+            ActorId = user.Id,
+            ActorName = user.Name,
+            Type = "trip_started",
+            CreatedAt = DateTime.UtcNow.AddDays(-7)
+        };
+
+        _db.TripEvents.Add(pastEvent);
+        await _db.SaveChangesAsync();
+
+        return Ok(new
+        {
+            message = "Past event added successfully",
+            eventType = pastEvent.Type,
+            createdAt = pastEvent.CreatedAt
+        });
+    }
+
+    // ── POST /api/trips/mark-completed ──────────────────────────────────────
+    // Test endpoint: mark a trip as completed
+    [HttpPost("mark-completed")]
+    [AllowAnonymous]
+    public async Task<ActionResult> MarkCompleted([FromQuery] string email)
+    {
+        var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == email);
+        if (user == null)
+            return NotFound($"User with email {email} not found");
+
+        var trip = await _db.Trips.FirstOrDefaultAsync(t => t.OwnerId == user.Id);
+        if (trip == null)
+            return NotFound("No trip found for this user");
+
+        trip.Status = "completed";
+        trip.EndDate = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-3));
+        await _db.SaveChangesAsync();
+
+        return Ok(new
+        {
+            message = "Trip marked as completed",
+            tripId = trip.Id,
+            tripTitle = trip.Title,
+            status = trip.Status
+        });
+    }
+
     private static string GenerateShareCode()
     {
         const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
