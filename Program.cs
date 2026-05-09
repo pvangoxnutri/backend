@@ -143,22 +143,6 @@ using (var scope = app.Services.CreateScope())
     {
         app.Logger.LogWarning(ex, "Database migration skipped at startup.");
     }
-
-    try
-    {
-        db.Database.ExecuteSqlRaw(@"
-            INSERT INTO ""Themes"" (""Id"", ""Name"", ""PrimaryColor"", ""SecondaryColor"") VALUES
-            ('classic',   'Classic',    '#ff4f74', '#0d90a8'),
-            ('ocean',     'Ocean',      '#2563eb', '#0891b2'),
-            ('forest',    'Forest',     '#16a34a', '#ea580c'),
-            ('lemonglow', 'Lemon Glow', '#F4E649', '#28303D')
-            ON CONFLICT (""Id"") DO NOTHING
-        ");
-    }
-    catch (Exception ex)
-    {
-        app.Logger.LogWarning(ex, "Theme seeding skipped at startup.");
-    }
 }
 
 var uploadsPath = Path.Combine(
