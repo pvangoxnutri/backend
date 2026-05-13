@@ -52,6 +52,7 @@ public class TripChatController : ControllerBase
                 UserId = m.UserId,
                 UserName = m.UserName,
                 Text = m.Text,
+                ImageUrl = m.ImageUrl,
                 IsSystem = m.IsSystem,
                 CreatedAt = m.CreatedAt,
             })
@@ -72,8 +73,12 @@ public class TripChatController : ControllerBase
         var userId = GetUserId();
         if (!await IsMember(tripId, userId, ct)) return Forbid();
 
-        var text = dto.Text?.Trim();
-        if (string.IsNullOrEmpty(text)) return BadRequest("Message cannot be empty.");
+        var text = dto.Text?.Trim() ?? string.Empty;
+        var imageUrl = dto.ImageUrl?.Trim();
+        if (string.IsNullOrEmpty(imageUrl)) imageUrl = null;
+
+        if (string.IsNullOrEmpty(text) && imageUrl == null)
+            return BadRequest("Message must include text or an image.");
 
         var user = await _db.Users.FindAsync([userId], ct);
 
@@ -83,6 +88,7 @@ public class TripChatController : ControllerBase
             UserId = userId,
             UserName = user?.Name ?? "Someone",
             Text = text,
+            ImageUrl = imageUrl,
             IsSystem = false,
             CreatedAt = DateTime.UtcNow,
         };
@@ -95,6 +101,7 @@ public class TripChatController : ControllerBase
             UserId = msg.UserId,
             UserName = msg.UserName,
             Text = msg.Text,
+            ImageUrl = msg.ImageUrl,
             IsSystem = msg.IsSystem,
             CreatedAt = msg.CreatedAt,
         });
