@@ -25,6 +25,14 @@ public class UsersController : ControllerBase
         var tripsJoined = await _db.TripMembers.CountAsync(tm => tm.UserId == userId);
         var sidequestsCreated = await _db.Trips.CountAsync(t => t.OwnerId == userId);
 
+        var countriesVisited = await _db.TripMembers
+            .Where(tm => tm.UserId == userId)
+            .Join(_db.Trips, tm => tm.TripId, t => t.Id, (tm, t) => t.Destination)
+            .Where(d => d != null && d != "")
+            .Select(d => d.ToLower())
+            .Distinct()
+            .CountAsync();
+
         return Ok(new UserProfileDto
         {
             Id = user.Id,
@@ -33,7 +41,7 @@ public class UsersController : ControllerBase
             AvatarUrl = user.AvatarUrl,
             TripsJoined = tripsJoined,
             SidequestsCreated = sidequestsCreated,
-            CountriesVisited = 0
+            CountriesVisited = countriesVisited
         });
     }
 }

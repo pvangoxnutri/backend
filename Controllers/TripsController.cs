@@ -434,13 +434,18 @@ public class TripsController : ControllerBase
         var tripDateError = ValidateTripDateRange(nextStartDate, nextEndDate);
         if (tripDateError != null) return BadRequest(tripDateError);
 
-        var outOfRangeActivityExists = await _db.TripActivities.AnyAsync(activity =>
-            activity.TripId == id
-            && (activity.Date < nextStartDate || activity.Date > nextEndDate));
+        var outOfRangeActivities = await _db.TripActivities
+            .Where(activity =>
+                activity.TripId == id
+                && (activity.Date < nextStartDate || activity.Date > nextEndDate))
+            .Select(activity => new { activity.Title, activity.Date })
+            .ToListAsync();
 
-        if (outOfRangeActivityExists)
+        if (outOfRangeActivities.Count > 0)
         {
-            return BadRequest("One or more SideQuests fall outside the updated trip dates.");
+            var details = string.Join(", ", outOfRangeActivities.Select(a =>
+                $"'{a.Title}' ({a.Date:yyyy-MM-dd})"));
+            return BadRequest($"These SideQuests fall outside the new trip dates: {details}. Move or delete them first.");
         }
 
         if (isOwner && !revealed)

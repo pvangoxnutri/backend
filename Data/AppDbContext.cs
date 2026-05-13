@@ -20,6 +20,7 @@ public class AppDbContext : DbContext
     public DbSet<TripEvent> TripEvents => Set<TripEvent>();
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
     public DbSet<ChatPresenceEntry> ChatPresence => Set<ChatPresenceEntry>();
+    public DbSet<Feedback> Feedbacks => Set<Feedback>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
