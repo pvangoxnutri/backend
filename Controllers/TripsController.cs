@@ -1233,7 +1233,7 @@ public class TripsController : ControllerBase
         return Ok(new ShareTripDto
         {
             ShareCode = trip.ShareCode,
-            ShareUrl = $"sidequest://share/{trip.ShareCode}"
+            ShareUrl = $"https://sidequesttravel.app/share/{trip.ShareCode}"
         });
     }
 

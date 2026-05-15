@@ -273,12 +273,16 @@ public class ExpensesController : ControllerBase
                 netMap[participant.UserId] -= participant.Amount;
         }
 
+        // A settlement is a cash payment from `from` to `to`.
+        // It cancels out part of an existing debt where `from` owes `to`:
+        //   `from` had negative net (they owed); paying cash brings them toward 0 → += amount
+        //   `to`   had positive net (they were owed); being paid brings them toward 0 → -= amount
         foreach (var settlement in settlements)
         {
-            if (netMap.ContainsKey(settlement.ToUserId))
-                netMap[settlement.ToUserId] += settlement.Amount;
             if (netMap.ContainsKey(settlement.FromUserId))
-                netMap[settlement.FromUserId] -= settlement.Amount;
+                netMap[settlement.FromUserId] += settlement.Amount;
+            if (netMap.ContainsKey(settlement.ToUserId))
+                netMap[settlement.ToUserId] -= settlement.Amount;
         }
 
         var memberLookup = members.ToDictionary(m => m.UserId);

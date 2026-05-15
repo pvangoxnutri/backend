@@ -9,4 +9,5 @@ public class ChatMessageDto
     public string? ImageUrl { get; set; }
     public bool IsSystem { get; set; }
     public DateTime CreatedAt { get; set; }
+    public LinkPreviewDto? LinkPreview { get; set; }
 }

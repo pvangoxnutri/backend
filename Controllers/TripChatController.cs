@@ -1,10 +1,12 @@
 using System.Security.Claims;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using sidequest.backend.Data;
 using sidequest.backend.Dtos;
 using sidequest.backend.Models;
+using sidequest.backend.Services;
 
 namespace sidequest.backend.Controllers;
 
@@ -14,10 +16,12 @@ namespace sidequest.backend.Controllers;
 public class TripChatController : ControllerBase
 {
     private readonly AppDbContext _db;
+    private readonly LinkPreviewService _linkPreviewService;
 
-    public TripChatController(AppDbContext db)
+    public TripChatController(AppDbContext db, LinkPreviewService linkPreviewService)
     {
         _db = db;
+        _linkPreviewService = linkPreviewService;
     }
 
     private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
@@ -46,7 +50,13 @@ public class TripChatController : ControllerBase
         var messages = await query
             .OrderBy(m => m.CreatedAt)
             .Take(string.IsNullOrEmpty(since) ? 80 : 200)
-            .Select(m => new ChatMessageDto
+            .ToListAsync(ct);
+
+        var result = new List<ChatMessageDto>();
+        foreach (var m in messages)
+        {
+            var linkPreview = await GetLinkPreviewAsync(m.Text, ct);
+            result.Add(new ChatMessageDto
             {
                 Id = m.Id,
                 UserId = m.UserId,
@@ -55,10 +65,11 @@ public class TripChatController : ControllerBase
                 ImageUrl = m.ImageUrl,
                 IsSystem = m.IsSystem,
                 CreatedAt = m.CreatedAt,
-            })
-            .ToListAsync(ct);
+                LinkPreview = linkPreview,
+            });
+        }
 
-        return Ok(messages);
+        return Ok(result);
     }
 
     // ── POST /api/trips/{tripId}/chat ─────────────────────────────────────────
@@ -95,6 +106,8 @@ public class TripChatController : ControllerBase
         _db.ChatMessages.Add(msg);
         await _db.SaveChangesAsync(ct);
 
+        var linkPreview = await GetLinkPreviewAsync(text, ct);
+
         return Ok(new ChatMessageDto
         {
             Id = msg.Id,
@@ -104,6 +117,7 @@ public class TripChatController : ControllerBase
             ImageUrl = msg.ImageUrl,
             IsSystem = msg.IsSystem,
             CreatedAt = msg.CreatedAt,
+            LinkPreview = linkPreview,
         });
     }
 
@@ -198,5 +212,31 @@ public class TripChatController : ControllerBase
         }
 
         return Ok();
+    }
+
+    private async Task<LinkPreviewDto?> GetLinkPreviewAsync(string text, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(text))
+            return null;
+
+        var urlPattern = new Regex(@"https?://[^\s]+");
+        var matches = urlPattern.Matches(text);
+
+        if (matches.Count == 0)
+            return null;
+
+        var firstUrl = matches[0].Value;
+        var preview = await _linkPreviewService.GetPreviewAsync(firstUrl, ct);
+
+        if (preview == null)
+            return null;
+
+        return new LinkPreviewDto
+        {
+            Url = firstUrl,
+            Title = preview.Title,
+            Description = preview.Description,
+            ImageUrl = preview.ImageUrl,
+        };
     }
 }

@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using sidequest.backend.Data;
+using sidequest.backend.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 LoadLocalEnvFile(Path.Combine(builder.Environment.ContentRootPath, ".env.local"));
@@ -13,7 +14,7 @@ builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
 
 builder.Services.AddControllers();
-builder.Services.AddHttpClient();
+builder.Services.AddHttpClient<LinkPreviewService>();
 
 var configuredConnectionString = builder.Configuration.GetConnectionString("DefaultConnection")
     ?? throw new InvalidOperationException("ConnectionStrings:DefaultConnection must be configured.");
