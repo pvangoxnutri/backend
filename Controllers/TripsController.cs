@@ -1268,6 +1268,77 @@ public class TripsController : ControllerBase
         });
     }
 
+    // ── POST /api/trips/share/{code}/copy ──────────────────────────────────────
+    [Authorize]
+    [HttpPost("share/{code}/copy")]
+    public async Task<ActionResult<Quest>> CopySharedTrip(string code)
+    {
+        var originalTrip = await _db.Trips.FirstOrDefaultAsync(t => t.ShareCode == code);
+        if (originalTrip == null) return NotFound("Adventure not found.");
+
+        if (originalTrip.Status != "completed")
+            return BadRequest("This adventure is no longer available for copying.");
+
+        var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        if (string.IsNullOrWhiteSpace(userId) || !Guid.TryParse(userId, out var userGuid))
+            return Unauthorized();
+
+        var newTrip = new Trip
+        {
+            Title = originalTrip.Title,
+            Description = originalTrip.Description,
+            Destination = originalTrip.Destination,
+            StartDate = originalTrip.StartDate,
+            EndDate = originalTrip.EndDate,
+            ImageUrl = originalTrip.ImageUrl,
+            SpotifyUrl = originalTrip.SpotifyUrl,
+            OwnerId = userGuid,
+            Status = "active",
+            InviteCode = GenerateInviteCode(),
+        };
+
+        _db.Trips.Add(newTrip);
+        await _db.SaveChangesAsync();
+
+        var originalActivities = await _db.TripActivities
+            .Where(a => a.TripId == originalTrip.Id && a.Visibility == "public")
+            .ToListAsync();
+
+        foreach (var activity in originalActivities)
+        {
+            var newActivity = new TripActivity
+            {
+                TripId = newTrip.Id,
+                Title = activity.Title,
+                Category = activity.Category,
+                Date = activity.Date,
+                Time = activity.Time,
+                Description = activity.Description,
+                Visibility = "public",
+                Location = activity.Location,
+                Latitude = activity.Latitude,
+                Longitude = activity.Longitude,
+                CreatedAt = DateTime.UtcNow,
+            };
+            _db.TripActivities.Add(newActivity);
+        }
+
+        await _db.SaveChangesAsync();
+
+        return Ok(new Quest
+        {
+            Id = newTrip.Id,
+            Title = newTrip.Title,
+            Description = newTrip.Description,
+            Destination = newTrip.Destination,
+            StartDate = newTrip.StartDate,
+            EndDate = newTrip.EndDate,
+            ImageUrl = newTrip.ImageUrl,
+            SpotifyUrl = newTrip.SpotifyUrl,
+            OwnerIds = new[] { userGuid },
+        });
+    }
+
     // ── POST /api/trips/seed ────────────────────────────────────────────────────
     // Development only: create test adventure with activities for user by email
     [HttpPost("seed")]
