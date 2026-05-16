@@ -1,0 +1,34 @@
+# Build output
+**/bin/
+**/obj/
+
+# IDE / editor
+**/.vs/
+**/.vscode/
+**/.idea/
+**/*.user
+**/*.suo
+
+# Git
+**/.git/
+**/.gitignore
+**/.gitattributes
+
+# Secrets and local config (never bake into image)
+**/.env
+**/.env.local
+**/.env.*.local
+**/appsettings.Development.json
+**/secrets.json
+
+# Docker meta (not needed inside image)
+Dockerfile
+.dockerignore
+
+# Docs
+**/README.md
+**/*.md
+
+# OS junk
+**/.DS_Store
+**/Thumbs.db

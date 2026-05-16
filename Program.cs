@@ -111,12 +111,22 @@ builder.Services.AddCors(options =>
                   if (string.IsNullOrWhiteSpace(origin))
                       return false;
 
+                  // Production web origins
+                  if (origin.Equals("https://sidequesttravel.app", StringComparison.OrdinalIgnoreCase) ||
+                      origin.Equals("https://www.sidequesttravel.app", StringComparison.OrdinalIgnoreCase) ||
+                      origin.Equals("https://api.sidequesttravel.app", StringComparison.OrdinalIgnoreCase))
+                  {
+                      return true;
+                  }
+
+                  // Local development
                   if (origin.StartsWith("http://localhost:", StringComparison.OrdinalIgnoreCase) ||
                       origin.StartsWith("https://localhost:", StringComparison.OrdinalIgnoreCase))
                   {
                       return true;
                   }
 
+                  // Expo Go tunnels
                   if (origin.Contains(".exp.direct", StringComparison.OrdinalIgnoreCase) ||
                       origin.Contains(".trycloudflare.com", StringComparison.OrdinalIgnoreCase))
                   {
@@ -165,6 +175,15 @@ app.UseCors("LocalFrontend");
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
+
+// Lightweight health endpoint for load balancers / uptime checks.
+app.MapGet("/health", () => Results.Ok(new
+{
+    status = "ok",
+    service = "sidequest-backend",
+    environment = app.Environment.EnvironmentName,
+    timestamp = DateTime.UtcNow
+}));
 
 app.Run();
 

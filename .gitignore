@@ -10,6 +10,7 @@ bin-temp/
 appsettings.Development.json
 appsettings.*.json
 !appsettings.json
+!appsettings.Production.json
 .env.local
 .env*.local
 

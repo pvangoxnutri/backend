@@ -1271,7 +1271,7 @@ public class TripsController : ControllerBase
     // ── POST /api/trips/share/{code}/copy ──────────────────────────────────────
     [Authorize]
     [HttpPost("share/{code}/copy")]
-    public async Task<ActionResult<Quest>> CopySharedTrip(string code)
+    public async Task<ActionResult<TripResponseDto>> CopySharedTrip(string code)
     {
         var originalTrip = await _db.Trips.FirstOrDefaultAsync(t => t.ShareCode == code);
         if (originalTrip == null) return NotFound("Adventure not found.");
@@ -1298,6 +1298,7 @@ public class TripsController : ControllerBase
         };
 
         _db.Trips.Add(newTrip);
+        _db.TripMembers.Add(new TripMember { TripId = newTrip.Id, UserId = userGuid, IsOwner = true });
         await _db.SaveChangesAsync();
 
         var originalActivities = await _db.TripActivities
@@ -1309,15 +1310,15 @@ public class TripsController : ControllerBase
             var newActivity = new TripActivity
             {
                 TripId = newTrip.Id,
+                OwnerId = userGuid,
                 Title = activity.Title,
                 Category = activity.Category,
                 Date = activity.Date,
                 Time = activity.Time,
                 Description = activity.Description,
+                ImageUrl = activity.ImageUrl,
+                SpotifyUrl = activity.SpotifyUrl,
                 Visibility = "public",
-                Location = activity.Location,
-                Latitude = activity.Latitude,
-                Longitude = activity.Longitude,
                 CreatedAt = DateTime.UtcNow,
             };
             _db.TripActivities.Add(newActivity);
@@ -1325,18 +1326,8 @@ public class TripsController : ControllerBase
 
         await _db.SaveChangesAsync();
 
-        return Ok(new Quest
-        {
-            Id = newTrip.Id,
-            Title = newTrip.Title,
-            Description = newTrip.Description,
-            Destination = newTrip.Destination,
-            StartDate = newTrip.StartDate,
-            EndDate = newTrip.EndDate,
-            ImageUrl = newTrip.ImageUrl,
-            SpotifyUrl = newTrip.SpotifyUrl,
-            OwnerIds = new[] { userGuid },
-        });
+        var ownerIds = new List<Guid> { userGuid };
+        return Ok(BuildResponse(newTrip, ownerIds, canViewFull: true));
     }
 
     // ── POST /api/trips/seed ────────────────────────────────────────────────────
