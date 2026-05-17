@@ -101,6 +101,274 @@ public class AuthController : ControllerBase
         }
     }
 
+    // ── GET /api/auth/me/export ────────────────────────────────────────────────
+    // GDPR data export: returns a structured JSON snapshot of everything we
+    // store where the current user is the data subject. Read-only; no DB writes.
+
+    [HttpGet("me/export")]
+    [Authorize]
+    public async Task<ActionResult<UserExportDto>> ExportMyData(CancellationToken cancellationToken)
+    {
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        var email = User.FindFirstValue(ClaimTypes.Email)?.Trim().ToLowerInvariant() ?? string.Empty;
+
+        var user = await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
+        if (user == null) return NotFound();
+
+        // Trip membership split: trips I own vs trips I am only a member of
+        var memberRows = await _db.TripMembers.AsNoTracking()
+            .Where(tm => tm.UserId == userId)
+            .ToListAsync(cancellationToken);
+        var memberTripIds = memberRows.Select(tm => tm.TripId).ToList();
+
+        var ownedTrips = await _db.Trips.AsNoTracking()
+            .Where(t => t.OwnerId == userId)
+            .ToListAsync(cancellationToken);
+        var ownedTripIds = ownedTrips.Select(t => t.Id).ToHashSet();
+
+        var memberOnlyTripIds = memberTripIds.Where(id => !ownedTripIds.Contains(id)).ToList();
+        var memberOnlyTrips = await _db.Trips.AsNoTracking()
+            .Where(t => memberOnlyTripIds.Contains(t.Id))
+            .ToListAsync(cancellationToken);
+
+        // Activities the user authored (anywhere)
+        var myActivities = await _db.TripActivities.AsNoTracking()
+            .Where(a => a.OwnerId == userId)
+            .ToListAsync(cancellationToken);
+
+        // Comments the user wrote
+        var myComments = await _db.ActivityComments.AsNoTracking()
+            .Where(c => c.UserId == userId)
+            .ToListAsync(cancellationToken);
+
+        // Chat messages the user sent (anonymous system messages skipped via UserId check)
+        var myChat = await _db.ChatMessages.AsNoTracking()
+            .Where(m => m.UserId == userId)
+            .ToListAsync(cancellationToken);
+
+        // Expenses the user created, paid for, or participated in
+        var expensesCreated = await _db.Expenses.AsNoTracking()
+            .Where(e => e.CreatedByUserId == userId)
+            .ToListAsync(cancellationToken);
+
+        var myPayerRows = await _db.ExpensePayers.AsNoTracking()
+            .Where(p => p.UserId == userId)
+            .Select(p => new { p.ExpenseId, p.Expense.TripId, p.Amount })
+            .ToListAsync(cancellationToken);
+
+        var myParticipantRows = await _db.ExpenseParticipants.AsNoTracking()
+            .Where(p => p.UserId == userId)
+            .Select(p => new { p.ExpenseId, p.Expense.TripId, p.Amount })
+            .ToListAsync(cancellationToken);
+
+        var settlements = await _db.Settlements.AsNoTracking()
+            .Where(s => s.FromUserId == userId || s.ToUserId == userId)
+            .ToListAsync(cancellationToken);
+
+        // Invites I sent
+        var invitesSent = await _db.TripInvites.AsNoTracking()
+            .Where(i => i.InvitedByUserId == userId)
+            .ToListAsync(cancellationToken);
+
+        // Invites for my email
+        var invitesReceived = string.IsNullOrWhiteSpace(email)
+            ? new List<Models.TripInvite>()
+            : await _db.TripInvites.AsNoTracking()
+                .Where(i => i.Email == email)
+                .ToListAsync(cancellationToken);
+
+        var feedback = await _db.Feedbacks.AsNoTracking()
+            .Where(f => f.UserId == userId.ToString())
+            .ToListAsync(cancellationToken);
+
+        var events = await _db.TripEvents.AsNoTracking()
+            .Where(e => e.ActorId == userId)
+            .ToListAsync(cancellationToken);
+
+        // Flat list of every image URL the user is responsible for
+        var imageUrls = new List<string?>
+        {
+            user.AvatarUrl,
+        };
+        imageUrls.AddRange(ownedTrips.Select(t => t.ImageUrl));
+        imageUrls.AddRange(myActivities.Select(a => a.ImageUrl));
+        imageUrls.AddRange(myChat.Select(m => m.ImageUrl));
+
+        var memberMap = memberRows.ToDictionary(tm => tm.TripId, tm => tm);
+
+        var export = new UserExportDto
+        {
+            ExportedAt = DateTime.UtcNow,
+            SchemaVersion = "1.0",
+            User = new ExportedUserDto
+            {
+                Id = user.Id,
+                Email = user.Email,
+                Name = user.Name,
+                AvatarUrl = user.AvatarUrl,
+                Bio = user.Bio,
+                Role = user.Role,
+                HasCompletedOnboarding = user.HasCompletedOnboarding,
+                FoundVia = user.FoundVia,
+                Purpose = user.Purpose,
+                PurposeOtherText = user.PurposeOtherText,
+                CreatedAt = user.CreatedAt,
+            },
+            OwnedTrips = ownedTrips.Select(t => new ExportedTripDto
+            {
+                Id = t.Id,
+                Title = t.Title,
+                Description = t.Description,
+                Destination = t.Destination,
+                StartDate = t.StartDate,
+                EndDate = t.EndDate,
+                Visibility = t.Visibility,
+                RevealAt = t.RevealAt,
+                Teaser = t.Teaser,
+                ImageUrl = t.ImageUrl,
+                SpotifyUrl = t.SpotifyUrl,
+                InviteCode = t.InviteCode,
+                Status = t.Status,
+                ShareCode = t.ShareCode,
+                SharedAt = t.SharedAt,
+                OwnerId = t.OwnerId,
+                CreatedAt = t.CreatedAt,
+            }).ToList(),
+            MemberTrips = memberOnlyTrips.Select(t => new ExportedTripDto
+            {
+                Id = t.Id,
+                Title = t.Title,
+                Description = t.Description,
+                Destination = t.Destination,
+                StartDate = t.StartDate,
+                EndDate = t.EndDate,
+                Visibility = t.Visibility,
+                RevealAt = t.RevealAt,
+                Teaser = t.Teaser,
+                ImageUrl = t.ImageUrl,
+                SpotifyUrl = t.SpotifyUrl,
+                InviteCode = t.InviteCode,
+                Status = t.Status,
+                ShareCode = t.ShareCode,
+                SharedAt = t.SharedAt,
+                OwnerId = t.OwnerId,
+                CreatedAt = t.CreatedAt,
+                JoinedAt = memberMap.TryGetValue(t.Id, out var m) ? m.JoinedAt : null,
+                IsOwnerMembership = memberMap.TryGetValue(t.Id, out var m2) ? m2.IsOwner : null,
+            }).ToList(),
+            Activities = myActivities.Select(a => new ExportedActivityDto
+            {
+                Id = a.Id,
+                TripId = a.TripId,
+                Date = a.Date,
+                Title = a.Title,
+                Description = a.Description,
+                Time = a.Time,
+                Category = a.Category,
+                ImageUrl = a.ImageUrl,
+                SpotifyUrl = a.SpotifyUrl,
+                Visibility = a.Visibility,
+                RevealAt = a.RevealAt,
+                Teaser = a.Teaser,
+                TeaserOffsetMinutes = a.TeaserOffsetMinutes,
+                IsHidden = a.IsHidden,
+                AssignedToUserId = a.AssignedToUserId,
+                CreatedAt = a.CreatedAt,
+            }).ToList(),
+            ActivityComments = myComments.Select(c => new ExportedCommentDto
+            {
+                Id = c.Id,
+                ActivityId = c.ActivityId,
+                Text = c.Text,
+                CreatedAt = c.CreatedAt,
+            }).ToList(),
+            ChatMessages = myChat.Select(m => new ExportedChatMessageDto
+            {
+                Id = m.Id,
+                TripId = m.TripId,
+                Text = m.Text,
+                ImageUrl = m.ImageUrl,
+                IsSystem = m.IsSystem,
+                CreatedAt = m.CreatedAt,
+            }).ToList(),
+            Expenses = new ExportedExpensesDto
+            {
+                Created = expensesCreated.Select(e => new ExportedExpenseDto
+                {
+                    Id = e.Id,
+                    TripId = e.TripId,
+                    Description = e.Description,
+                    TotalAmount = e.TotalAmount,
+                    Date = e.Date,
+                    SplitMode = e.SplitMode,
+                    Currency = e.Currency,
+                    CreatedAt = e.CreatedAt,
+                }).ToList(),
+                PaidBy = myPayerRows.Select(p => new ExportedExpenseShareDto
+                {
+                    ExpenseId = p.ExpenseId,
+                    TripId = p.TripId,
+                    Amount = p.Amount,
+                }).ToList(),
+                ParticipatedIn = myParticipantRows.Select(p => new ExportedExpenseShareDto
+                {
+                    ExpenseId = p.ExpenseId,
+                    TripId = p.TripId,
+                    Amount = p.Amount,
+                }).ToList(),
+            },
+            Settlements = settlements.Select(s => new ExportedSettlementDto
+            {
+                Id = s.Id,
+                TripId = s.TripId,
+                FromUserId = s.FromUserId,
+                ToUserId = s.ToUserId,
+                Amount = s.Amount,
+                Note = s.Note,
+                CreatedAt = s.CreatedAt,
+            }).ToList(),
+            InvitesSent = invitesSent.Select(i => new ExportedInviteDto
+            {
+                Id = i.Id,
+                TripId = i.TripId,
+                Email = i.Email,
+                InvitedByUserId = i.InvitedByUserId,
+                Status = i.Status,
+                CreatedAt = i.CreatedAt,
+            }).ToList(),
+            InvitesReceived = invitesReceived.Select(i => new ExportedInviteDto
+            {
+                Id = i.Id,
+                TripId = i.TripId,
+                Email = i.Email,
+                InvitedByUserId = i.InvitedByUserId,
+                Status = i.Status,
+                CreatedAt = i.CreatedAt,
+            }).ToList(),
+            Feedback = feedback.Select(f => new ExportedFeedbackDto
+            {
+                Id = f.Id,
+                Type = f.Type,
+                Message = f.Message,
+                CreatedAt = f.CreatedAt,
+            }).ToList(),
+            TripEvents = events.Select(e => new ExportedTripEventDto
+            {
+                Id = e.Id,
+                TripId = e.TripId,
+                Type = e.Type,
+                CreatedAt = e.CreatedAt,
+            }).ToList(),
+            UploadedImageUrls = imageUrls
+                .Where(u => !string.IsNullOrWhiteSpace(u))
+                .Select(u => u!)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList(),
+        };
+
+        return Ok(export);
+    }
+
     [HttpDelete("me")]
     [Authorize]
     public async Task<ActionResult> DeleteMyAccount(CancellationToken cancellationToken)
