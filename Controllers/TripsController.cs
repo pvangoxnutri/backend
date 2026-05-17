@@ -202,6 +202,7 @@ public class TripsController : ControllerBase
             InviteCode = trip.InviteCode,
             Title = canViewFull ? trip.Title : null,
             Description = canViewFull ? trip.Description : null,
+            ShareCode = canViewFull ? trip.ShareCode : null,
         };
 
     // ── GET /api/trips/invites/me ─────────────────────────────────────────────
@@ -1244,6 +1245,36 @@ public class TripsController : ControllerBase
 
         trip.Status = "completed";
         await _db.SaveChangesAsync();
+        return NoContent();
+    }
+
+    // ── DELETE /api/trips/{id}/share ────────────────────────────────────────
+    // Revoke the public share link for a completed adventure.
+    // Existing copies made by other users (separate Trip rows) are unaffected.
+
+    [HttpDelete("{id}/share")]
+    [Authorize]
+    public async Task<ActionResult> RevokeShare(Guid id)
+    {
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        var isAdmin = IsAdmin();
+
+        var trip = await _db.Trips.FindAsync(id);
+        if (trip == null) return NotFound();
+
+        var ownerIds = await GetOwnerIds(id);
+        if (!ownerIds.Contains(userId) && !isAdmin) return Forbid();
+
+        if (string.IsNullOrEmpty(trip.ShareCode))
+        {
+            // Idempotent: nothing to revoke.
+            return NoContent();
+        }
+
+        trip.ShareCode = null;
+        trip.SharedAt = null;
+        await _db.SaveChangesAsync();
+
         return NoContent();
     }
 

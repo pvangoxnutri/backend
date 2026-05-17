@@ -23,4 +23,5 @@ public class TripResponseDto
     // Only returned when canViewFull
     public string? Title { get; set; }
     public string? Description { get; set; }
+    public string? ShareCode { get; set; }
 }
