@@ -15,6 +15,7 @@ builder.Logging.AddConsole();
 
 builder.Services.AddControllers();
 builder.Services.AddHttpClient<LinkPreviewService>();
+builder.Services.AddHttpClient<ISupabaseStorageService, SupabaseStorageService>();
 
 var configuredConnectionString = builder.Configuration.GetConnectionString("DefaultConnection")
     ?? throw new InvalidOperationException("ConnectionStrings:DefaultConnection must be configured.");

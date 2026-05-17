@@ -7,6 +7,7 @@ using Npgsql;
 using sidequest.backend.Data;
 using sidequest.backend.Dtos;
 using sidequest.backend.Models;
+using sidequest.backend.Services;
 
 namespace sidequest.backend.Controllers;
 
@@ -18,17 +19,20 @@ public class AuthController : ControllerBase
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IConfiguration _configuration;
     private readonly ILogger<AuthController> _logger;
+    private readonly ISupabaseStorageService _storage;
 
     public AuthController(
         AppDbContext db,
         IHttpClientFactory httpClientFactory,
         IConfiguration configuration,
-        ILogger<AuthController> logger)
+        ILogger<AuthController> logger,
+        ISupabaseStorageService storage)
     {
         _db = db;
         _httpClientFactory = httpClientFactory;
         _configuration = configuration;
         _logger = logger;
+        _storage = storage;
     }
 
     [HttpPost("sync")]
@@ -68,6 +72,7 @@ public class AuthController : ControllerBase
         try
         {
             var user = await GetOrCreateCurrentUserAsync(null, cancellationToken);
+            var previousAvatarUrl = user.AvatarUrl;
 
             if (!string.IsNullOrWhiteSpace(dto.Name)) user.Name = dto.Name.Trim();
             if (dto.AvatarUrl != null) user.AvatarUrl = dto.AvatarUrl;
@@ -78,6 +83,11 @@ public class AuthController : ControllerBase
             if (dto.PurposeOtherText != null) user.PurposeOtherText = dto.PurposeOtherText.Trim().Length > 0 ? dto.PurposeOtherText.Trim() : null;
 
             await _db.SaveChangesAsync(cancellationToken);
+
+            if (!string.IsNullOrWhiteSpace(previousAvatarUrl) && previousAvatarUrl != user.AvatarUrl)
+            {
+                await _storage.DeleteByUrlAsync(previousAvatarUrl, cancellationToken);
+            }
 
             return Ok(await CreateAuthResponseAsync(user, cancellationToken));
         }
@@ -98,6 +108,19 @@ public class AuthController : ControllerBase
         var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
         var email = User.FindFirstValue(ClaimTypes.Email)?.Trim().ToLowerInvariant();
 
+        // Collect image URLs that will become orphaned by this deletion.
+        // Done BEFORE any DB-row deletion so the joins still work.
+        List<string?> imagesToDelete;
+        try
+        {
+            imagesToDelete = await CollectImagesForUserDeletionAsync(userId, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not enumerate images for user {UserId}; cleanup will be skipped.", userId);
+            imagesToDelete = new List<string?>();
+        }
+
         try
         {
             await DeleteLocalUserDataAsync(userId, email, cancellationToken);
@@ -117,7 +140,59 @@ public class AuthController : ControllerBase
             return StatusCode(500, "Could not delete auth account.");
         }
 
+        // Best-effort storage cleanup. Failures here are logged inside the service
+        // and do not affect the success of the account deletion.
+        await _storage.DeleteManyByUrlAsync(imagesToDelete, cancellationToken);
+
         return NoContent();
+    }
+
+    /// <summary>
+    /// Collect every image URL that belongs to the user and will become orphaned once
+    /// the account (and its owned trips) are deleted. Must run BEFORE the DB cascade.
+    /// </summary>
+    private async Task<List<string?>> CollectImagesForUserDeletionAsync(Guid userId, CancellationToken cancellationToken)
+    {
+        var images = new List<string?>();
+
+        var avatar = await _db.Users
+            .Where(u => u.Id == userId)
+            .Select(u => u.AvatarUrl)
+            .FirstOrDefaultAsync(cancellationToken);
+        images.Add(avatar);
+
+        var ownedTripIds = await _db.Trips
+            .Where(t => t.OwnerId == userId)
+            .Select(t => t.Id)
+            .ToListAsync(cancellationToken);
+
+        if (ownedTripIds.Count > 0)
+        {
+            images.AddRange(await _db.Trips
+                .Where(t => ownedTripIds.Contains(t.Id))
+                .Select(t => t.ImageUrl)
+                .ToListAsync(cancellationToken));
+
+            images.AddRange(await _db.TripActivities
+                .Where(a => ownedTripIds.Contains(a.TripId))
+                .Select(a => a.ImageUrl)
+                .ToListAsync(cancellationToken));
+
+            images.AddRange(await _db.ChatMessages
+                .Where(m => ownedTripIds.Contains(m.TripId))
+                .Select(m => m.ImageUrl)
+                .ToListAsync(cancellationToken));
+        }
+
+        // Activities authored by this user on trips they don't own are deleted too
+        // (see DeleteLocalUserDataAsync) - so their images are orphaned.
+        images.AddRange(await _db.TripActivities
+            .Where(a => a.OwnerId == userId
+                        && (ownedTripIds.Count == 0 || !ownedTripIds.Contains(a.TripId)))
+            .Select(a => a.ImageUrl)
+            .ToListAsync(cancellationToken));
+
+        return images;
     }
 
     private async Task DeleteLocalUserDataAsync(Guid userId, string? email, CancellationToken cancellationToken)

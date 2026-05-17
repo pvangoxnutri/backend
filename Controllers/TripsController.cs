@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 using sidequest.backend.Data;
 using sidequest.backend.Dtos;
 using sidequest.backend.Models;
+using sidequest.backend.Services;
 
 namespace sidequest.backend.Controllers;
 
@@ -14,10 +15,12 @@ namespace sidequest.backend.Controllers;
 public class TripsController : ControllerBase
 {
     private readonly AppDbContext _db;
+    private readonly ISupabaseStorageService _storage;
 
-    public TripsController(AppDbContext db)
+    public TripsController(AppDbContext db, ISupabaseStorageService storage)
     {
         _db = db;
+        _storage = storage;
     }
 
     // ── Permission helpers ────────────────────────────────────────────────────
@@ -448,6 +451,8 @@ public class TripsController : ControllerBase
             return BadRequest($"These SideQuests fall outside the new trip dates: {details}. Move or delete them first.");
         }
 
+        var previousImageUrl = trip.ImageUrl;
+
         if (isOwner && !revealed)
         {
             // Owners can edit all fields before reveal
@@ -486,6 +491,13 @@ public class TripsController : ControllerBase
         }
 
         await _db.SaveChangesAsync();
+
+        // If the cover image was replaced or cleared, remove the old file.
+        if (!string.IsNullOrWhiteSpace(previousImageUrl) && previousImageUrl != trip.ImageUrl)
+        {
+            await _storage.DeleteByUrlAsync(previousImageUrl);
+        }
+
         return NoContent();
     }
 
@@ -516,7 +528,7 @@ public class TripsController : ControllerBase
 
     [HttpDelete("{id}")]
     [Authorize]
-    public async Task<ActionResult> DeleteTrip(Guid id)
+    public async Task<ActionResult> DeleteTrip(Guid id, CancellationToken cancellationToken)
     {
         var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
         var isAdmin = IsAdmin();
@@ -527,8 +539,23 @@ public class TripsController : ControllerBase
         var ownerIds = await GetOwnerIds(id);
         if (!ownerIds.Contains(userId) && !isAdmin) return Forbid();
 
+        // Collect image URLs that will become orphaned by this deletion.
+        var images = new List<string?> { trip.ImageUrl };
+        images.AddRange(await _db.TripActivities
+            .Where(a => a.TripId == id)
+            .Select(a => a.ImageUrl)
+            .ToListAsync(cancellationToken));
+        images.AddRange(await _db.ChatMessages
+            .Where(m => m.TripId == id)
+            .Select(m => m.ImageUrl)
+            .ToListAsync(cancellationToken));
+
         _db.Trips.Remove(trip);
-        await _db.SaveChangesAsync();
+        await _db.SaveChangesAsync(cancellationToken);
+
+        // Best-effort: never block the user-facing delete on storage cleanup.
+        await _storage.DeleteManyByUrlAsync(images, cancellationToken);
+
         return NoContent();
     }
 
@@ -1018,6 +1045,8 @@ public class TripsController : ControllerBase
         if (!IsValidSpotifyUrl(nextSpotifyUrl))
             return BadRequest("Spotify link must be a valid public Spotify URL.");
 
+        var previousImageUrl = activity.ImageUrl;
+
         if (dto.Date.HasValue) activity.Date = dto.Date.Value;
         if (dto.Title != null) activity.Title = dto.Title.Trim();
         if (dto.Description != null) activity.Description = NormalizeOptionalText(dto.Description);
@@ -1034,6 +1063,12 @@ public class TripsController : ControllerBase
         activity.TeaserOffsetMinutes = nextVisibility == "hidden" ? nextTeaserOffset : null;
 
         await _db.SaveChangesAsync();
+
+        if (!string.IsNullOrWhiteSpace(previousImageUrl) && previousImageUrl != activity.ImageUrl)
+        {
+            await _storage.DeleteByUrlAsync(previousImageUrl);
+        }
+
         return NoContent();
     }
 
@@ -1066,18 +1101,23 @@ public class TripsController : ControllerBase
 
     [HttpDelete("{id}/activities/{activityId}")]
     [Authorize]
-    public async Task<ActionResult> DeleteActivity(Guid id, Guid activityId)
+    public async Task<ActionResult> DeleteActivity(Guid id, Guid activityId, CancellationToken cancellationToken)
     {
         var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
         var isMember = await IsTripMember(id, userId);
         if (!isMember) return Forbid();
 
         var activity = await _db.TripActivities
-            .FirstOrDefaultAsync(a => a.Id == activityId && a.TripId == id);
+            .FirstOrDefaultAsync(a => a.Id == activityId && a.TripId == id, cancellationToken);
         if (activity == null) return NotFound();
 
+        var imageUrl = activity.ImageUrl;
+
         _db.TripActivities.Remove(activity);
-        await _db.SaveChangesAsync();
+        await _db.SaveChangesAsync(cancellationToken);
+
+        await _storage.DeleteByUrlAsync(imageUrl, cancellationToken);
+
         return NoContent();
     }
 

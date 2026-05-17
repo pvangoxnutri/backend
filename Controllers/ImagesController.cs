@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using sidequest.backend.Services;
 
 namespace sidequest.backend.Controllers;
 
@@ -7,40 +8,45 @@ namespace sidequest.backend.Controllers;
 [Route("api/[controller]")]
 public class ImagesController : ControllerBase
 {
-    private readonly IWebHostEnvironment _env;
+    private static readonly string[] AllowedContentTypes =
+        { "image/jpeg", "image/png", "image/gif", "image/webp" };
 
-    public ImagesController(IWebHostEnvironment env)
+    private const long MaxBytes = 10L * 1024L * 1024L; // 10 MB
+
+    private readonly ISupabaseStorageService _storage;
+
+    public ImagesController(ISupabaseStorageService storage)
     {
-        _env = env;
+        _storage = storage;
     }
 
     [HttpPost("upload")]
     [Authorize]
-    public async Task<ActionResult<object>> Upload([FromForm] IFormFile file)
+    public async Task<ActionResult<object>> Upload([FromForm] IFormFile file, CancellationToken cancellationToken)
     {
         if (file == null || file.Length == 0)
             return BadRequest("No file uploaded.");
 
-        var allowed = new[] { "image/jpeg", "image/png", "image/gif", "image/webp" };
-        if (!allowed.Contains(file.ContentType))
+        if (!AllowedContentTypes.Contains(file.ContentType))
             return BadRequest("Only image files are allowed.");
 
-        if (file.Length > 10 * 1024 * 1024)
+        if (file.Length > MaxBytes)
             return BadRequest("File must be smaller than 10 MB.");
 
-        var uploadsDir = Path.Combine(
-            _env.WebRootPath ?? Path.Combine(Directory.GetCurrentDirectory(), "wwwroot"),
-            "uploads");
-        Directory.CreateDirectory(uploadsDir);
+        await using var stream = file.OpenReadStream();
+        var url = await _storage.UploadAsync(stream, file.ContentType, file.FileName, cancellationToken);
 
-        var ext = Path.GetExtension(file.FileName);
-        var fileName = $"{Guid.NewGuid()}{ext}";
-        var filePath = Path.Combine(uploadsDir, fileName);
-
-        using var stream = System.IO.File.Create(filePath);
-        await file.CopyToAsync(stream);
-
-        var url = $"{Request.Scheme}://{Request.Host}/uploads/{fileName}";
         return Ok(new { url });
+    }
+
+    [HttpDelete]
+    [Authorize]
+    public async Task<ActionResult> Delete([FromQuery] string url, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+            return BadRequest("url query parameter is required.");
+
+        var ok = await _storage.DeleteByUrlAsync(url, cancellationToken);
+        return ok ? NoContent() : NotFound();
     }
 }
