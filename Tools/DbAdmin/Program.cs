@@ -463,9 +463,8 @@ static async Task<int> FixUserIdAsync(NpgsqlConnection conn, string email, strin
     string? avatarUrl;
     string role;
     DateTime createdAt;
-    string passwordHash;
 
-    await using (var lookup = new NpgsqlCommand("""select "Id","Name","AvatarUrl","Role","CreatedAt","PasswordHash" from "Users" where lower("Email")=@email""", conn))
+    await using (var lookup = new NpgsqlCommand("""select "Id","Name","AvatarUrl","Role","CreatedAt" from "Users" where lower("Email")=@email""", conn))
     {
         lookup.Parameters.AddWithValue("email", normalizedEmail);
         await using var r = await lookup.ExecuteReaderAsync();
@@ -475,7 +474,6 @@ static async Task<int> FixUserIdAsync(NpgsqlConnection conn, string email, strin
         avatarUrl = r.IsDBNull(2) ? null : r.GetString(2);
         role = r.GetString(3);
         createdAt = r.GetDateTime(4);
-        passwordHash = r.IsDBNull(5) ? "" : r.GetString(5);
     }
 
     if (oldId == newId) { Console.WriteLine("IDs are already identical, nothing to do."); return 0; }
@@ -484,12 +482,11 @@ static async Task<int> FixUserIdAsync(NpgsqlConnection conn, string email, strin
 
     // 1. Insert shadow row with newId and temp email (avoids unique-email constraint)
     var tempEmail = $"__migrate__{Guid.NewGuid()}@tmp";
-    await using (var ins = new NpgsqlCommand("""insert into "Users" ("Id","Email","Name","PasswordHash","AvatarUrl","Role","CreatedAt") values (@id,@email,@name,@pw,@avatar,@role,@created)""", conn, tx))
+    await using (var ins = new NpgsqlCommand("""insert into "Users" ("Id","Email","Name","AvatarUrl","Role","CreatedAt") values (@id,@email,@name,@avatar,@role,@created)""", conn, tx))
     {
         ins.Parameters.AddWithValue("id", newId);
         ins.Parameters.AddWithValue("email", tempEmail);
         ins.Parameters.AddWithValue("name", userName);
-        ins.Parameters.AddWithValue("pw", passwordHash);
         ins.Parameters.AddWithValue("avatar", avatarUrl ?? (object)DBNull.Value);
         ins.Parameters.AddWithValue("role", role);
         ins.Parameters.AddWithValue("created", createdAt);
