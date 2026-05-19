@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Claims;
 using System.Net.Http.Headers;
 using Microsoft.AspNetCore.Authorization;
@@ -39,13 +40,23 @@ public class AuthController : ControllerBase
     [Authorize]
     public async Task<ActionResult<AuthResponseDto>> Sync([FromBody] SyncAuthUserDto? dto, CancellationToken cancellationToken)
     {
+        var total = Stopwatch.StartNew();
         try
         {
+            var phase = Stopwatch.StartNew();
             var user = await GetOrCreateCurrentUserAsync(dto, cancellationToken);
-            return Ok(await CreateAuthResponseAsync(user, cancellationToken));
+            _logger.LogInformation("[TIMING] POST /api/auth/sync phase=getOrCreateUser elapsedMs={Elapsed}", phase.ElapsedMilliseconds);
+
+            phase.Restart();
+            var response = await CreateAuthResponseAsync(user, cancellationToken);
+            _logger.LogInformation("[TIMING] POST /api/auth/sync phase=createResponse elapsedMs={Elapsed}", phase.ElapsedMilliseconds);
+
+            _logger.LogInformation("[TIMING] POST /api/auth/sync total elapsedMs={Elapsed}", total.ElapsedMilliseconds);
+            return Ok(response);
         }
-        catch
+        catch (Exception ex)
         {
+            _logger.LogWarning(ex, "[TIMING] POST /api/auth/sync FAILED, returning claim fallback elapsedMs={Elapsed}", total.ElapsedMilliseconds);
             return Ok(CreateClaimFallbackResponse(dto));
         }
     }
@@ -69,9 +80,12 @@ public class AuthController : ControllerBase
     [Authorize]
     public async Task<ActionResult<AuthResponseDto>> UpdateProfile([FromBody] UpdateProfileDto dto, CancellationToken cancellationToken)
     {
+        var total = Stopwatch.StartNew();
         try
         {
+            var phase = Stopwatch.StartNew();
             var user = await GetOrCreateCurrentUserAsync(null, cancellationToken);
+            _logger.LogInformation("[TIMING] PATCH /api/auth/profile phase=getOrCreateUser elapsedMs={Elapsed}", phase.ElapsedMilliseconds);
             var previousAvatarUrl = user.AvatarUrl;
 
             if (!string.IsNullOrWhiteSpace(dto.Name)) user.Name = dto.Name.Trim();
@@ -82,17 +96,26 @@ public class AuthController : ControllerBase
             if (dto.Purpose != null) user.Purpose = dto.Purpose.Trim().Length > 0 ? dto.Purpose.Trim() : null;
             if (dto.PurposeOtherText != null) user.PurposeOtherText = dto.PurposeOtherText.Trim().Length > 0 ? dto.PurposeOtherText.Trim() : null;
 
+            phase.Restart();
             await _db.SaveChangesAsync(cancellationToken);
+            _logger.LogInformation("[TIMING] PATCH /api/auth/profile phase=saveChanges elapsedMs={Elapsed}", phase.ElapsedMilliseconds);
 
             if (!string.IsNullOrWhiteSpace(previousAvatarUrl) && previousAvatarUrl != user.AvatarUrl)
             {
+                phase.Restart();
                 await _storage.DeleteByUrlAsync(previousAvatarUrl, cancellationToken);
+                _logger.LogInformation("[TIMING] PATCH /api/auth/profile phase=deleteOldAvatar elapsedMs={Elapsed}", phase.ElapsedMilliseconds);
             }
 
-            return Ok(await CreateAuthResponseAsync(user, cancellationToken));
+            phase.Restart();
+            var response = await CreateAuthResponseAsync(user, cancellationToken);
+            _logger.LogInformation("[TIMING] PATCH /api/auth/profile phase=createResponse elapsedMs={Elapsed}", phase.ElapsedMilliseconds);
+            _logger.LogInformation("[TIMING] PATCH /api/auth/profile total elapsedMs={Elapsed}", total.ElapsedMilliseconds);
+            return Ok(response);
         }
-        catch
+        catch (Exception ex)
         {
+            _logger.LogWarning(ex, "[TIMING] PATCH /api/auth/profile FAILED, returning claim fallback elapsedMs={Elapsed}", total.ElapsedMilliseconds);
             return Ok(CreateClaimFallbackResponse(new SyncAuthUserDto
             {
                 Name = dto.Name,
@@ -373,45 +396,57 @@ public class AuthController : ControllerBase
     [Authorize]
     public async Task<ActionResult> DeleteMyAccount(CancellationToken cancellationToken)
     {
+        var total = Stopwatch.StartNew();
         var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
         var email = User.FindFirstValue(ClaimTypes.Email)?.Trim().ToLowerInvariant();
+        _logger.LogInformation("[TIMING] DELETE /api/auth/me start userId={UserId}", userId);
 
         // Collect image URLs that will become orphaned by this deletion.
         // Done BEFORE any DB-row deletion so the joins still work.
         List<string?> imagesToDelete;
+        var phase = Stopwatch.StartNew();
         try
         {
             imagesToDelete = await CollectImagesForUserDeletionAsync(userId, cancellationToken);
+            _logger.LogInformation("[TIMING] DELETE /api/auth/me phase=collectImages imageCount={Count} elapsedMs={Elapsed}", imagesToDelete.Count, phase.ElapsedMilliseconds);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Could not enumerate images for user {UserId}; cleanup will be skipped.", userId);
+            _logger.LogWarning(ex, "[TIMING] DELETE /api/auth/me phase=collectImages FAILED elapsedMs={Elapsed} (cleanup skipped)", phase.ElapsedMilliseconds);
             imagesToDelete = new List<string?>();
         }
 
+        phase.Restart();
         try
         {
             await DeleteLocalUserDataAsync(userId, email, cancellationToken);
+            _logger.LogInformation("[TIMING] DELETE /api/auth/me phase=deleteLocal elapsedMs={Elapsed}", phase.ElapsedMilliseconds);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to delete local account data for user {UserId}", userId);
+            _logger.LogError(ex, "[TIMING] DELETE /api/auth/me phase=deleteLocal FAILED elapsedMs={Elapsed}", phase.ElapsedMilliseconds);
             return StatusCode(500, "Could not delete local account data.");
         }
 
+        phase.Restart();
         try
         {
             await DeleteSupabaseAuthUserAsync(userId.ToString(), cancellationToken);
+            _logger.LogInformation("[TIMING] DELETE /api/auth/me phase=deleteSupabaseAuth elapsedMs={Elapsed}", phase.ElapsedMilliseconds);
         }
-        catch
+        catch (Exception ex)
         {
+            _logger.LogError(ex, "[TIMING] DELETE /api/auth/me phase=deleteSupabaseAuth FAILED elapsedMs={Elapsed}", phase.ElapsedMilliseconds);
             return StatusCode(500, "Could not delete auth account.");
         }
 
         // Best-effort storage cleanup. Failures here are logged inside the service
         // and do not affect the success of the account deletion.
+        phase.Restart();
         await _storage.DeleteManyByUrlAsync(imagesToDelete, cancellationToken);
+        _logger.LogInformation("[TIMING] DELETE /api/auth/me phase=deleteStorage imageCount={Count} elapsedMs={Elapsed}", imagesToDelete.Count, phase.ElapsedMilliseconds);
 
+        _logger.LogInformation("[TIMING] DELETE /api/auth/me total elapsedMs={Elapsed}", total.ElapsedMilliseconds);
         return NoContent();
     }
 
@@ -422,43 +457,55 @@ public class AuthController : ControllerBase
     private async Task<List<string?>> CollectImagesForUserDeletionAsync(Guid userId, CancellationToken cancellationToken)
     {
         var images = new List<string?>();
+        var sw = Stopwatch.StartNew();
 
         var avatar = await _db.Users
             .Where(u => u.Id == userId)
             .Select(u => u.AvatarUrl)
             .FirstOrDefaultAsync(cancellationToken);
         images.Add(avatar);
+        _logger.LogInformation("[TIMING] collectImages step=avatar elapsedMs={Elapsed}", sw.ElapsedMilliseconds);
 
+        sw.Restart();
         var ownedTripIds = await _db.Trips
             .Where(t => t.OwnerId == userId)
             .Select(t => t.Id)
             .ToListAsync(cancellationToken);
+        _logger.LogInformation("[TIMING] collectImages step=ownedTripIds count={Count} elapsedMs={Elapsed}", ownedTripIds.Count, sw.ElapsedMilliseconds);
 
         if (ownedTripIds.Count > 0)
         {
+            sw.Restart();
             images.AddRange(await _db.Trips
                 .Where(t => ownedTripIds.Contains(t.Id))
                 .Select(t => t.ImageUrl)
                 .ToListAsync(cancellationToken));
+            _logger.LogInformation("[TIMING] collectImages step=tripImages elapsedMs={Elapsed}", sw.ElapsedMilliseconds);
 
+            sw.Restart();
             images.AddRange(await _db.TripActivities
                 .Where(a => ownedTripIds.Contains(a.TripId))
                 .Select(a => a.ImageUrl)
                 .ToListAsync(cancellationToken));
+            _logger.LogInformation("[TIMING] collectImages step=ownedActivityImages elapsedMs={Elapsed}", sw.ElapsedMilliseconds);
 
+            sw.Restart();
             images.AddRange(await _db.ChatMessages
                 .Where(m => ownedTripIds.Contains(m.TripId))
                 .Select(m => m.ImageUrl)
                 .ToListAsync(cancellationToken));
+            _logger.LogInformation("[TIMING] collectImages step=chatImages elapsedMs={Elapsed}", sw.ElapsedMilliseconds);
         }
 
         // Activities authored by this user on trips they don't own are deleted too
         // (see DeleteLocalUserDataAsync) - so their images are orphaned.
+        sw.Restart();
         images.AddRange(await _db.TripActivities
             .Where(a => a.OwnerId == userId
                         && (ownedTripIds.Count == 0 || !ownedTripIds.Contains(a.TripId)))
             .Select(a => a.ImageUrl)
             .ToListAsync(cancellationToken));
+        _logger.LogInformation("[TIMING] collectImages step=authoredActivityImages elapsedMs={Elapsed}", sw.ElapsedMilliseconds);
 
         return images;
     }
@@ -468,10 +515,16 @@ public class AuthController : ControllerBase
         var connectionString = _configuration.GetConnectionString("DefaultConnection")
             ?? throw new InvalidOperationException("ConnectionStrings:DefaultConnection is missing.");
 
+        var sw = Stopwatch.StartNew();
         await using var conn = new NpgsqlConnection(connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var tx = await conn.BeginTransactionAsync(cancellationToken);
+        _logger.LogInformation("[TIMING] deleteLocal step=openConnection elapsedMs={Elapsed}", sw.ElapsedMilliseconds);
 
+        sw.Restart();
+        await using var tx = await conn.BeginTransactionAsync(cancellationToken);
+        _logger.LogInformation("[TIMING] deleteLocal step=beginTx elapsedMs={Elapsed}", sw.ElapsedMilliseconds);
+
+        sw.Restart();
         var ownedTripIds = new List<Guid>();
         await using (var ownedTrips = new NpgsqlCommand("""select "Id" from "Trips" where "OwnerId" = @userId""", conn, tx))
         {
@@ -482,9 +535,11 @@ public class AuthController : ControllerBase
                 ownedTripIds.Add(reader.GetGuid(0));
             }
         }
+        _logger.LogInformation("[TIMING] deleteLocal step=findOwnedTripIds count={Count} elapsedMs={Elapsed}", ownedTripIds.Count, sw.ElapsedMilliseconds);
 
         if (ownedTripIds.Count > 0)
         {
+            sw.Restart();
             await using (var deleteActivities = new NpgsqlCommand("""delete from "TripActivities" where "TripId" = any(@tripIds)""", conn, tx))
             {
                 deleteActivities.Parameters.AddWithValue("tripIds", ownedTripIds);
@@ -508,8 +563,10 @@ public class AuthController : ControllerBase
                 deleteTrips.Parameters.AddWithValue("tripIds", ownedTripIds);
                 await deleteTrips.ExecuteNonQueryAsync(cancellationToken);
             }
+            _logger.LogInformation("[TIMING] deleteLocal step=ownedTripCleanup(4stmts) elapsedMs={Elapsed}", sw.ElapsedMilliseconds);
         }
 
+        sw.Restart();
         await using (var deleteMyActivities = new NpgsqlCommand("""delete from "TripActivities" where "OwnerId" = @userId""", conn, tx))
         {
             deleteMyActivities.Parameters.AddWithValue("userId", userId);
@@ -547,7 +604,9 @@ public class AuthController : ControllerBase
             deleteComments.Parameters.AddWithValue("userId", userId);
             await deleteComments.ExecuteNonQueryAsync(cancellationToken);
         }
+        _logger.LogInformation("[TIMING] deleteLocal step=userScopedCleanup(6stmts) elapsedMs={Elapsed}", sw.ElapsedMilliseconds);
 
+        sw.Restart();
         // Delete settlements involving this user
         await using (var deleteSettlements = new NpgsqlCommand("""delete from "Settlements" where "FromUserId" = @userId or "ToUserId" = @userId""", conn, tx))
         {
@@ -575,14 +634,19 @@ public class AuthController : ControllerBase
             deleteExpenseParticipants.Parameters.AddWithValue("userId", userId);
             await deleteExpenseParticipants.ExecuteNonQueryAsync(cancellationToken);
         }
+        _logger.LogInformation("[TIMING] deleteLocal step=expenseCleanup(4stmts) elapsedMs={Elapsed}", sw.ElapsedMilliseconds);
 
+        sw.Restart();
         await using (var deleteUser = new NpgsqlCommand("""delete from "Users" where "Id" = @userId""", conn, tx))
         {
             deleteUser.Parameters.AddWithValue("userId", userId);
             await deleteUser.ExecuteNonQueryAsync(cancellationToken);
         }
+        _logger.LogInformation("[TIMING] deleteLocal step=deleteUserRow elapsedMs={Elapsed}", sw.ElapsedMilliseconds);
 
+        sw.Restart();
         await tx.CommitAsync(cancellationToken);
+        _logger.LogInformation("[TIMING] deleteLocal step=commit elapsedMs={Elapsed}", sw.ElapsedMilliseconds);
     }
 
     private async Task DeleteSupabaseAuthUserAsync(string supabaseUserId, CancellationToken cancellationToken)
@@ -606,7 +670,10 @@ public class AuthController : ControllerBase
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", serviceRoleKey);
         request.Headers.Add("apikey", serviceRoleKey);
 
+        var sw = Stopwatch.StartNew();
         using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        _logger.LogInformation("[TIMING] supabaseAdminDeleteUser http status={Status} elapsedMs={Elapsed}", (int)response.StatusCode, sw.ElapsedMilliseconds);
+
         if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
             // Already deleted from Supabase auth.
@@ -628,7 +695,10 @@ public class AuthController : ControllerBase
         if (string.IsNullOrWhiteSpace(email))
             throw new InvalidOperationException("Authenticated Supabase user is missing an email claim.");
 
+        var sw = Stopwatch.StartNew();
         var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
+        _logger.LogInformation("[TIMING] getOrCreateUser step=lookup found={Found} elapsedMs={Elapsed}", user != null, sw.ElapsedMilliseconds);
+
         if (user == null)
         {
             user = new User
@@ -653,7 +723,9 @@ public class AuthController : ControllerBase
                 user.AvatarUrl = dto.AvatarUrl;
         }
 
+        sw.Restart();
         await _db.SaveChangesAsync(cancellationToken);
+        _logger.LogInformation("[TIMING] getOrCreateUser step=saveChanges elapsedMs={Elapsed}", sw.ElapsedMilliseconds);
         return user;
     }
 

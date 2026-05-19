@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Claims;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
@@ -16,11 +17,13 @@ public class TripsController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly ISupabaseStorageService _storage;
+    private readonly ILogger<TripsController> _logger;
 
-    public TripsController(AppDbContext db, ISupabaseStorageService storage)
+    public TripsController(AppDbContext db, ISupabaseStorageService storage, ILogger<TripsController> logger)
     {
         _db = db;
         _storage = storage;
+        _logger = logger;
     }
 
     // ── Permission helpers ────────────────────────────────────────────────────
@@ -331,23 +334,30 @@ public class TripsController : ControllerBase
     [Authorize]
     public async Task<ActionResult<List<TripResponseDto>>> GetMyTrips()
     {
+        var total = Stopwatch.StartNew();
         var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
 
+        var phase = Stopwatch.StartNew();
         var memberTripIds = await _db.TripMembers
             .Where(tm => tm.UserId == userId)
             .Select(tm => tm.TripId)
             .ToListAsync();
+        _logger.LogInformation("[TIMING] GET /api/trips phase=memberTripIds count={Count} elapsedMs={Elapsed}", memberTripIds.Count, phase.ElapsedMilliseconds);
 
+        phase.Restart();
         var trips = await _db.Trips
             .Where(t => memberTripIds.Contains(t.Id))
             .OrderByDescending(t => t.CreatedAt)
             .ToListAsync();
+        _logger.LogInformation("[TIMING] GET /api/trips phase=trips count={Count} elapsedMs={Elapsed}", trips.Count, phase.ElapsedMilliseconds);
 
         var tripIds = trips.Select(t => t.Id).ToList();
+        phase.Restart();
         var ownerMap = await _db.TripMembers
             .Where(tm => tripIds.Contains(tm.TripId) && tm.IsOwner)
             .GroupBy(tm => tm.TripId)
             .ToDictionaryAsync(g => g.Key, g => g.Select(tm => tm.UserId).ToList());
+        _logger.LogInformation("[TIMING] GET /api/trips phase=ownerMap elapsedMs={Elapsed}", phase.ElapsedMilliseconds);
 
         var result = trips.Select(trip =>
         {
@@ -355,6 +365,7 @@ public class TripsController : ControllerBase
             return BuildResponse(trip, owners, CanViewFull(userId, trip, owners));
         }).ToList();
 
+        _logger.LogInformation("[TIMING] GET /api/trips total elapsedMs={Elapsed}", total.ElapsedMilliseconds);
         return Ok(result);
     }
 
@@ -364,6 +375,7 @@ public class TripsController : ControllerBase
     [Authorize]
     public async Task<ActionResult<TripResponseDto>> CreateTrip([FromBody] CreateTripDto dto)
     {
+        var total = Stopwatch.StartNew();
         var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
 
         var trip = new Trip
@@ -389,9 +401,13 @@ public class TripsController : ControllerBase
         _db.Trips.Add(trip);
         // Creator is always an owner
         _db.TripMembers.Add(new TripMember { TripId = trip.Id, UserId = userId, IsOwner = true });
+
+        var phase = Stopwatch.StartNew();
         await _db.SaveChangesAsync();
+        _logger.LogInformation("[TIMING] POST /api/trips phase=saveChanges elapsedMs={Elapsed}", phase.ElapsedMilliseconds);
 
         var ownerIds = new List<Guid> { userId };
+        _logger.LogInformation("[TIMING] POST /api/trips total elapsedMs={Elapsed}", total.ElapsedMilliseconds);
         return CreatedAtAction(nameof(GetTrip), new { id = trip.Id },
             BuildResponse(trip, ownerIds, canViewFull: true));
     }

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 
@@ -99,9 +100,11 @@ public class SupabaseStorageService : ISupabaseStorageService
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _serviceRoleKey);
         request.Headers.Add("apikey", _serviceRoleKey);
 
+        var sw = Stopwatch.StartNew();
         try
         {
             using var response = await _httpClient.SendAsync(request, cancellationToken);
+            _logger.LogInformation("[TIMING] storage delete status={Status} elapsedMs={Elapsed} path={Path}", (int)response.StatusCode, sw.ElapsedMilliseconds, objectPath);
             if (response.StatusCode == HttpStatusCode.NotFound)
             {
                 // Already gone - treat as success for idempotency.
@@ -119,7 +122,7 @@ public class SupabaseStorageService : ISupabaseStorageService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Supabase storage delete threw for {Path}", objectPath);
+            _logger.LogWarning(ex, "[TIMING] storage delete threw elapsedMs={Elapsed} path={Path}", sw.ElapsedMilliseconds, objectPath);
             return false;
         }
     }
@@ -129,12 +132,18 @@ public class SupabaseStorageService : ISupabaseStorageService
         var distinct = urls
             .Where(u => !string.IsNullOrWhiteSpace(u))
             .Select(u => u!)
-            .Distinct(StringComparer.OrdinalIgnoreCase);
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var total = Stopwatch.StartNew();
+        _logger.LogInformation("[TIMING] storage deleteMany start count={Count}", distinct.Count);
 
         foreach (var url in distinct)
         {
             if (cancellationToken.IsCancellationRequested) break;
             await DeleteByUrlAsync(url, cancellationToken);
         }
+
+        _logger.LogInformation("[TIMING] storage deleteMany total count={Count} elapsedMs={Elapsed}", distinct.Count, total.ElapsedMilliseconds);
     }
 }
