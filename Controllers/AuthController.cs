@@ -41,14 +41,22 @@ public class AuthController : ControllerBase
     public async Task<ActionResult<AuthResponseDto>> Sync([FromBody] SyncAuthUserDto? dto, CancellationToken cancellationToken)
     {
         var total = Stopwatch.StartNew();
+
+        // Cap the DB work at 3s. The JWT-claim fallback gives the iPhone
+        // enough to render Home; a slow Npgsql connection-pool wait would
+        // otherwise stack two 15s waits (lookup + SaveChanges) and produce
+        // the ~32s hangs observed in Railway logs.
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        linkedCts.CancelAfter(TimeSpan.FromSeconds(3));
+
         try
         {
             var phase = Stopwatch.StartNew();
-            var user = await GetOrCreateCurrentUserAsync(dto, cancellationToken);
+            var user = await GetOrCreateCurrentUserAsync(dto, linkedCts.Token);
             _logger.LogInformation("[TIMING] POST /api/auth/sync phase=getOrCreateUser elapsedMs={Elapsed}", phase.ElapsedMilliseconds);
 
             phase.Restart();
-            var response = await CreateAuthResponseAsync(user, cancellationToken);
+            var response = await CreateAuthResponseAsync(user, linkedCts.Token);
             _logger.LogInformation("[TIMING] POST /api/auth/sync phase=createResponse elapsedMs={Elapsed}", phase.ElapsedMilliseconds);
 
             _logger.LogInformation("[TIMING] POST /api/auth/sync total elapsedMs={Elapsed}", total.ElapsedMilliseconds);
@@ -56,7 +64,11 @@ public class AuthController : ControllerBase
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "[TIMING] POST /api/auth/sync FAILED, returning claim fallback elapsedMs={Elapsed}", total.ElapsedMilliseconds);
+            var exType = ex.GetType().Name;
+            var inner = ex.InnerException is not null ? $" inner={ex.InnerException.GetType().Name}: {ex.InnerException.Message}" : "";
+            var deadlineHit = linkedCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested;
+            _logger.LogWarning(ex, "[TIMING] POST /api/auth/sync FAILED type={Type} msg={Msg}{Inner} deadlineHit={Deadline} elapsedMs={Elapsed} (returning claim fallback)",
+                exType, ex.Message, inner, deadlineHit, total.ElapsedMilliseconds);
             return Ok(CreateClaimFallbackResponse(dto));
         }
     }
@@ -696,8 +708,18 @@ public class AuthController : ControllerBase
             throw new InvalidOperationException("Authenticated Supabase user is missing an email claim.");
 
         var sw = Stopwatch.StartNew();
-        var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
-        _logger.LogInformation("[TIMING] getOrCreateUser step=lookup found={Found} elapsedMs={Elapsed}", user != null, sw.ElapsedMilliseconds);
+        User? user;
+        try
+        {
+            user = await _db.Users.FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
+            _logger.LogInformation("[TIMING] getOrCreateUser step=lookup found={Found} elapsedMs={Elapsed}", user != null, sw.ElapsedMilliseconds);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("[TIMING] getOrCreateUser step=lookup FAILED type={Type} msg={Msg} elapsedMs={Elapsed}",
+                ex.GetType().Name, ex.Message, sw.ElapsedMilliseconds);
+            throw;
+        }
 
         if (user == null)
         {
@@ -724,8 +746,17 @@ public class AuthController : ControllerBase
         }
 
         sw.Restart();
-        await _db.SaveChangesAsync(cancellationToken);
-        _logger.LogInformation("[TIMING] getOrCreateUser step=saveChanges elapsedMs={Elapsed}", sw.ElapsedMilliseconds);
+        try
+        {
+            await _db.SaveChangesAsync(cancellationToken);
+            _logger.LogInformation("[TIMING] getOrCreateUser step=saveChanges elapsedMs={Elapsed}", sw.ElapsedMilliseconds);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("[TIMING] getOrCreateUser step=saveChanges FAILED type={Type} msg={Msg} elapsedMs={Elapsed}",
+                ex.GetType().Name, ex.Message, sw.ElapsedMilliseconds);
+            throw;
+        }
         return user;
     }
 
