@@ -99,6 +99,7 @@ public class TripsController : ControllerBase
             SpotifyUrl = activity.SpotifyUrl,
             Visibility = activity.Visibility,
             RevealAt = activity.RevealAt,
+            RevealedAt = activity.RevealedAt,
             IsRevealed = IsActivityRevealedNow(activity),
             Teaser = canViewFull || teaserVisible ? activity.Teaser : null,
             TeaserOffsetMinutes = activity.TeaserOffsetMinutes,
@@ -1005,6 +1006,7 @@ public class TripsController : ControllerBase
         if (!IsValidSpotifyUrl(dto.SpotifyUrl))
             return BadRequest("Spotify link must be a valid public Spotify URL.");
 
+        var finalVisibility = dto.RevealedNow ? "public" : visibility;
         var activity = new TripActivity
         {
             TripId = id,
@@ -1015,11 +1017,12 @@ public class TripsController : ControllerBase
             Category = NormalizeOptionalText(dto.Category),
             ImageUrl = NormalizeOptionalText(dto.ImageUrl),
             SpotifyUrl = NormalizeOptionalText(dto.SpotifyUrl),
-            Visibility = visibility,
-            RevealAt = visibility == "hidden" ? dto.RevealAt : null,
-            Teaser = visibility == "hidden" ? teaser : null,
-            TeaserOffsetMinutes = visibility == "hidden" ? dto.TeaserOffsetMinutes : null,
-            IsHidden = visibility == "hidden",
+            Visibility = finalVisibility,
+            RevealAt = finalVisibility == "hidden" ? dto.RevealAt : null,
+            Teaser = finalVisibility == "hidden" ? teaser : null,
+            TeaserOffsetMinutes = finalVisibility == "hidden" ? dto.TeaserOffsetMinutes : null,
+            IsHidden = finalVisibility == "hidden",
+            RevealedAt = dto.RevealedNow ? DateTime.UtcNow : null,
             OwnerId = userId,
             AssignedToUserId = userId
         };
@@ -1049,10 +1052,10 @@ public class TripsController : ControllerBase
             .FirstOrDefaultAsync(a => a.Id == activityId && a.TripId == id);
         if (activity == null) return NotFound();
 
-        var nextVisibility = dto.Visibility != null ? NormalizeVisibility(dto.Visibility) : activity.Visibility;
-        var nextRevealAt = dto.ClearRevealAt ? null : dto.RevealAt ?? activity.RevealAt;
-        var nextTeaser = dto.ClearTeaser ? null : dto.Teaser != null ? NormalizeOptionalText(dto.Teaser) : activity.Teaser;
-        var nextTeaserOffset = dto.ClearTeaserOffset ? null : dto.TeaserOffsetMinutes ?? activity.TeaserOffsetMinutes;
+        var nextVisibility = dto.RevealedNow ? "public" : (dto.Visibility != null ? NormalizeVisibility(dto.Visibility) : activity.Visibility);
+        var nextRevealAt = dto.RevealedNow ? null : (dto.ClearRevealAt ? null : dto.RevealAt ?? activity.RevealAt);
+        var nextTeaser = dto.RevealedNow ? null : (dto.ClearTeaser ? null : dto.Teaser != null ? NormalizeOptionalText(dto.Teaser) : activity.Teaser);
+        var nextTeaserOffset = dto.RevealedNow ? null : (dto.ClearTeaserOffset ? null : dto.TeaserOffsetMinutes ?? activity.TeaserOffsetMinutes);
         var validationError = ValidateActivityPayload(nextVisibility, nextRevealAt, nextTeaser, nextTeaserOffset);
 
         if (validationError != null)
@@ -1078,6 +1081,11 @@ public class TripsController : ControllerBase
         activity.RevealAt = nextVisibility == "hidden" ? nextRevealAt : null;
         activity.Teaser = nextVisibility == "hidden" ? nextTeaser : null;
         activity.TeaserOffsetMinutes = nextVisibility == "hidden" ? nextTeaserOffset : null;
+
+        if (dto.RevealedNow && activity.Visibility != "public")
+        {
+            activity.RevealedAt = DateTime.UtcNow;
+        }
 
         await _db.SaveChangesAsync();
 

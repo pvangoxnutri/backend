@@ -17,6 +17,7 @@ public class TripActivity
     public string? Teaser { get; set; }
     public int? TeaserOffsetMinutes { get; set; }
     public bool IsHidden { get; set; } = false;
+    public DateTime? RevealedAt { get; set; }
     public Guid OwnerId { get; set; }
     public User Owner { get; set; } = null!;
     public Guid? AssignedToUserId { get; set; }

@@ -18,4 +18,5 @@ public class UpdateActivityDto
     public bool ClearTeaser { get; set; }
     public int? TeaserOffsetMinutes { get; set; }
     public bool ClearTeaserOffset { get; set; }
+    public bool RevealedNow { get; set; }
 }

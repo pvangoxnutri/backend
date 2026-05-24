@@ -13,6 +13,7 @@ public class ActivityResponseDto
     public string? SpotifyUrl { get; set; }
     public string Visibility { get; set; } = "public";
     public DateTime? RevealAt { get; set; }
+    public DateTime? RevealedAt { get; set; }
     public bool IsRevealed { get; set; }
     public string? Teaser { get; set; }
     public int? TeaserOffsetMinutes { get; set; }

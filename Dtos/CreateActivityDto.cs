@@ -27,4 +27,6 @@ public class CreateActivityDto
     public string? Teaser { get; set; }
 
     public int? TeaserOffsetMinutes { get; set; }
+
+    public bool RevealedNow { get; set; }
 }
