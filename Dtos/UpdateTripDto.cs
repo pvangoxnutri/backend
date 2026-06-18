@@ -18,4 +18,7 @@ public class UpdateTripDto
     public DateTime? RevealAt { get; set; }
     public bool ClearRevealAt { get; set; } = false;
     public string? Teaser { get; set; }
+
+    // Owner-controlled: whether non-owner members may edit activities.
+    public bool? MembersCanEdit { get; set; }
 }

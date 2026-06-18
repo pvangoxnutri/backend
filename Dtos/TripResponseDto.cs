@@ -24,4 +24,7 @@ public class TripResponseDto
     public string? Title { get; set; }
     public string? Description { get; set; }
     public string? ShareCode { get; set; }
+
+    // Owner-controlled: whether non-owner members may edit activities.
+    public bool MembersCanEdit { get; set; } = true;
 }

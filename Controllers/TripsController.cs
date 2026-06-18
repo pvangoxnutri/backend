@@ -186,6 +186,19 @@ public class TripsController : ControllerBase
     private async Task<bool> IsTripMember(Guid tripId, Guid userId)
         => await _db.TripMembers.AnyAsync(tm => tm.TripId == tripId && tm.UserId == userId);
 
+    // A member may edit activities when the owner allows collaborative editing
+    // (MembersCanEdit), or when the member is itself a trip owner. Used to gate
+    // add/edit/delete and to compute the canEdit flag returned to the client.
+    private async Task<bool> CanEditActivitiesAsync(Guid tripId, Guid userId)
+    {
+        if (!await IsTripMember(tripId, userId)) return false;
+        var trip = await _db.Trips.FindAsync(tripId);
+        if (trip == null) return false;
+        if (trip.MembersCanEdit) return true;
+        var ownerIds = await GetOwnerIds(tripId);
+        return ownerIds.Contains(userId);
+    }
+
     private TripResponseDto BuildResponse(Trip trip, List<Guid> ownerIds, bool canViewFull)
         => new()
         {
@@ -207,6 +220,7 @@ public class TripsController : ControllerBase
             Title = canViewFull ? trip.Title : null,
             Description = canViewFull ? trip.Description : null,
             ShareCode = canViewFull ? trip.ShareCode : null,
+            MembersCanEdit = trip.MembersCanEdit,
         };
 
     // ── GET /api/trips/invites/me ─────────────────────────────────────────────
@@ -492,6 +506,7 @@ public class TripsController : ControllerBase
             if (dto.EndDate.HasValue) trip.EndDate = dto.EndDate.Value;
             if (dto.ClearRevealAt) trip.RevealAt = null;
             else if (dto.RevealAt.HasValue) trip.RevealAt = dto.RevealAt.Value;
+            if (dto.MembersCanEdit.HasValue) trip.MembersCanEdit = dto.MembersCanEdit.Value;
         }
         else if (isAdmin)
         {
@@ -938,6 +953,11 @@ public class TripsController : ControllerBase
         if (!isMember && trip.Visibility != "public" && !IsRevealedNow(trip))
             return Forbid();
 
+        // Members can edit activities only when the owner allows it (or they
+        // are a trip owner themselves).
+        var ownerIds = await GetOwnerIds(id);
+        var canEditActivities = isMember && (trip.MembersCanEdit || ownerIds.Contains(userId));
+
         var activities = await _db.TripActivities
             .Where(a => a.TripId == id)
             .OrderBy(a => a.Date)
@@ -955,7 +975,7 @@ public class TripsController : ControllerBase
 
         return Ok(activities.Select(activity =>
         {
-            var dto = BuildActivityResponse(userId, activity, isMember);
+            var dto = BuildActivityResponse(userId, activity, canEditActivities);
             dto.CommentCount = commentCounts.GetValueOrDefault(activity.Id, 0);
             return dto;
         }).ToList());
@@ -980,7 +1000,10 @@ public class TripsController : ControllerBase
 
         if (activity == null) return NotFound();
 
-        var dto = BuildActivityResponse(userId, activity, isMember);
+        var ownerIds = await GetOwnerIds(id);
+        var canEditActivities = isMember && (trip.MembersCanEdit || ownerIds.Contains(userId));
+
+        var dto = BuildActivityResponse(userId, activity, canEditActivities);
         dto.CommentCount = await _db.ActivityComments.CountAsync(c => c.ActivityId == activityId);
         return Ok(dto);
     }
@@ -994,6 +1017,10 @@ public class TripsController : ControllerBase
         var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
 
         if (!await _db.TripMembers.AnyAsync(tm => tm.TripId == id && tm.UserId == userId))
+            return Forbid();
+
+        // When the owner has locked editing, only owners may add activities.
+        if (!await CanEditActivitiesAsync(id, userId))
             return Forbid();
 
         var visibility = NormalizeVisibility(dto.Visibility);
@@ -1045,8 +1072,8 @@ public class TripsController : ControllerBase
     public async Task<ActionResult> UpdateActivity(Guid id, Guid activityId, [FromBody] UpdateActivityDto dto)
     {
         var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
-        var isMember = await IsTripMember(id, userId);
-        if (!isMember) return Forbid();
+        // Editing is gated by the owner's MembersCanEdit setting (owners always allowed).
+        if (!await CanEditActivitiesAsync(id, userId)) return Forbid();
 
         var activity = await _db.TripActivities
             .FirstOrDefaultAsync(a => a.Id == activityId && a.TripId == id);
@@ -1129,8 +1156,8 @@ public class TripsController : ControllerBase
     public async Task<ActionResult> DeleteActivity(Guid id, Guid activityId, CancellationToken cancellationToken)
     {
         var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
-        var isMember = await IsTripMember(id, userId);
-        if (!isMember) return Forbid();
+        // Deleting is gated by the owner's MembersCanEdit setting (owners always allowed).
+        if (!await CanEditActivitiesAsync(id, userId)) return Forbid();
 
         var activity = await _db.TripActivities
             .FirstOrDefaultAsync(a => a.Id == activityId && a.TripId == id, cancellationToken);

@@ -25,4 +25,9 @@ public class Trip
     public string Status { get; set; } = "active"; // "active" | "completed"
     public string? ShareCode { get; set; }
     public DateTime? SharedAt { get; set; }
+
+    // When true (default), any trip member can add/edit/delete activities
+    // (collaborative planning). When false, only the owner can edit; members
+    // have read-only access. Owner-controlled via trip settings.
+    public bool MembersCanEdit { get; set; } = true;
 }
