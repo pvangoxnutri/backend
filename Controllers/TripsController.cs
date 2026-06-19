@@ -1023,6 +1023,13 @@ public class TripsController : ControllerBase
         if (!await CanEditActivitiesAsync(id, userId))
             return Forbid();
 
+        // The activity date must sit inside the trip's range — otherwise it
+        // shows up on the calendar before the trip starts / after it ends.
+        var tripForRange = await _db.Trips.FindAsync(id);
+        if (tripForRange == null) return NotFound();
+        if (dto.Date < tripForRange.StartDate || dto.Date > tripForRange.EndDate)
+            return BadRequest($"Activity date must be within the trip dates ({tripForRange.StartDate:yyyy-MM-dd} – {tripForRange.EndDate:yyyy-MM-dd}).");
+
         var visibility = NormalizeVisibility(dto.Visibility);
         var teaser = NormalizeOptionalText(dto.Teaser);
         var validationError = ValidateActivityPayload(visibility, dto.RevealAt, teaser, dto.TeaserOffsetMinutes);
@@ -1091,6 +1098,15 @@ public class TripsController : ControllerBase
         var nextSpotifyUrl = dto.ClearSpotifyUrl ? null : dto.SpotifyUrl != null ? NormalizeOptionalText(dto.SpotifyUrl) : activity.SpotifyUrl;
         if (!IsValidSpotifyUrl(nextSpotifyUrl))
             return BadRequest("Spotify link must be a valid public Spotify URL.");
+
+        // A changed date must stay inside the trip's range.
+        if (dto.Date.HasValue)
+        {
+            var tripForRange = await _db.Trips.FindAsync(id);
+            if (tripForRange == null) return NotFound();
+            if (dto.Date.Value < tripForRange.StartDate || dto.Date.Value > tripForRange.EndDate)
+                return BadRequest($"Activity date must be within the trip dates ({tripForRange.StartDate:yyyy-MM-dd} – {tripForRange.EndDate:yyyy-MM-dd}).");
+        }
 
         var previousImageUrl = activity.ImageUrl;
 
