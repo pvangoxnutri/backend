@@ -154,7 +154,12 @@ using (var scope = app.Services.CreateScope())
     }
     catch (Exception ex)
     {
-        app.Logger.LogWarning(ex, "Database migration skipped at startup.");
+        // Swallowing this used to let the app boot against a stale schema —
+        // every request touching the unmigrated columns then 500'd with no
+        // indication why. Fail loudly instead so a broken migration shows up
+        // as a crashed deploy, not a silently broken API.
+        app.Logger.LogCritical(ex, "Database migration failed at startup.");
+        throw;
     }
 }
 
