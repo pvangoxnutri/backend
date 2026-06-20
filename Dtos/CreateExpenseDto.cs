@@ -19,6 +19,11 @@ public class CreateExpenseDto
 
     public string Currency { get; set; } = string.Empty;
 
+    /// Optional receipt photo — already uploaded via /api/images/upload, this
+    /// is just the resulting URL. No conversion/validation of the image itself
+    /// happens here.
+    public string? ReceiptUrl { get; set; }
+
     [Required]
     public List<ExpensePayerInputDto> Payers { get; set; } = new();
 

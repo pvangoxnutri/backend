@@ -12,6 +12,7 @@ public class Expense
     public DateOnly Date { get; set; }
     public string SplitMode { get; set; } = "equal";
     public string Currency { get; set; } = string.Empty;
+    public string? ReceiptUrl { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     public List<ExpensePayer> Payers { get; set; } = new();

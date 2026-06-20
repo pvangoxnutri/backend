@@ -44,6 +44,7 @@ public class ExpensesController : ControllerBase
             Date = expense.Date,
             SplitMode = expense.SplitMode,
             Currency = expense.Currency,
+            ReceiptUrl = expense.ReceiptUrl,
             CreatedAt = expense.CreatedAt,
             CreatedByName = expense.CreatedBy?.Name ?? string.Empty,
             Payers = expense.Payers.Select(p => new ExpensePayerDto
@@ -165,6 +166,7 @@ public class ExpensesController : ControllerBase
             Date = dto.Date,
             SplitMode = dto.SplitMode,
             Currency = dto.Currency.Trim().ToUpperInvariant(),
+            ReceiptUrl = string.IsNullOrWhiteSpace(dto.ReceiptUrl) ? null : dto.ReceiptUrl.Trim(),
             CreatedAt = DateTime.UtcNow,
         };
 

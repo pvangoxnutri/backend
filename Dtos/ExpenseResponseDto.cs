@@ -9,6 +9,7 @@ public class ExpenseResponseDto
     public DateOnly Date { get; set; }
     public string SplitMode { get; set; } = string.Empty;
     public string Currency { get; set; } = string.Empty;
+    public string? ReceiptUrl { get; set; }
     public DateTime CreatedAt { get; set; }
     public string CreatedByName { get; set; } = string.Empty;
     public List<ExpensePayerDto> Payers { get; set; } = new();
