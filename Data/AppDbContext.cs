@@ -23,6 +23,7 @@ public class AppDbContext : DbContext
     public DbSet<Feedback> Feedbacks => Set<Feedback>();
     public DbSet<PushToken> PushTokens => Set<PushToken>();
     public DbSet<NotificationLog> NotificationLogs => Set<NotificationLog>();
+    public DbSet<PushDeliveryAttempt> PushDeliveryAttempts => Set<PushDeliveryAttempt>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -186,5 +187,26 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<NotificationLog>()
             .HasIndex(n => n.DedupeKey)
             .IsUnique();
+
+        modelBuilder.Entity<PushDeliveryAttempt>()
+            .HasOne(a => a.NotificationLog)
+            .WithMany(n => n.Attempts)
+            .HasForeignKey(a => a.NotificationLogId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<PushDeliveryAttempt>()
+            .HasOne(a => a.PushToken)
+            .WithMany()
+            .HasForeignKey(a => a.PushTokenId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // The scheduler's "find due retries" query filters on (Status,
+        // NextAttemptAt) every tick — index it.
+        modelBuilder.Entity<PushDeliveryAttempt>()
+            .HasIndex(a => new { a.Status, a.NextAttemptAt });
+
+        // The receipt-checker's "find accepted tickets to verify" query.
+        modelBuilder.Entity<PushDeliveryAttempt>()
+            .HasIndex(a => a.Status);
     }
 }
