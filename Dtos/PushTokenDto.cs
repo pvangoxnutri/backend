@@ -9,3 +9,8 @@ public class RegisterPushTokenDto
 
     public string Platform { get; set; } = "unknown";
 }
+
+public class TestSendDto
+{
+    public string? Message { get; set; }
+}
