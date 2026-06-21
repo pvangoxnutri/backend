@@ -58,12 +58,17 @@ public class NotificationDispatchService : INotificationDispatchService
     private readonly AppDbContext _db;
     private readonly IExpoPushService _pushService;
     private readonly ILogger<NotificationDispatchService> _logger;
+    private readonly bool _enabled;
 
-    public NotificationDispatchService(AppDbContext db, IExpoPushService pushService, ILogger<NotificationDispatchService> logger)
+    public NotificationDispatchService(AppDbContext db, IExpoPushService pushService, ILogger<NotificationDispatchService> logger, IConfiguration configuration)
     {
         _db = db;
         _pushService = pushService;
         _logger = logger;
+        // Same Push:Enabled flag that gates the scheduler in Program.cs — the
+        // manual POST /api/push-tokens/test-send endpoint calls
+        // IExpoPushService directly and is deliberately NOT behind this flag.
+        _enabled = configuration.GetValue<bool>("Push:Enabled");
     }
 
     // ── Public: claim + immediate first attempt, one per notification type ──
@@ -173,6 +178,12 @@ public class NotificationDispatchService : INotificationDispatchService
         string type, Dictionary<Guid, string> dedupeKeysByUserId, Guid? tripId,
         string title, string body, Dictionary<string, string> data, CancellationToken ct)
     {
+        if (!_enabled)
+        {
+            _logger.LogDebug("Push notifications disabled (Push:Enabled=false) — skipping {Type} dispatch.", type);
+            return;
+        }
+
         var dataJson = JsonSerializer.Serialize(data);
         var claimedLogs = new List<NotificationLog>();
 

@@ -19,7 +19,19 @@ builder.Services.AddHttpClient<LinkPreviewService>();
 builder.Services.AddHttpClient<ISupabaseStorageService, SupabaseStorageService>();
 builder.Services.AddHttpClient<IExpoPushService, ExpoPushService>();
 builder.Services.AddScoped<INotificationDispatchService, NotificationDispatchService>();
-builder.Services.AddHostedService<RevealNotificationScheduler>();
+
+// Safe-by-default: the automatic pipeline (teaser/reveal scheduler, and the
+// auto-dispatch on new chat messages / trip invites) only runs when
+// explicitly turned on via the Push:Enabled config key (env var
+// "Push__Enabled=true" on Railway). This lets the push notification code be
+// deployed and the manual POST /api/push-tokens/test-send smoke test run
+// against production WITHOUT activating real sends to real users — that's a
+// separate, deliberate go-live step (flip the env var, no redeploy needed).
+var pushNotificationsEnabled = builder.Configuration.GetValue<bool>("Push:Enabled");
+if (pushNotificationsEnabled)
+{
+    builder.Services.AddHostedService<RevealNotificationScheduler>();
+}
 
 var configuredConnectionString = builder.Configuration.GetConnectionString("DefaultConnection")
     ?? throw new InvalidOperationException("ConnectionStrings:DefaultConnection must be configured.");
@@ -146,6 +158,10 @@ builder.Services.AddCors(options =>
 });
 
 var app = builder.Build();
+
+app.Logger.LogInformation(
+    "Push notifications automatic pipeline (scheduler + auto-dispatch): {Status}. Manual test-send is unaffected by this flag.",
+    pushNotificationsEnabled ? "ENABLED" : "disabled (set Push__Enabled=true to turn on)");
 
 // Run pending migrations and ensure uploads directory exists
 using (var scope = app.Services.CreateScope())
