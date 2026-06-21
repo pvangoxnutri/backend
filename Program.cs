@@ -17,6 +17,9 @@ builder.Logging.AddConsole();
 builder.Services.AddControllers();
 builder.Services.AddHttpClient<LinkPreviewService>();
 builder.Services.AddHttpClient<ISupabaseStorageService, SupabaseStorageService>();
+builder.Services.AddHttpClient<IExpoPushService, ExpoPushService>();
+builder.Services.AddScoped<INotificationDispatchService, NotificationDispatchService>();
+builder.Services.AddHostedService<RevealNotificationScheduler>();
 
 var configuredConnectionString = builder.Configuration.GetConnectionString("DefaultConnection")
     ?? throw new InvalidOperationException("ConnectionStrings:DefaultConnection must be configured.");

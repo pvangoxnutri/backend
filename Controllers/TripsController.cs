@@ -18,12 +18,14 @@ public class TripsController : ControllerBase
     private readonly AppDbContext _db;
     private readonly ISupabaseStorageService _storage;
     private readonly ILogger<TripsController> _logger;
+    private readonly INotificationDispatchService _notifications;
 
-    public TripsController(AppDbContext db, ISupabaseStorageService storage, ILogger<TripsController> logger)
+    public TripsController(AppDbContext db, ISupabaseStorageService storage, ILogger<TripsController> logger, INotificationDispatchService notifications)
     {
         _db = db;
         _storage = storage;
         _logger = logger;
+        _notifications = notifications;
     }
 
     // ── Permission helpers ────────────────────────────────────────────────────
@@ -677,6 +679,22 @@ public class TripsController : ControllerBase
 
         _db.TripInvites.Add(invite);
         await _db.SaveChangesAsync();
+
+        // Only push if the invited email belongs to an existing SideQuest
+        // account — otherwise there's no one to notify yet (they'd need to
+        // sign up first, at which point this invite just shows up in their
+        // pending list when they next open the app).
+        if (existingUser != null)
+        {
+            try
+            {
+                await _notifications.SendTripInviteAsync(invite, existingUser.Id);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to dispatch trip invite push for invite {InviteId}.", invite.Id);
+            }
+        }
 
         return Ok(new TripInviteDto
         {

@@ -17,11 +17,19 @@ public class TripChatController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly LinkPreviewService _linkPreviewService;
+    private readonly INotificationDispatchService _notifications;
+    private readonly ILogger<TripChatController> _logger;
 
-    public TripChatController(AppDbContext db, LinkPreviewService linkPreviewService)
+    public TripChatController(
+        AppDbContext db,
+        LinkPreviewService linkPreviewService,
+        INotificationDispatchService notifications,
+        ILogger<TripChatController> logger)
     {
         _db = db;
         _linkPreviewService = linkPreviewService;
+        _notifications = notifications;
+        _logger = logger;
     }
 
     private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
@@ -105,6 +113,17 @@ public class TripChatController : ControllerBase
         };
         _db.ChatMessages.Add(msg);
         await _db.SaveChangesAsync(ct);
+
+        // Push notification failures must never break sending a chat
+        // message — log and move on.
+        try
+        {
+            await _notifications.SendChatMessageAsync(msg, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to dispatch chat message push for message {MessageId}.", msg.Id);
+        }
 
         var linkPreview = await GetLinkPreviewAsync(text, ct);
 

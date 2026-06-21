@@ -21,6 +21,8 @@ public class AppDbContext : DbContext
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
     public DbSet<ChatPresenceEntry> ChatPresence => Set<ChatPresenceEntry>();
     public DbSet<Feedback> Feedbacks => Set<Feedback>();
+    public DbSet<PushToken> PushTokens => Set<PushToken>();
+    public DbSet<NotificationLog> NotificationLogs => Set<NotificationLog>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -165,5 +167,24 @@ public class AppDbContext : DbContext
             .WithMany()
             .HasForeignKey(s => s.ToUserId)
             .OnDelete(DeleteBehavior.Restrict);
+
+        modelBuilder.Entity<PushToken>()
+            .HasOne(pt => pt.User)
+            .WithMany()
+            .HasForeignKey(pt => pt.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // One row per (user, token) — re-registering the same device just
+        // updates LastSeenAt/IsActive instead of creating a duplicate.
+        modelBuilder.Entity<PushToken>()
+            .HasIndex(pt => new { pt.UserId, pt.Token })
+            .IsUnique();
+
+        // The actual idempotency guard: a unique index on DedupeKey means
+        // even a race between two scheduler ticks can't double-insert, since
+        // the second insert fails at the database level, not just in code.
+        modelBuilder.Entity<NotificationLog>()
+            .HasIndex(n => n.DedupeKey)
+            .IsUnique();
     }
 }
