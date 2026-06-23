@@ -72,6 +72,7 @@ public class TripChatController : ControllerBase
                 Text = m.Text,
                 ImageUrl = m.ImageUrl,
                 IsSystem = m.IsSystem,
+                SystemEventType = m.SystemEventType,
                 CreatedAt = m.CreatedAt,
                 LinkPreview = linkPreview,
             });
@@ -191,8 +192,12 @@ public class TripChatController : ControllerBase
                 TripId = tripId,
                 UserId = userId,
                 UserName = userName,
+                // Text is an English fallback for app builds older than the
+                // SystemEventType field — current clients render their own
+                // localized string from SystemEventType + UserName instead.
                 Text = $"{userName} joined.",
                 IsSystem = true,
+                SystemEventType = "member_joined",
                 CreatedAt = now,
             });
         }

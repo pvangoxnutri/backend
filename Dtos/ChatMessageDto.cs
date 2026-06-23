@@ -8,6 +8,7 @@ public class ChatMessageDto
     public string Text { get; set; } = string.Empty;
     public string? ImageUrl { get; set; }
     public bool IsSystem { get; set; }
+    public string? SystemEventType { get; set; }
     public DateTime CreatedAt { get; set; }
     public LinkPreviewDto? LinkPreview { get; set; }
 }
