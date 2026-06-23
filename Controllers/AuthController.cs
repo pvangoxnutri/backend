@@ -107,6 +107,7 @@ public class AuthController : ControllerBase
             if (dto.FoundVia != null) user.FoundVia = dto.FoundVia.Trim().Length > 0 ? dto.FoundVia.Trim() : null;
             if (dto.Purpose != null) user.Purpose = dto.Purpose.Trim().Length > 0 ? dto.Purpose.Trim() : null;
             if (dto.PurposeOtherText != null) user.PurposeOtherText = dto.PurposeOtherText.Trim().Length > 0 ? dto.PurposeOtherText.Trim() : null;
+            if (dto.Language != null) user.Language = NormalizeLanguage(dto.Language);
 
             phase.Restart();
             await _db.SaveChangesAsync(cancellationToken);
@@ -729,7 +730,8 @@ public class AuthController : ControllerBase
                 Email = email,
                 Name = dto?.Name?.Trim() ?? User.FindFirstValue(ClaimTypes.Name) ?? email,
                 AvatarUrl = dto?.AvatarUrl,
-                Role = "user"
+                Role = "user",
+                Language = NormalizeLanguage(dto?.Language),
             };
 
             _db.Users.Add(user);
@@ -743,6 +745,9 @@ public class AuthController : ControllerBase
 
             if (dto?.AvatarUrl != null)
                 user.AvatarUrl = dto.AvatarUrl;
+
+            if (!string.IsNullOrWhiteSpace(dto?.Language))
+                user.Language = NormalizeLanguage(dto.Language);
         }
 
         sw.Restart();
@@ -773,8 +778,14 @@ public class AuthController : ControllerBase
             Bio = user.Bio,
             HasCompletedOnboarding = user.HasCompletedOnboarding,
             Role = user.Role,
+            Language = user.Language,
         };
     }
+
+    // Mirrors the mobile app's normalizeLanguage() in i18n-provider.tsx — only
+    // "en"/"sv" are supported, anything else (or missing) falls back to "en".
+    private static string NormalizeLanguage(string? value)
+        => value != null && value.Trim().ToLowerInvariant().StartsWith("sv") ? "sv" : "en";
 
     private AuthResponseDto CreateClaimFallbackResponse(SyncAuthUserDto? dto)
     {
@@ -797,7 +808,8 @@ public class AuthController : ControllerBase
             Email = email,
             EmailVerified = true,
             AvatarUrl = dto?.AvatarUrl,
-            Role = User.FindFirstValue(ClaimTypes.Role) ?? "user"
+            Role = User.FindFirstValue(ClaimTypes.Role) ?? "user",
+            Language = NormalizeLanguage(dto?.Language),
         };
     }
 }

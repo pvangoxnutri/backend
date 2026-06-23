@@ -88,7 +88,7 @@ public class NotificationDispatchService : INotificationDispatchService
             ["route"] = $"/trip/{activity.TripId}",
         };
 
-        await ClaimAndSendAsync("teaser", dedupeKeys, activity.TripId, "A SideQuest is getting closer 👀", activity.Teaser!, data, ct);
+        await ClaimAndSendAsync("teaser", dedupeKeys, activity.TripId, lang => PushNotificationTexts.Teaser(lang, activity.Teaser!), data, ct);
     }
 
     public async Task SendRevealAsync(TripActivity activity, CancellationToken ct = default)
@@ -105,7 +105,7 @@ public class NotificationDispatchService : INotificationDispatchService
             ["route"] = $"/trip/{activity.TripId}/sidequest/{activity.Id}",
         };
 
-        await ClaimAndSendAsync("reveal", dedupeKeys, activity.TripId, "SideQuest unlocked! 🎉", $"{activity.Title} is revealed", data, ct);
+        await ClaimAndSendAsync("reveal", dedupeKeys, activity.TripId, lang => PushNotificationTexts.Reveal(lang, activity.Title), data, ct);
     }
 
     public async Task SendTripInviteAsync(TripInvite invite, Guid recipientUserId, CancellationToken ct = default)
@@ -127,7 +127,7 @@ public class NotificationDispatchService : INotificationDispatchService
             ["route"] = $"/?inviteId={invite.Id}",
         };
 
-        await ClaimAndSendAsync("trip_invite", dedupeKeys, invite.TripId, $"{ownerName} invited you", $"Join {tripTitle}", data, ct);
+        await ClaimAndSendAsync("trip_invite", dedupeKeys, invite.TripId, lang => PushNotificationTexts.TripInvite(lang, ownerName, tripTitle), data, ct);
     }
 
     public async Task SendChatMessageAsync(ChatMessage message, CancellationToken ct = default)
@@ -163,11 +163,10 @@ public class NotificationDispatchService : INotificationDispatchService
             "chat_message",
             dedupeKeys,
             message.TripId,
-            $"{message.UserName} sent a message",
             // Deliberately not the raw message text — chat content is
             // private group conversation, not something to surface in a
             // notification banner.
-            $"In {tripTitle}",
+            lang => PushNotificationTexts.ChatMessage(lang, message.UserName, tripTitle),
             data,
             ct);
     }
@@ -176,7 +175,7 @@ public class NotificationDispatchService : INotificationDispatchService
 
     private async Task ClaimAndSendAsync(
         string type, Dictionary<Guid, string> dedupeKeysByUserId, Guid? tripId,
-        string title, string body, Dictionary<string, string> data, CancellationToken ct)
+        Func<string, (string Title, string Body)> textBuilder, Dictionary<string, string> data, CancellationToken ct)
     {
         if (!_enabled)
         {
@@ -184,11 +183,20 @@ public class NotificationDispatchService : INotificationDispatchService
             return;
         }
 
+        var userIds = dedupeKeysByUserId.Keys.ToList();
+        var languagesByUserId = await _db.Users
+            .Where(u => userIds.Contains(u.Id))
+            .Select(u => new { u.Id, u.Language })
+            .ToDictionaryAsync(u => u.Id, u => u.Language, ct);
+
         var dataJson = JsonSerializer.Serialize(data);
         var claimedLogs = new List<NotificationLog>();
 
         foreach (var (userId, dedupeKey) in dedupeKeysByUserId)
         {
+            var language = languagesByUserId.TryGetValue(userId, out var lang) ? lang : "en";
+            var (title, body) = textBuilder(language);
+
             var log = new NotificationLog
             {
                 Type = type,
