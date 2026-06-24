@@ -193,6 +193,53 @@ public class TripsController : ControllerBase
     private async Task<bool> IsTripMember(Guid tripId, Guid userId)
         => await _db.TripMembers.AnyAsync(tm => tm.TripId == tripId && tm.UserId == userId);
 
+    // Picks the SortIndex for an activity being created/edited so that —
+    // only when it has a Time — it lands chronologically among same-day
+    // siblings that also have a Time. Siblings without a Time (and the
+    // relative order between timed siblings, once placed) are left alone, so
+    // a later drag-to-reorder fully overrides this; it only fires at the
+    // moment a Time is set or changed, never on every load.
+    // Shifts existing siblings' SortIndex itself (and saves that) — the
+    // caller still needs to save the target activity's own new SortIndex.
+    private async Task<int> InsertChronologicallyAsync(Guid tripId, DateOnly date, string? time, Guid? excludeActivityId)
+    {
+        var siblingsQuery = _db.TripActivities
+            .Where(a => a.TripId == tripId && a.Date == date);
+        if (excludeActivityId.HasValue)
+        {
+            siblingsQuery = siblingsQuery.Where(a => a.Id != excludeActivityId.Value);
+        }
+
+        if (string.IsNullOrEmpty(time))
+        {
+            // No time to sort by — same as before, just append to the end.
+            return (await siblingsQuery.Select(a => (int?)a.SortIndex).MaxAsync() ?? -1) + 1;
+        }
+
+        var siblings = await siblingsQuery.OrderBy(a => a.SortIndex).ToListAsync();
+
+        var insertAt = siblings.Count;
+        for (var i = 0; i < siblings.Count; i++)
+        {
+            if (!string.IsNullOrEmpty(siblings[i].Time) && string.CompareOrdinal(siblings[i].Time, time) > 0)
+            {
+                insertAt = i;
+                break;
+            }
+        }
+
+        for (var i = insertAt; i < siblings.Count; i++)
+        {
+            siblings[i].SortIndex = i + 1;
+        }
+        if (siblings.Count > insertAt)
+        {
+            await _db.SaveChangesAsync();
+        }
+
+        return insertAt;
+    }
+
     // A member may add new activities (or reorder existing ones) when the
     // owner allows collaborative editing (MembersCanEdit), or when the member
     // is itself a trip owner. Editing/deleting an existing activity is
@@ -1057,10 +1104,8 @@ public class TripsController : ControllerBase
             return BadRequest("Spotify link must be a valid public Spotify URL.");
 
         var finalVisibility = dto.RevealedNow ? "public" : visibility;
-        var nextSortIndex = (await _db.TripActivities
-            .Where(a => a.TripId == id && a.Date == dto.Date)
-            .Select(a => (int?)a.SortIndex)
-            .MaxAsync() ?? -1) + 1;
+        var nextTime = NormalizeOptionalText(dto.Time);
+        var nextSortIndex = await InsertChronologicallyAsync(id, dto.Date, nextTime, null);
         var activity = new TripActivity
         {
             TripId = id,
@@ -1068,7 +1113,7 @@ public class TripsController : ControllerBase
             SortIndex = nextSortIndex,
             Title = dto.Title.Trim(),
             Description = NormalizeOptionalText(dto.Description),
-            Time = NormalizeOptionalText(dto.Time),
+            Time = nextTime,
             Category = NormalizeOptionalText(dto.Category),
             ImageUrl = NormalizeOptionalText(dto.ImageUrl),
             SpotifyUrl = NormalizeOptionalText(dto.SpotifyUrl),
@@ -1133,21 +1178,24 @@ public class TripsController : ControllerBase
 
         var previousImageUrl = activity.ImageUrl;
 
-        // Moved to a different day — its old manual position was relative to
-        // the old day's list, so drop it to the end of the new day's list
-        // rather than carrying over a now-meaningless index.
-        if (dto.Date.HasValue && dto.Date.Value != activity.Date)
+        // Reposition when the day changes (old manual position was relative
+        // to the old day's list) or when a Time is set/changed — in the
+        // Time case, slot it in chronologically among same-day siblings
+        // that also have a Time (see InsertChronologicallyAsync). A later
+        // drag-to-reorder still fully overrides whatever this lands on.
+        var nextTime = dto.Time != null ? NormalizeOptionalText(dto.Time) : activity.Time;
+        var dateChanged = dto.Date.HasValue && dto.Date.Value != activity.Date;
+        var timeChanged = dto.Time != null && nextTime != activity.Time;
+        if (dateChanged || timeChanged)
         {
-            activity.SortIndex = (await _db.TripActivities
-                .Where(a => a.TripId == id && a.Date == dto.Date.Value && a.Id != activity.Id)
-                .Select(a => (int?)a.SortIndex)
-                .MaxAsync() ?? -1) + 1;
+            var targetDate = dto.Date ?? activity.Date;
+            activity.SortIndex = await InsertChronologicallyAsync(id, targetDate, nextTime, activity.Id);
         }
 
         if (dto.Date.HasValue) activity.Date = dto.Date.Value;
         if (dto.Title != null) activity.Title = dto.Title.Trim();
         if (dto.Description != null) activity.Description = NormalizeOptionalText(dto.Description);
-        if (dto.Time != null) activity.Time = NormalizeOptionalText(dto.Time);
+        if (dto.Time != null) activity.Time = nextTime;
         if (dto.Category != null) activity.Category = NormalizeOptionalText(dto.Category);
         if (dto.ClearImage) activity.ImageUrl = null;
         else if (dto.ImageUrl != null) activity.ImageUrl = NormalizeOptionalText(dto.ImageUrl);
