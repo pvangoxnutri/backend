@@ -83,14 +83,23 @@ public class TripsController : ControllerBase
             && (host == "open.spotify.com" || host.EndsWith(".spotify.com") || host == "spotify.link" || host.EndsWith(".spotify.link"));
     }
 
-    // Only the SideQuest's creator may edit or delete it — MembersCanEdit
-    // governs whether members may add new SideQuests, not take over ones
-    // someone else already added.
-    private static ActivityResponseDto BuildActivityResponse(Guid userId, TripActivity activity)
+    // True only for activities that are actually a "SideQuest" — tagged
+    // category=sidequest, or hidden (a hidden activity is inherently a
+    // SideQuest moment regardless of how its category happened to be set
+    // before the SideQuest toggle existed). Mirrors the mobile form's own
+    // sideQuestMode detection in components/sidequest-form.tsx.
+    private static bool IsSideQuest(TripActivity activity)
+        => activity.Category == "sidequest" || activity.Visibility == "hidden";
+
+    // SideQuests are creator-only to edit/delete — they're someone's
+    // personal surprise, not a shared plan item. Regular (non-SideQuest)
+    // activities keep the old collaborative behavior: any member can edit
+    // them when the trip's MembersCanEdit is on, or a trip owner always can.
+    private static ActivityResponseDto BuildActivityResponse(Guid userId, TripActivity activity, bool membersCanEditTrip)
     {
         var canViewFull = CanViewActivityFull(userId, activity);
         var teaserVisible = !canViewFull && IsTeaserVisibleNow(activity);
-        var canEdit = activity.OwnerId == userId;
+        var canEdit = IsSideQuest(activity) ? activity.OwnerId == userId : (membersCanEditTrip || activity.OwnerId == userId);
 
         return new ActivityResponseDto
         {
@@ -240,11 +249,12 @@ public class TripsController : ControllerBase
         return insertAt;
     }
 
-    // A member may add new activities (or reorder existing ones) when the
-    // owner allows collaborative editing (MembersCanEdit), or when the member
-    // is itself a trip owner. Editing/deleting an existing activity is
-    // always creator-only — see BuildActivityResponse, UpdateActivity and
-    // DeleteActivity — so this is NOT used to gate those.
+    // A member may add new activities (or reorder existing ones, or edit/
+    // delete an existing non-SideQuest activity) when the owner allows
+    // collaborative editing (MembersCanEdit), or when the member is itself a
+    // trip owner. SideQuests are the exception — editing/deleting THOSE is
+    // always creator-only regardless of this; see IsSideQuest,
+    // BuildActivityResponse, UpdateActivity and DeleteActivity.
     private async Task<bool> CanEditActivitiesAsync(Guid tripId, Guid userId)
     {
         if (!await IsTripMember(tripId, userId)) return false;
@@ -1025,6 +1035,9 @@ public class TripsController : ControllerBase
         if (!isMember && trip.Visibility != "public" && !IsRevealedNow(trip))
             return Forbid();
 
+        var ownerIds = await GetOwnerIds(id);
+        var membersCanEditTrip = isMember && (trip.MembersCanEdit || ownerIds.Contains(userId));
+
         var activities = await _db.TripActivities
             .Where(a => a.TripId == id)
             .OrderBy(a => a.Date)
@@ -1041,7 +1054,7 @@ public class TripsController : ControllerBase
 
         return Ok(activities.Select(activity =>
         {
-            var dto = BuildActivityResponse(userId, activity);
+            var dto = BuildActivityResponse(userId, activity, membersCanEditTrip);
             dto.CommentCount = commentCounts.GetValueOrDefault(activity.Id, 0);
             return dto;
         }).ToList());
@@ -1066,7 +1079,10 @@ public class TripsController : ControllerBase
 
         if (activity == null) return NotFound();
 
-        var dto = BuildActivityResponse(userId, activity);
+        var ownerIds = await GetOwnerIds(id);
+        var membersCanEditTrip = isMember && (trip.MembersCanEdit || ownerIds.Contains(userId));
+
+        var dto = BuildActivityResponse(userId, activity, membersCanEditTrip);
         dto.CommentCount = await _db.ActivityComments.CountAsync(c => c.ActivityId == activityId);
         return Ok(dto);
     }
@@ -1135,7 +1151,7 @@ public class TripsController : ControllerBase
             .Include(a => a.AssignedTo)
             .FirstAsync(a => a.Id == activity.Id);
 
-        return Ok(BuildActivityResponse(userId, created));
+        return Ok(BuildActivityResponse(userId, created, membersCanEditTrip: true));
     }
 
     // ── PATCH /api/trips/{id}/activities/{activityId} ─────────────────────────
@@ -1150,9 +1166,18 @@ public class TripsController : ControllerBase
             .FirstOrDefaultAsync(a => a.Id == activityId && a.TripId == id);
         if (activity == null) return NotFound();
 
-        // Only the SideQuest's creator may edit it, regardless of the trip's
-        // MembersCanEdit setting — that setting only governs adding new ones.
-        if (activity.OwnerId != userId) return Forbid();
+        // SideQuests are creator-only to edit, regardless of MembersCanEdit.
+        // Regular (non-SideQuest) activities keep the old collaborative
+        // behavior — any member may edit when MembersCanEdit is on, or a
+        // trip owner always can.
+        if (IsSideQuest(activity))
+        {
+            if (activity.OwnerId != userId) return Forbid();
+        }
+        else if (!await CanEditActivitiesAsync(id, userId))
+        {
+            return Forbid();
+        }
 
         var nextVisibility = dto.RevealedNow ? "public" : (dto.Visibility != null ? NormalizeVisibility(dto.Visibility) : activity.Visibility);
         var nextRevealAt = dto.RevealedNow ? null : (dto.ClearRevealAt ? null : dto.RevealAt ?? activity.RevealAt);
@@ -1275,7 +1300,7 @@ public class TripsController : ControllerBase
         activity.SpotifyUrl = nextSpotifyUrl;
         await _db.SaveChangesAsync();
 
-        return Ok(BuildActivityResponse(userId, activity));
+        return Ok(BuildActivityResponse(userId, activity, membersCanEditTrip: true));
     }
 
     // ── DELETE /api/trips/{id}/activities/{activityId} ────────────────────────
@@ -1290,9 +1315,18 @@ public class TripsController : ControllerBase
             .FirstOrDefaultAsync(a => a.Id == activityId && a.TripId == id, cancellationToken);
         if (activity == null) return NotFound();
 
-        // Only the SideQuest's creator may delete it, regardless of the trip's
-        // MembersCanEdit setting — that setting only governs adding new ones.
-        if (activity.OwnerId != userId) return Forbid();
+        // SideQuests are creator-only to delete, regardless of MembersCanEdit.
+        // Regular (non-SideQuest) activities keep the old collaborative
+        // behavior — any member may delete when MembersCanEdit is on, or a
+        // trip owner always can.
+        if (IsSideQuest(activity))
+        {
+            if (activity.OwnerId != userId) return Forbid();
+        }
+        else if (!await CanEditActivitiesAsync(id, userId))
+        {
+            return Forbid();
+        }
 
         var imageUrl = activity.ImageUrl;
 
