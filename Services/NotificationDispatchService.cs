@@ -132,10 +132,21 @@ public class NotificationDispatchService : INotificationDispatchService
 
     public async Task SendChatMessageAsync(ChatMessage message, CancellationToken ct = default)
     {
-        if (message.IsSystem || message.UserId == null) return; // "X joined."/"X left." are not in scope for push.
+        // TEMPORARY DEBUG (Information-level, local-only edit pending go-ahead
+        // to deploy) — pinpoints exactly which stage drops the recipient for a
+        // chat push. Remove once the Railway push issue is confirmed fixed.
+        if (message.IsSystem || message.UserId == null)
+        {
+            _logger.LogInformation("[PUSH_DEBUG] chat_message {MessageId}: skipped (system message or no UserId).", message.Id);
+            return;
+        }
 
         var memberIds = await GetTripMemberIdsExcludingAsync(message.TripId, message.UserId.Value, ct);
-        if (memberIds.Count == 0) return;
+        if (memberIds.Count == 0)
+        {
+            _logger.LogInformation("[PUSH_DEBUG] chat_message {MessageId}: 0 other trip members — nothing to notify.", message.Id);
+            return;
+        }
 
         // Don't push to anyone who currently has this exact trip chat open —
         // they'll see the message arrive live via the chat's own polling.
@@ -146,7 +157,14 @@ public class NotificationDispatchService : INotificationDispatchService
             .ToListAsync(ct);
 
         var recipientIds = memberIds.Except(currentlyOpenUserIds).ToList();
-        if (recipientIds.Count == 0) return;
+        _logger.LogInformation(
+            "[PUSH_DEBUG] chat_message {MessageId}: {MemberCount} other member(s), {OpenCount} excluded as 'chat open' (cutoff {Cutoff:O}), {RecipientCount} recipient(s) left.",
+            message.Id, memberIds.Count, currentlyOpenUserIds.Count, openChatCutoff, recipientIds.Count);
+        if (recipientIds.Count == 0)
+        {
+            _logger.LogInformation("[PUSH_DEBUG] chat_message {MessageId}: every other member is currently 'chat open' — no push sent to anyone.", message.Id);
+            return;
+        }
 
         var trip = await _db.Trips.FindAsync(new object?[] { message.TripId }, ct);
         var tripTitle = trip?.Title ?? "your trip";
@@ -179,9 +197,14 @@ public class NotificationDispatchService : INotificationDispatchService
     {
         if (!_enabled)
         {
-            _logger.LogDebug("Push notifications disabled (Push:Enabled=false) — skipping {Type} dispatch.", type);
+            // TEMPORARY DEBUG: was LogDebug, invisible at the app's default
+            // "Information" log level — bumped so Railway logs actually show
+            // this, the single most likely reason push goes silent. Revert
+            // to LogDebug once the Railway push issue is confirmed fixed.
+            _logger.LogInformation("[PUSH_DEBUG] Push:Enabled=false — skipping {Type} dispatch entirely (no NotificationLog/PushDeliveryAttempt rows created).", type);
             return;
         }
+        _logger.LogInformation("[PUSH_DEBUG] {Type} dispatch proceeding for {Count} recipient(s).", type, dedupeKeysByUserId.Count);
 
         var userIds = dedupeKeysByUserId.Keys.ToList();
         var languagesByUserId = await _db.Users
@@ -237,6 +260,10 @@ public class NotificationDispatchService : INotificationDispatchService
         var userIds = claimedLogs.Select(l => l.RecipientUserId).Distinct().ToList();
         var tokens = await _db.PushTokens.Where(t => userIds.Contains(t.UserId) && t.IsActive).ToListAsync(ct);
         var tokensByUser = tokens.GroupBy(t => t.UserId).ToDictionary(g => g.Key, g => g.ToList());
+        // TEMPORARY DEBUG: this case had no logging at all before — a
+        // recipient with no active token failed permanently completely
+        // silently. Remove once the Railway push issue is confirmed fixed.
+        _logger.LogInformation("[PUSH_DEBUG] CreateAttemptsAsync: {LogCount} claimed log(s), {TokenCount} active token(s) found across {UserCount} recipient(s).", claimedLogs.Count, tokens.Count, userIds.Count);
 
         var attempts = new List<PushDeliveryAttempt>();
         foreach (var log in claimedLogs)
@@ -245,6 +272,7 @@ public class NotificationDispatchService : INotificationDispatchService
             {
                 // No registered device — most commonly because the user
                 // hasn't granted permission yet. Terminal: nothing to retry.
+                _logger.LogInformation("[PUSH_DEBUG] Recipient {UserId} has NO active push token — log {LogId} marked failed_permanent, no Expo call made.", log.RecipientUserId, log.Id);
                 log.Status = "failed_permanent";
                 continue;
             }
@@ -286,6 +314,13 @@ public class NotificationDispatchService : INotificationDispatchService
             JsonSerializer.Deserialize<Dictionary<string, string>>(a.NotificationLog.DataJson) ?? new())).ToList();
 
         var results = await _pushService.SendAsync(messages, ct);
+        // TEMPORARY DEBUG: per-token result straight from Expo's API — the
+        // token itself is masked (never log a full push token: it's a live
+        // credential anyone could use to spam that device). Remove once the
+        // Railway push issue is confirmed fixed.
+        _logger.LogInformation(
+            "[PUSH_DEBUG] Expo SendAsync: {Results}",
+            string.Join("; ", results.Select(r => $"{MaskPushToken(r.To)}={(r.Success ? "ok ticket=" + r.TicketId : "FAILED " + r.ErrorCode + " " + r.ErrorMessage)}")));
         var resultsByToken = results.ToDictionary(r => r.To, r => r);
         var now = DateTime.UtcNow;
 
@@ -494,4 +529,11 @@ public class NotificationDispatchService : INotificationDispatchService
             .Where(tm => tm.TripId == tripId && tm.UserId != excludeUserId)
             .Select(tm => tm.UserId)
             .ToListAsync(ct);
+
+    // TEMPORARY DEBUG helper — never log a full Expo push token (it's a live
+    // credential anyone could use to send that device fake notifications).
+    // Keeps just enough of the prefix to distinguish entries in a log line.
+    // Remove together with the [PUSH_DEBUG] call sites once done.
+    private static string MaskPushToken(string token)
+        => token.Length <= 16 ? "***" : $"{token[..16]}…(masked)";
 }

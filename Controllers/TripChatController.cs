@@ -55,10 +55,28 @@ public class TripChatController : ControllerBase
         if (!string.IsNullOrEmpty(since) && DateTime.TryParse(since, null, System.Globalization.DateTimeStyles.RoundtripKind, out var sinceDate))
             query = query.Where(m => m.CreatedAt > sinceDate);
 
-        var messages = await query
-            .OrderBy(m => m.CreatedAt)
-            .Take(string.IsNullOrEmpty(since) ? 80 : 200)
-            .ToListAsync(ct);
+        List<ChatMessage> messages;
+        if (string.IsNullOrEmpty(since))
+        {
+            // Initial load (no cursor yet): take the LATEST 80, not the
+            // oldest — OrderBy+Take here would otherwise hand back the very
+            // first messages ever sent in trips with more than 80. Re-sort
+            // ascending afterwards so the client still renders oldest-first.
+            messages = await query
+                .OrderByDescending(m => m.CreatedAt)
+                .Take(80)
+                .ToListAsync(ct);
+            messages.Reverse();
+        }
+        else
+        {
+            // Polling cursor: everything newer than `since`, oldest-first —
+            // there's no "too much history" concern on this path.
+            messages = await query
+                .OrderBy(m => m.CreatedAt)
+                .Take(200)
+                .ToListAsync(ct);
+        }
 
         var result = new List<ChatMessageDto>();
         foreach (var m in messages)
@@ -232,7 +250,8 @@ public class TripChatController : ControllerBase
     }
 
     // ── DELETE /api/trips/{tripId}/chat/presence ──────────────────────────────
-    // Called when the user closes the chat. Adds "X left the chat." message.
+    // Called when the user closes the chat. Does NOT add a "left" system
+    // message — see the comment below on why that was deliberately dropped.
 
     [HttpDelete("presence")]
     public async Task<ActionResult> LeavePresence(Guid tripId, CancellationToken ct)
