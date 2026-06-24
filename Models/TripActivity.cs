@@ -9,6 +9,10 @@ public class TripActivity
     public string Title { get; set; } = string.Empty;
     public string? Description { get; set; }
     public string? Time { get; set; }
+    // Manual drag-to-reorder position within (TripId, Date). Defaults to the
+    // end of that day's list on create; only the reorder endpoint rewrites it
+    // afterwards, so a manual arrangement survives unrelated edits.
+    public int SortIndex { get; set; }
     public string? Category { get; set; }
     public string? ImageUrl { get; set; }
     public string? SpotifyUrl { get; set; }

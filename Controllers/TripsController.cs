@@ -83,10 +83,14 @@ public class TripsController : ControllerBase
             && (host == "open.spotify.com" || host.EndsWith(".spotify.com") || host == "spotify.link" || host.EndsWith(".spotify.link"));
     }
 
-    private static ActivityResponseDto BuildActivityResponse(Guid userId, TripActivity activity, bool canEdit)
+    // Only the SideQuest's creator may edit or delete it — MembersCanEdit
+    // governs whether members may add new SideQuests, not take over ones
+    // someone else already added.
+    private static ActivityResponseDto BuildActivityResponse(Guid userId, TripActivity activity)
     {
         var canViewFull = CanViewActivityFull(userId, activity);
         var teaserVisible = !canViewFull && IsTeaserVisibleNow(activity);
+        var canEdit = activity.OwnerId == userId;
 
         return new ActivityResponseDto
         {
@@ -96,6 +100,7 @@ public class TripsController : ControllerBase
             Title = canViewFull ? activity.Title : null,
             Description = canViewFull ? activity.Description : null,
             Time = activity.Time,
+            SortIndex = activity.SortIndex,
             Category = activity.Category,
             ImageUrl = activity.ImageUrl,
             SpotifyUrl = activity.SpotifyUrl,
@@ -188,9 +193,11 @@ public class TripsController : ControllerBase
     private async Task<bool> IsTripMember(Guid tripId, Guid userId)
         => await _db.TripMembers.AnyAsync(tm => tm.TripId == tripId && tm.UserId == userId);
 
-    // A member may edit activities when the owner allows collaborative editing
-    // (MembersCanEdit), or when the member is itself a trip owner. Used to gate
-    // add/edit/delete and to compute the canEdit flag returned to the client.
+    // A member may add new activities (or reorder existing ones) when the
+    // owner allows collaborative editing (MembersCanEdit), or when the member
+    // is itself a trip owner. Editing/deleting an existing activity is
+    // always creator-only — see BuildActivityResponse, UpdateActivity and
+    // DeleteActivity — so this is NOT used to gate those.
     private async Task<bool> CanEditActivitiesAsync(Guid tripId, Guid userId)
     {
         if (!await IsTripMember(tripId, userId)) return false;
@@ -971,16 +978,10 @@ public class TripsController : ControllerBase
         if (!isMember && trip.Visibility != "public" && !IsRevealedNow(trip))
             return Forbid();
 
-        // Members can edit activities only when the owner allows it (or they
-        // are a trip owner themselves).
-        var ownerIds = await GetOwnerIds(id);
-        var canEditActivities = isMember && (trip.MembersCanEdit || ownerIds.Contains(userId));
-
         var activities = await _db.TripActivities
             .Where(a => a.TripId == id)
             .OrderBy(a => a.Date)
-            .ThenBy(a => a.Time)
-            .ThenBy(a => a.CreatedAt)
+            .ThenBy(a => a.SortIndex)
             .Include(a => a.Owner)
             .Include(a => a.AssignedTo)
             .ToListAsync();
@@ -993,7 +994,7 @@ public class TripsController : ControllerBase
 
         return Ok(activities.Select(activity =>
         {
-            var dto = BuildActivityResponse(userId, activity, canEditActivities);
+            var dto = BuildActivityResponse(userId, activity);
             dto.CommentCount = commentCounts.GetValueOrDefault(activity.Id, 0);
             return dto;
         }).ToList());
@@ -1018,10 +1019,7 @@ public class TripsController : ControllerBase
 
         if (activity == null) return NotFound();
 
-        var ownerIds = await GetOwnerIds(id);
-        var canEditActivities = isMember && (trip.MembersCanEdit || ownerIds.Contains(userId));
-
-        var dto = BuildActivityResponse(userId, activity, canEditActivities);
+        var dto = BuildActivityResponse(userId, activity);
         dto.CommentCount = await _db.ActivityComments.CountAsync(c => c.ActivityId == activityId);
         return Ok(dto);
     }
@@ -1059,10 +1057,15 @@ public class TripsController : ControllerBase
             return BadRequest("Spotify link must be a valid public Spotify URL.");
 
         var finalVisibility = dto.RevealedNow ? "public" : visibility;
+        var nextSortIndex = (await _db.TripActivities
+            .Where(a => a.TripId == id && a.Date == dto.Date)
+            .Select(a => (int?)a.SortIndex)
+            .MaxAsync() ?? -1) + 1;
         var activity = new TripActivity
         {
             TripId = id,
             Date = dto.Date,
+            SortIndex = nextSortIndex,
             Title = dto.Title.Trim(),
             Description = NormalizeOptionalText(dto.Description),
             Time = NormalizeOptionalText(dto.Time),
@@ -1087,7 +1090,7 @@ public class TripsController : ControllerBase
             .Include(a => a.AssignedTo)
             .FirstAsync(a => a.Id == activity.Id);
 
-        return Ok(BuildActivityResponse(userId, created, canEdit: true));
+        return Ok(BuildActivityResponse(userId, created));
     }
 
     // ── PATCH /api/trips/{id}/activities/{activityId} ─────────────────────────
@@ -1097,12 +1100,14 @@ public class TripsController : ControllerBase
     public async Task<ActionResult> UpdateActivity(Guid id, Guid activityId, [FromBody] UpdateActivityDto dto)
     {
         var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
-        // Editing is gated by the owner's MembersCanEdit setting (owners always allowed).
-        if (!await CanEditActivitiesAsync(id, userId)) return Forbid();
 
         var activity = await _db.TripActivities
             .FirstOrDefaultAsync(a => a.Id == activityId && a.TripId == id);
         if (activity == null) return NotFound();
+
+        // Only the SideQuest's creator may edit it, regardless of the trip's
+        // MembersCanEdit setting — that setting only governs adding new ones.
+        if (activity.OwnerId != userId) return Forbid();
 
         var nextVisibility = dto.RevealedNow ? "public" : (dto.Visibility != null ? NormalizeVisibility(dto.Visibility) : activity.Visibility);
         var nextRevealAt = dto.RevealedNow ? null : (dto.ClearRevealAt ? null : dto.RevealAt ?? activity.RevealAt);
@@ -1127,6 +1132,17 @@ public class TripsController : ControllerBase
         }
 
         var previousImageUrl = activity.ImageUrl;
+
+        // Moved to a different day — its old manual position was relative to
+        // the old day's list, so drop it to the end of the new day's list
+        // rather than carrying over a now-meaningless index.
+        if (dto.Date.HasValue && dto.Date.Value != activity.Date)
+        {
+            activity.SortIndex = (await _db.TripActivities
+                .Where(a => a.TripId == id && a.Date == dto.Date.Value && a.Id != activity.Id)
+                .Select(a => (int?)a.SortIndex)
+                .MaxAsync() ?? -1) + 1;
+        }
 
         if (dto.Date.HasValue) activity.Date = dto.Date.Value;
         if (dto.Title != null) activity.Title = dto.Title.Trim();
@@ -1158,6 +1174,37 @@ public class TripsController : ControllerBase
         return NoContent();
     }
 
+    // ── PATCH /api/trips/{id}/activities/reorder ──────────────────────────────
+    // Drag-to-reorder within a single day: takes the full ordered list of
+    // activity IDs for that date and rewrites their SortIndex 0..N-1.
+
+    [HttpPatch("{id}/activities/reorder")]
+    [Authorize]
+    public async Task<ActionResult> ReorderActivities(Guid id, [FromBody] ReorderActivitiesDto dto)
+    {
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        if (!await CanEditActivitiesAsync(id, userId)) return Forbid();
+
+        if (dto.ActivityIds == null || dto.ActivityIds.Count == 0)
+            return BadRequest("activityIds is required.");
+
+        var activities = await _db.TripActivities
+            .Where(a => a.TripId == id && a.Date == dto.Date && dto.ActivityIds.Contains(a.Id))
+            .ToListAsync();
+
+        if (activities.Count != dto.ActivityIds.Count)
+            return BadRequest("One or more activities do not belong to this trip and date.");
+
+        var activitiesById = activities.ToDictionary(a => a.Id);
+        for (var i = 0; i < dto.ActivityIds.Count; i++)
+        {
+            activitiesById[dto.ActivityIds[i]].SortIndex = i;
+        }
+
+        await _db.SaveChangesAsync();
+        return NoContent();
+    }
+
     [HttpPatch("{id}/activities/{activityId}/spotify")]
     [Authorize]
     public async Task<ActionResult<ActivityResponseDto>> UpdateActivitySpotify(Guid id, Guid activityId, [FromBody] UpdateActivitySpotifyDto dto)
@@ -1180,7 +1227,7 @@ public class TripsController : ControllerBase
         activity.SpotifyUrl = nextSpotifyUrl;
         await _db.SaveChangesAsync();
 
-        return Ok(BuildActivityResponse(userId, activity, canEdit: true));
+        return Ok(BuildActivityResponse(userId, activity));
     }
 
     // ── DELETE /api/trips/{id}/activities/{activityId} ────────────────────────
@@ -1190,12 +1237,14 @@ public class TripsController : ControllerBase
     public async Task<ActionResult> DeleteActivity(Guid id, Guid activityId, CancellationToken cancellationToken)
     {
         var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
-        // Deleting is gated by the owner's MembersCanEdit setting (owners always allowed).
-        if (!await CanEditActivitiesAsync(id, userId)) return Forbid();
 
         var activity = await _db.TripActivities
             .FirstOrDefaultAsync(a => a.Id == activityId && a.TripId == id, cancellationToken);
         if (activity == null) return NotFound();
+
+        // Only the SideQuest's creator may delete it, regardless of the trip's
+        // MembersCanEdit setting — that setting only governs adding new ones.
+        if (activity.OwnerId != userId) return Forbid();
 
         var imageUrl = activity.ImageUrl;
 
