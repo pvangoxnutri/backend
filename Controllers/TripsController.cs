@@ -1144,12 +1144,36 @@ public class TripsController : ControllerBase
         };
 
         _db.TripActivities.Add(activity);
+
+        // In-app "Activity" feed entry — deliberately doesn't carry the
+        // activity's title (it may be a hidden SideQuest; eventLabel()
+        // renders this generically, same as member_joined/member_left).
+        var actorForEvent = await _db.Users.FindAsync(new object?[] { userId });
+        _db.TripEvents.Add(new TripEvent
+        {
+            TripId = id,
+            ActorId = userId,
+            ActorName = actorForEvent?.Name ?? "Someone",
+            Type = "activity_added",
+            CreatedAt = DateTime.UtcNow,
+        });
+
         await _db.SaveChangesAsync();
 
         var created = await _db.TripActivities
             .Include(a => a.Owner)
             .Include(a => a.AssignedTo)
             .FirstAsync(a => a.Id == activity.Id);
+
+        // Push notification — failures must never break adding an activity.
+        try
+        {
+            await _notifications.SendActivityAddedAsync(created, userId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to dispatch activity_added push for activity {ActivityId}.", activity.Id);
+        }
 
         return Ok(BuildActivityResponse(userId, created, membersCanEditTrip: true));
     }

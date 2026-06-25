@@ -9,17 +9,18 @@ public interface INotificationDispatchService
 {
     Task SendTeaserAsync(TripActivity activity, CancellationToken ct = default);
     Task SendRevealAsync(TripActivity activity, CancellationToken ct = default);
+    Task SendActivityAddedAsync(TripActivity activity, Guid actorId, CancellationToken ct = default);
     Task SendTripInviteAsync(TripInvite invite, Guid recipientUserId, CancellationToken ct = default);
     Task SendChatMessageAsync(ChatMessage message, CancellationToken ct = default);
 
     // Scheduler-driven, type-agnostic: retries due attempts and verifies
-    // delivery receipts for whatever's outstanding across all four types.
+    // delivery receipts for whatever's outstanding across all five types.
     Task ProcessPendingAttemptsAsync(CancellationToken ct = default);
     Task CheckReceiptsAsync(CancellationToken ct = default);
 }
 
 // Owns "who gets this, what does it say, has it already been claimed, did it
-// actually get delivered" for the four push notification types SideQuest
+// actually get delivered" for the five push notification types SideQuest
 // sends.
 //
 // Outbox model:
@@ -106,6 +107,27 @@ public class NotificationDispatchService : INotificationDispatchService
         };
 
         await ClaimAndSendAsync("reveal", dedupeKeys, activity.TripId, lang => PushNotificationTexts.Reveal(lang, activity.Title), data, ct);
+    }
+
+    public async Task SendActivityAddedAsync(TripActivity activity, Guid actorId, CancellationToken ct = default)
+    {
+        var recipientIds = await GetTripMemberIdsExcludingAsync(activity.TripId, actorId, ct);
+        if (recipientIds.Count == 0) return;
+
+        var actor = await _db.Users.FindAsync(new object?[] { actorId }, ct);
+        var trip = await _db.Trips.FindAsync(new object?[] { activity.TripId }, ct);
+        var actorName = actor?.Name ?? "Someone";
+        var tripTitle = trip?.Title ?? "your trip";
+
+        var dedupeKeys = recipientIds.ToDictionary(id => id, id => $"activity_added:{activity.Id}:{id}");
+        var data = new Dictionary<string, string>
+        {
+            ["type"] = "activity_added",
+            ["tripId"] = activity.TripId.ToString(),
+            ["route"] = $"/trip/{activity.TripId}",
+        };
+
+        await ClaimAndSendAsync("activity_added", dedupeKeys, activity.TripId, lang => PushNotificationTexts.ActivityAdded(lang, actorName, tripTitle), data, ct);
     }
 
     public async Task SendTripInviteAsync(TripInvite invite, Guid recipientUserId, CancellationToken ct = default)

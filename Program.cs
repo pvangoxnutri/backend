@@ -33,6 +33,10 @@ if (pushNotificationsEnabled)
     builder.Services.AddHostedService<RevealNotificationScheduler>();
 }
 
+// Unrelated to push — runs regardless of Push:Enabled. Keeps TripEvents
+// and ChatMessages from growing forever (see DataRetentionScheduler).
+builder.Services.AddHostedService<DataRetentionScheduler>();
+
 var configuredConnectionString = builder.Configuration.GetConnectionString("DefaultConnection")
     ?? throw new InvalidOperationException("ConnectionStrings:DefaultConnection must be configured.");
 

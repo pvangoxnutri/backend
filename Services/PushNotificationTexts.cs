@@ -25,4 +25,12 @@ public static class PushNotificationTexts
         language == "sv"
             ? ($"{userName} skickade ett meddelande", $"I {tripTitle}")
             : ($"{userName} sent a message", $"In {tripTitle}");
+
+    // Deliberately doesn't name the activity — it may be a hidden SideQuest,
+    // and the whole point of hidden ones is that the title isn't spoiled
+    // anywhere outside its own detail screen.
+    public static (string Title, string Body) ActivityAdded(string language, string actorName, string tripTitle) =>
+        language == "sv"
+            ? ($"{actorName} la till en ny SideQuest", $"I {tripTitle}")
+            : ($"{actorName} added a new SideQuest", $"In {tripTitle}");
 }
