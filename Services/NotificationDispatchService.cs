@@ -112,7 +112,7 @@ public class NotificationDispatchService : INotificationDispatchService
             ["route"] = $"/trip/{activity.TripId}/sidequest/{activity.Id}",
         };
 
-        await ClaimAndSendAsync("sidequest_revealed", dedupeKeys, activity.TripId, (_, lang) => PushNotificationTexts.SideQuestRevealed(lang, activity.Title), data, ct);
+        await ClaimAndSendAsync("sidequest_revealed", dedupeKeys, activity.TripId, (_, lang) => PushNotificationTexts.SideQuestRevealed(lang), data, ct);
     }
 
     public async Task SendActivityAddedAsync(TripActivity activity, Guid actorId, CancellationToken ct = default)

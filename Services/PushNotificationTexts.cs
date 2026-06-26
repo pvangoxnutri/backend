@@ -37,10 +37,13 @@ public static class PushNotificationTexts
             ? ("Någon la till en SideQuest 👀", "")
             : ("Somebody added a SideQuest 👀", "");
 
-    public static (string Title, string Body) SideQuestRevealed(string language, string activityTitle) =>
+    // Titleless on purpose — tapping the notification already opens the
+    // SideQuest's detail screen, where the title is right there. Naming it
+    // here too was just noise (and the in-app center mirrors this exactly).
+    public static (string Title, string Body) SideQuestRevealed(string language) =>
         language == "sv"
-            ? ("En SideQuest har avslöjats! 🎁", activityTitle)
-            : ("A SideQuest was revealed! 🎁", activityTitle);
+            ? ("En SideQuest har avslöjats! 🎁", "")
+            : ("A SideQuest was revealed! 🎁", "");
 
     // A single new message names its sender — once there's more than one
     // unread, naming just the latest sender would be misleading, so it
