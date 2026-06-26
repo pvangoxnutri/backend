@@ -743,18 +743,36 @@ public class TripsController : ControllerBase
         if (existingUser != null && await _db.TripMembers.AnyAsync(tm => tm.TripId == id && tm.UserId == existingUser.Id))
             return Conflict("User is already a member of this trip.");
 
-        if (await _db.TripInvites.AnyAsync(ti => ti.TripId == id && ti.Email == normalizedEmail))
+        // (TripId, Email) is a unique index, so there's at most one row ever
+        // for this email on this trip — re-inviting reuses it instead of
+        // inserting a second one. Only a still-PENDING row blocks a
+        // re-invite; an old row this same email already accepted (then
+        // later left the trip) or declined must never permanently lock that
+        // email out of being invited again.
+        var existingInvite = await _db.TripInvites.FirstOrDefaultAsync(ti => ti.TripId == id && ti.Email == normalizedEmail);
+        if (existingInvite != null && existingInvite.Status == "pending")
             return Conflict("That email is already invited.");
 
-        var invite = new TripInvite
+        TripInvite invite;
+        if (existingInvite != null)
         {
-            TripId = id,
-            InvitedByUserId = userId,
-            Email = normalizedEmail,
-            Status = "pending"
-        };
+            existingInvite.InvitedByUserId = userId;
+            existingInvite.Status = "pending";
+            existingInvite.CreatedAt = DateTime.UtcNow;
+            invite = existingInvite;
+        }
+        else
+        {
+            invite = new TripInvite
+            {
+                TripId = id,
+                InvitedByUserId = userId,
+                Email = normalizedEmail,
+                Status = "pending"
+            };
+            _db.TripInvites.Add(invite);
+        }
 
-        _db.TripInvites.Add(invite);
         await _db.SaveChangesAsync();
 
         // Only push if the invited email belongs to an existing SideQuest
