@@ -34,13 +34,13 @@ public static class PushNotificationTexts
     // title is spoiled anywhere outside its own detail screen.
     public static (string Title, string Body) NewHiddenSideQuest(string language) =>
         language == "sv"
-            ? ("Någon la till en SideQuest", "")
-            : ("Somebody added a SideQuest", "");
+            ? ("Någon la till en SideQuest 👀", "")
+            : ("Somebody added a SideQuest 👀", "");
 
     public static (string Title, string Body) SideQuestRevealed(string language, string activityTitle) =>
         language == "sv"
-            ? ("En SideQuest har avslöjats 🎁", activityTitle)
-            : ("A SideQuest was revealed 🎁", activityTitle);
+            ? ("En SideQuest har avslöjats! 🎁", activityTitle)
+            : ("A SideQuest was revealed! 🎁", activityTitle);
 
     // A single new message names its sender — once there's more than one
     // unread, naming just the latest sender would be misleading, so it
