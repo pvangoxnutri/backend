@@ -414,6 +414,7 @@ public class TripsController : ControllerBase
                 Type = e.Type,
                 ActivityId = e.ActivityId,
                 IsHidden = e.IsHidden,
+                ActivityTitle = e.ActivityTitle,
                 CreatedAt = e.CreatedAt,
             })
             .ToListAsync(cancellationToken);
@@ -1255,6 +1256,7 @@ public class TripsController : ControllerBase
         }
 
         var previousImageUrl = activity.ImageUrl;
+        var wasHiddenBeforeUpdate = activity.Visibility == "hidden";
 
         // Reposition when the day changes (old manual position was relative
         // to the old day's list) or when a Time is set/changed — in the
@@ -1285,12 +1287,47 @@ public class TripsController : ControllerBase
         activity.Teaser = nextVisibility == "hidden" ? nextTeaser : null;
         activity.TeaserOffsetMinutes = nextVisibility == "hidden" ? nextTeaserOffset : null;
 
-        if (dto.RevealedNow && activity.Visibility != "public")
+        // Manual reveal — fires once, the moment a previously-hidden
+        // SideQuest is flipped to public via the "Reveal now" button.
+        // (Bug fix: this previously checked activity.Visibility AFTER it had
+        // already been mutated to "public" above, so the condition was
+        // always false and RevealedAt never actually got set.)
+        var isManualReveal = dto.RevealedNow && wasHiddenBeforeUpdate;
+        if (isManualReveal)
         {
             activity.RevealedAt = DateTime.UtcNow;
         }
 
         await _db.SaveChangesAsync();
+
+        if (isManualReveal)
+        {
+            // Same in-app event + push as a scheduled reveal (see
+            // RevealNotificationScheduler.ProcessRevealsAsync) — "Reveal
+            // now" must show up in Home Activity and the bell exactly like a
+            // timed one does, not silently bypass both.
+            var actorForEvent = await _db.Users.FindAsync(new object?[] { userId });
+            _db.TripEvents.Add(new TripEvent
+            {
+                TripId = id,
+                ActorId = userId,
+                ActorName = actorForEvent?.Name ?? "Someone",
+                Type = "sidequest_revealed",
+                ActivityId = activity.Id,
+                ActivityTitle = activity.Title,
+                CreatedAt = DateTime.UtcNow,
+            });
+            await _db.SaveChangesAsync();
+
+            try
+            {
+                await _notifications.SendRevealAsync(activity);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to dispatch sidequest_revealed push for activity {ActivityId} (manual reveal).", activity.Id);
+            }
+        }
 
         if (!string.IsNullOrWhiteSpace(previousImageUrl) && previousImageUrl != activity.ImageUrl)
         {

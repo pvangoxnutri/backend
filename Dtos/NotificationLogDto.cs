@@ -8,5 +8,7 @@ public class NotificationLogDto
     public string Body { get; set; } = string.Empty;
     public Guid? TripId { get; set; }
     public string? Route { get; set; }
+    public string? ActorName { get; set; }
+    public string? ActorAvatarUrl { get; set; }
     public DateTime CreatedAt { get; set; }
 }

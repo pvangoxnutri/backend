@@ -36,6 +36,16 @@ public class NotificationLog
     public string Body { get; set; } = string.Empty;
     public string DataJson { get; set; } = "{}";
 
+    // Set only when the notification is allowed to attribute itself to one
+    // specific person (e.g. who joined, who added the activity, who sent the
+    // chat message) — null whenever that would defeat a hidden SideQuest's
+    // anonymity, or there's no single actor to name (a reveal, an aggregated
+    // "N new chat messages"). The in-app notification center shows this
+    // person's avatar only when both are present; otherwise it falls back to
+    // a generic type icon.
+    public string? ActorName { get; set; }
+    public string? ActorAvatarUrl { get; set; }
+
     // Rollup across this notification's PushDeliveryAttempts:
     // "pending" | "delivered" | "failed_permanent"
     // ("pending" covers in-flight/retrying — see PushDeliveryAttempt.Status

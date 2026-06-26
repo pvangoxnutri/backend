@@ -16,5 +16,8 @@ public class TripEvent
     // not reveal who added it or its title in that case, only that *a*
     // SideQuest was added. False/irrelevant for non-"activity_added" types.
     public bool IsHidden { get; set; }
+    // Set for "sidequest_revealed" events — by definition no longer a
+    // spoiler once revealed, so Home's feed can show it. Null otherwise.
+    public string? ActivityTitle { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }

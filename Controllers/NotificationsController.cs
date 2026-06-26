@@ -66,6 +66,8 @@ public class NotificationsController : ControllerBase
             Body = n.Body,
             TripId = n.TripId,
             Route = ExtractRoute(n.DataJson),
+            ActorName = n.ActorName,
+            ActorAvatarUrl = n.ActorAvatarUrl,
             CreatedAt = n.CreatedAt,
         });
 

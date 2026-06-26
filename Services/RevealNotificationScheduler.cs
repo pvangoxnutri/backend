@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using sidequest.backend.Data;
+using sidequest.backend.Models;
 
 namespace sidequest.backend.Services;
 
@@ -121,6 +122,23 @@ public class RevealNotificationScheduler : BackgroundService
             if (alreadyHandled) continue;
 
             await dispatch.SendRevealAsync(activity, ct);
+
+            // Same in-app event a manual "Reveal now" creates (see
+            // TripsController.UpdateActivity) — a timed reveal must show up
+            // in Home Activity exactly like a manual one does.
+            var owner = await db.Users.FindAsync(new object?[] { activity.OwnerId }, ct);
+            db.TripEvents.Add(new TripEvent
+            {
+                TripId = activity.TripId,
+                ActorId = activity.OwnerId,
+                ActorName = owner?.Name ?? "Someone",
+                Type = "sidequest_revealed",
+                ActivityId = activity.Id,
+                ActivityTitle = activity.Title,
+                CreatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync(ct);
+
             claimedCount++;
         }
 

@@ -138,16 +138,21 @@ public class NotificationDispatchService : INotificationDispatchService
         };
 
         string? actorName = null;
+        string? actorAvatarUrl = null;
         if (!isHidden)
         {
             var actor = await _db.Users.FindAsync(new object?[] { actorId }, ct);
             actorName = actor?.Name ?? "Someone";
+            actorAvatarUrl = actor?.AvatarUrl;
         }
 
         await ClaimAndSendAsync(
             type, dedupeKeys, activity.TripId,
             (_, lang) => isHidden ? PushNotificationTexts.NewHiddenSideQuest(lang) : PushNotificationTexts.NewActivity(lang, actorName!, activity.Title),
-            data, ct);
+            data, ct,
+            // Hidden SideQuests must not reveal who added them — no actor,
+            // no avatar, the bell falls back to its anonymous lock icon.
+            isHidden ? null : (_ => (actorName, actorAvatarUrl)));
     }
 
     public async Task SendMemberJoinedAsync(Trip trip, Guid newMemberId, string newMemberName, CancellationToken ct = default)
@@ -160,6 +165,7 @@ public class NotificationDispatchService : INotificationDispatchService
         }
 
         var memberCount = await _db.TripMembers.CountAsync(tm => tm.TripId == trip.Id, ct);
+        var newMember = await _db.Users.FindAsync(new object?[] { newMemberId }, ct);
 
         var dedupeKeys = recipientIds.ToDictionary(id => id, id => $"member_joined:{trip.Id}:{newMemberId}:{id}");
         var data = new Dictionary<string, string>
@@ -172,7 +178,8 @@ public class NotificationDispatchService : INotificationDispatchService
         await ClaimAndSendAsync(
             "member_joined", dedupeKeys, trip.Id,
             (_, lang) => PushNotificationTexts.MemberJoined(lang, newMemberName, trip.Title, memberCount),
-            data, ct);
+            data, ct,
+            _ => (newMemberName, newMember?.AvatarUrl));
     }
 
     public async Task SendExpenseAsync(Expense expense, Guid actorId, CancellationToken ct = default)
@@ -282,6 +289,8 @@ public class NotificationDispatchService : INotificationDispatchService
                 .CountAsync(m => m.TripId == message.TripId && !m.IsSystem && m.UserId != recipientId && m.CreatedAt > since, ct);
         }
 
+        var sender = await _db.Users.FindAsync(new object?[] { message.UserId.Value }, ct);
+
         var dedupeKeys = recipientIds.ToDictionary(id => id, id => $"chat:{message.Id}:{id}");
         var data = new Dictionary<string, string>
         {
@@ -296,14 +305,21 @@ public class NotificationDispatchService : INotificationDispatchService
             message.TripId,
             (userId, lang) => PushNotificationTexts.Chat(lang, message.UserName, unreadCountsByUserId.TryGetValue(userId, out var count) ? count : 1),
             data,
-            ct);
+            ct,
+            // Naming the sender only makes sense while they're the only
+            // unread message — once there's more than one, the bell shows an
+            // aggregated count instead, so no single avatar applies either.
+            userId => unreadCountsByUserId.TryGetValue(userId, out var count) && count <= 1
+                ? (message.UserName, sender?.AvatarUrl)
+                : (null, null));
     }
 
     // ── Claim (idempotent) + create per-token attempts + first send ────────
 
     private async Task ClaimAndSendAsync(
         string type, Dictionary<Guid, string> dedupeKeysByUserId, Guid? tripId,
-        Func<Guid, string, (string Title, string Body)> textBuilder, Dictionary<string, string> data, CancellationToken ct)
+        Func<Guid, string, (string Title, string Body)> textBuilder, Dictionary<string, string> data, CancellationToken ct,
+        Func<Guid, (string? ActorName, string? ActorAvatarUrl)>? actorResolver = null)
     {
         // NotificationLog is also the in-app notification center's only data
         // source (see NotificationsController) — it must be claimed
@@ -327,6 +343,7 @@ public class NotificationDispatchService : INotificationDispatchService
         {
             var language = languagesByUserId.TryGetValue(userId, out var lang) ? lang : "en";
             var (title, body) = textBuilder(userId, language);
+            var (actorName, actorAvatarUrl) = actorResolver?.Invoke(userId) ?? (null, null);
 
             var log = new NotificationLog
             {
@@ -337,6 +354,8 @@ public class NotificationDispatchService : INotificationDispatchService
                 Title = title,
                 Body = body,
                 DataJson = dataJson,
+                ActorName = actorName,
+                ActorAvatarUrl = actorAvatarUrl,
                 Status = "pending",
             };
 
