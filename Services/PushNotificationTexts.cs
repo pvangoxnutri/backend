@@ -21,28 +21,34 @@ public static class PushNotificationTexts
             ? ($"{memberName} gick med i {tripTitle}", $"Äventyret har nu {memberCount} medlemmar.")
             : ($"{memberName} joined {tripTitle}", $"The adventure now has {memberCount} members.");
 
-    public static (string Title, string Body) NewActivity(string language, string activityTitle) =>
+    // Title carries the actor (who), Body carries the activity title (what)
+    // — the in-app notification center shows both since the activity isn't
+    // hidden.
+    public static (string Title, string Body) NewActivity(string language, string actorName, string activityTitle) =>
         language == "sv"
-            ? ("Ny aktivitet tillagd", activityTitle)
-            : ("New activity added", activityTitle);
+            ? ($"{actorName} la till en ny SideQuest", activityTitle)
+            : ($"{actorName} added a new SideQuest", activityTitle);
 
-    // Deliberately doesn't name the activity — it's a hidden SideQuest, and
-    // the whole point of hidden ones is that the title isn't spoiled
-    // anywhere outside its own detail screen.
+    // Deliberately anonymous and titleless — it's a hidden SideQuest, and
+    // the whole point of hidden ones is that neither who added it nor its
+    // title is spoiled anywhere outside its own detail screen.
     public static (string Title, string Body) NewHiddenSideQuest(string language) =>
         language == "sv"
-            ? ("Ny dold SideQuest", "Någon lade till en överraskning till din resa.")
-            : ("New hidden SideQuest", "Someone added a surprise to your trip.");
+            ? ("Någon la till en SideQuest", "")
+            : ("Somebody added a SideQuest", "");
 
     public static (string Title, string Body) SideQuestRevealed(string language, string activityTitle) =>
         language == "sv"
             ? ("En SideQuest har avslöjats 🎁", activityTitle)
             : ("A SideQuest was revealed 🎁", activityTitle);
 
-    public static (string Title, string Body) Chat(string language, int count) =>
-        language == "sv"
-            ? ($"{count} nya chattmeddelanden", "Tryck för att hoppa in i konversationen.")
-            : ($"{count} new chat messages", "Tap to jump into the conversation.");
+    // A single new message names its sender — once there's more than one
+    // unread, naming just the latest sender would be misleading, so it
+    // collapses to a count instead.
+    public static (string Title, string Body) Chat(string language, string senderName, int count) =>
+        count > 1
+            ? (language == "sv" ? ($"{count} nya chattmeddelanden", "Tryck för att hoppa in i konversationen.") : ($"{count} new chat messages", "Tap to jump into the conversation."))
+            : (language == "sv" ? ($"{senderName} skickade ett meddelande", "Tryck för att hoppa in i konversationen.") : ($"{senderName} sent a message", "Tap to jump into the conversation."));
 
     public static (string Title, string Body) Expense(string language, string expenseTitle, string amount) =>
         language == "sv"

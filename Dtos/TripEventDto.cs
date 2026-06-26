@@ -8,5 +8,6 @@ public class TripEventDto
     public string ActorName { get; set; } = string.Empty;
     public string Type { get; set; } = string.Empty;
     public Guid? ActivityId { get; set; }
+    public bool IsHidden { get; set; }
     public DateTime CreatedAt { get; set; }
 }

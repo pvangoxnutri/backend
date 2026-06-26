@@ -124,8 +124,8 @@ public class NotificationDispatchService : INotificationDispatchService
             return;
         }
 
-        // Hidden SideQuests never leak their title outside their own detail
-        // screen — public activities show it directly.
+        // Hidden SideQuests never leak who added them or their title outside
+        // the activity's own detail screen — public activities show both.
         var isHidden = activity.Visibility == "hidden";
         var type = isHidden ? "new_hidden_sidequest" : "new_activity";
 
@@ -137,9 +137,16 @@ public class NotificationDispatchService : INotificationDispatchService
             ["route"] = $"/trip/{activity.TripId}",
         };
 
+        string? actorName = null;
+        if (!isHidden)
+        {
+            var actor = await _db.Users.FindAsync(new object?[] { actorId }, ct);
+            actorName = actor?.Name ?? "Someone";
+        }
+
         await ClaimAndSendAsync(
             type, dedupeKeys, activity.TripId,
-            (_, lang) => isHidden ? PushNotificationTexts.NewHiddenSideQuest(lang) : PushNotificationTexts.NewActivity(lang, activity.Title),
+            (_, lang) => isHidden ? PushNotificationTexts.NewHiddenSideQuest(lang) : PushNotificationTexts.NewActivity(lang, actorName!, activity.Title),
             data, ct);
     }
 
@@ -287,7 +294,7 @@ public class NotificationDispatchService : INotificationDispatchService
             "chat",
             dedupeKeys,
             message.TripId,
-            (userId, lang) => PushNotificationTexts.Chat(lang, unreadCountsByUserId.TryGetValue(userId, out var count) ? count : 1),
+            (userId, lang) => PushNotificationTexts.Chat(lang, message.UserName, unreadCountsByUserId.TryGetValue(userId, out var count) ? count : 1),
             data,
             ct);
     }

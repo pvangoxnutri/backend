@@ -413,6 +413,7 @@ public class TripsController : ControllerBase
                 ActorName = e.ActorName,
                 Type = e.Type,
                 ActivityId = e.ActivityId,
+                IsHidden = e.IsHidden,
                 CreatedAt = e.CreatedAt,
             })
             .ToListAsync(cancellationToken);
@@ -1172,6 +1173,8 @@ public class TripsController : ControllerBase
         // In-app "Activity" feed entry — deliberately doesn't carry the
         // activity's title (it may be a hidden SideQuest; eventLabel()
         // renders this generically, same as member_joined/member_left).
+        // IsHidden also tells the client to suppress ActorName for hidden
+        // SideQuests — "who added it" is just as much a spoiler as the title.
         var actorForEvent = await _db.Users.FindAsync(new object?[] { userId });
         _db.TripEvents.Add(new TripEvent
         {
@@ -1180,6 +1183,7 @@ public class TripsController : ControllerBase
             ActorName = actorForEvent?.Name ?? "Someone",
             Type = "activity_added",
             ActivityId = activity.Id,
+            IsHidden = finalVisibility == "hidden",
             CreatedAt = DateTime.UtcNow,
         });
 
