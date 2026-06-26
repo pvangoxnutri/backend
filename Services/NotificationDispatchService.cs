@@ -12,15 +12,17 @@ public interface INotificationDispatchService
     Task SendActivityAddedAsync(TripActivity activity, Guid actorId, CancellationToken ct = default);
     Task SendTripInviteAsync(TripInvite invite, Guid recipientUserId, CancellationToken ct = default);
     Task SendChatMessageAsync(ChatMessage message, CancellationToken ct = default);
+    Task SendMemberJoinedAsync(Trip trip, Guid newMemberId, string newMemberName, CancellationToken ct = default);
+    Task SendExpenseAsync(Expense expense, Guid actorId, CancellationToken ct = default);
 
     // Scheduler-driven, type-agnostic: retries due attempts and verifies
-    // delivery receipts for whatever's outstanding across all five types.
+    // delivery receipts for whatever's outstanding across all notification types.
     Task ProcessPendingAttemptsAsync(CancellationToken ct = default);
     Task CheckReceiptsAsync(CancellationToken ct = default);
 }
 
 // Owns "who gets this, what does it say, has it already been claimed, did it
-// actually get delivered" for the five push notification types SideQuest
+// actually get delivered" for the push notification types SideQuest
 // sends.
 //
 // Outbox model:
@@ -89,45 +91,112 @@ public class NotificationDispatchService : INotificationDispatchService
             ["route"] = $"/trip/{activity.TripId}",
         };
 
-        await ClaimAndSendAsync("teaser", dedupeKeys, activity.TripId, lang => PushNotificationTexts.Teaser(lang, activity.Teaser!), data, ct);
+        await ClaimAndSendAsync("teaser", dedupeKeys, activity.TripId, (_, lang) => PushNotificationTexts.Teaser(lang, activity.Teaser!), data, ct);
     }
 
     public async Task SendRevealAsync(TripActivity activity, CancellationToken ct = default)
     {
         var recipientIds = await GetTripMemberIdsExcludingAsync(activity.TripId, activity.OwnerId, ct);
-        if (recipientIds.Count == 0) return;
+        if (recipientIds.Count == 0)
+        {
+            _logger.LogInformation("[NOTIF_DEBUG] sidequest_revealed activity={ActivityId} trip={TripId}: 0 other trip member(s) — nothing to notify.", activity.Id, activity.TripId);
+            return;
+        }
 
-        var dedupeKeys = recipientIds.ToDictionary(id => id, id => $"reveal:{activity.Id}:{id}");
+        var dedupeKeys = recipientIds.ToDictionary(id => id, id => $"sidequest_revealed:{activity.Id}:{id}");
         var data = new Dictionary<string, string>
         {
-            ["type"] = "reveal",
+            ["type"] = "sidequest_revealed",
             ["tripId"] = activity.TripId.ToString(),
             ["activityId"] = activity.Id.ToString(),
             ["route"] = $"/trip/{activity.TripId}/sidequest/{activity.Id}",
         };
 
-        await ClaimAndSendAsync("reveal", dedupeKeys, activity.TripId, lang => PushNotificationTexts.Reveal(lang, activity.Title), data, ct);
+        await ClaimAndSendAsync("sidequest_revealed", dedupeKeys, activity.TripId, (_, lang) => PushNotificationTexts.SideQuestRevealed(lang, activity.Title), data, ct);
     }
 
     public async Task SendActivityAddedAsync(TripActivity activity, Guid actorId, CancellationToken ct = default)
     {
         var recipientIds = await GetTripMemberIdsExcludingAsync(activity.TripId, actorId, ct);
-        if (recipientIds.Count == 0) return;
+        if (recipientIds.Count == 0)
+        {
+            _logger.LogInformation("[NOTIF_DEBUG] new_activity/new_hidden_sidequest activity={ActivityId} trip={TripId} actor={ActorId}: 0 other trip member(s) — nothing to notify.", activity.Id, activity.TripId, actorId);
+            return;
+        }
 
-        var actor = await _db.Users.FindAsync(new object?[] { actorId }, ct);
-        var trip = await _db.Trips.FindAsync(new object?[] { activity.TripId }, ct);
-        var actorName = actor?.Name ?? "Someone";
-        var tripTitle = trip?.Title ?? "your trip";
+        // Hidden SideQuests never leak their title outside their own detail
+        // screen — public activities show it directly.
+        var isHidden = activity.Visibility == "hidden";
+        var type = isHidden ? "new_hidden_sidequest" : "new_activity";
 
-        var dedupeKeys = recipientIds.ToDictionary(id => id, id => $"activity_added:{activity.Id}:{id}");
+        var dedupeKeys = recipientIds.ToDictionary(id => id, id => $"{type}:{activity.Id}:{id}");
         var data = new Dictionary<string, string>
         {
-            ["type"] = "activity_added",
+            ["type"] = type,
             ["tripId"] = activity.TripId.ToString(),
             ["route"] = $"/trip/{activity.TripId}",
         };
 
-        await ClaimAndSendAsync("activity_added", dedupeKeys, activity.TripId, lang => PushNotificationTexts.ActivityAdded(lang, actorName, tripTitle), data, ct);
+        await ClaimAndSendAsync(
+            type, dedupeKeys, activity.TripId,
+            (_, lang) => isHidden ? PushNotificationTexts.NewHiddenSideQuest(lang) : PushNotificationTexts.NewActivity(lang, activity.Title),
+            data, ct);
+    }
+
+    public async Task SendMemberJoinedAsync(Trip trip, Guid newMemberId, string newMemberName, CancellationToken ct = default)
+    {
+        var recipientIds = await GetTripMemberIdsExcludingAsync(trip.Id, newMemberId, ct);
+        if (recipientIds.Count == 0)
+        {
+            _logger.LogInformation("[NOTIF_DEBUG] member_joined trip={TripId} newMember={NewMemberId}: 0 other trip member(s) — nothing to notify.", trip.Id, newMemberId);
+            return;
+        }
+
+        var memberCount = await _db.TripMembers.CountAsync(tm => tm.TripId == trip.Id, ct);
+
+        var dedupeKeys = recipientIds.ToDictionary(id => id, id => $"member_joined:{trip.Id}:{newMemberId}:{id}");
+        var data = new Dictionary<string, string>
+        {
+            ["type"] = "member_joined",
+            ["tripId"] = trip.Id.ToString(),
+            ["route"] = $"/trip/{trip.Id}",
+        };
+
+        await ClaimAndSendAsync(
+            "member_joined", dedupeKeys, trip.Id,
+            (_, lang) => PushNotificationTexts.MemberJoined(lang, newMemberName, trip.Title, memberCount),
+            data, ct);
+    }
+
+    public async Task SendExpenseAsync(Expense expense, Guid actorId, CancellationToken ct = default)
+    {
+        // Only the people this expense actually moves money for — payers and
+        // participants — ever see a notification about it. Everyone else in
+        // the trip is unaffected and shouldn't be pinged.
+        var affectedUserIds = expense.Payers.Select(p => p.UserId)
+            .Concat(expense.Participants.Select(p => p.UserId))
+            .Distinct()
+            .Where(id => id != actorId)
+            .ToList();
+        if (affectedUserIds.Count == 0)
+        {
+            _logger.LogInformation("[NOTIF_DEBUG] expense expense={ExpenseId} trip={TripId} actor={ActorId}: no other affected payer/participant — nothing to notify.", expense.Id, expense.TripId, actorId);
+            return;
+        }
+
+        var dedupeKeys = affectedUserIds.ToDictionary(id => id, id => $"expense:{expense.Id}:{id}");
+        var data = new Dictionary<string, string>
+        {
+            ["type"] = "expense",
+            ["tripId"] = expense.TripId.ToString(),
+            ["route"] = $"/trip/{expense.TripId}/split",
+        };
+
+        var amountText = $"{expense.TotalAmount:0.##} {expense.Currency}";
+        await ClaimAndSendAsync(
+            "expense", dedupeKeys, expense.TripId,
+            (_, lang) => PushNotificationTexts.Expense(lang, expense.Description, amountText),
+            data, ct);
     }
 
     public async Task SendTripInviteAsync(TripInvite invite, Guid recipientUserId, CancellationToken ct = default)
@@ -149,7 +218,7 @@ public class NotificationDispatchService : INotificationDispatchService
             ["route"] = $"/?inviteId={invite.Id}",
         };
 
-        await ClaimAndSendAsync("trip_invite", dedupeKeys, invite.TripId, lang => PushNotificationTexts.TripInvite(lang, ownerName, tripTitle), data, ct);
+        await ClaimAndSendAsync("trip_invite", dedupeKeys, invite.TripId, (_, lang) => PushNotificationTexts.TripInvite(lang, ownerName, tripTitle), data, ct);
     }
 
     public async Task SendChatMessageAsync(ChatMessage message, CancellationToken ct = default)
@@ -188,25 +257,37 @@ public class NotificationDispatchService : INotificationDispatchService
             return;
         }
 
-        var trip = await _db.Trips.FindAsync(new object?[] { message.TripId }, ct);
-        var tripTitle = trip?.Title ?? "your trip";
+        // Per-recipient unread count, not the raw message text — chat
+        // content is private group conversation, not something to surface in
+        // a notification banner. "Unread" = other members' messages newer
+        // than this recipient's last chat presence heartbeat (their best
+        // proxy for "last time they had this chat open").
+        var lastSeenByUserId = await _db.ChatPresence
+            .Where(cp => cp.TripId == message.TripId && recipientIds.Contains(cp.UserId))
+            .Select(cp => new { cp.UserId, cp.LastSeenAt })
+            .ToDictionaryAsync(cp => cp.UserId, cp => cp.LastSeenAt, ct);
 
-        var dedupeKeys = recipientIds.ToDictionary(id => id, id => $"chat_message:{message.Id}:{id}");
+        var unreadCountsByUserId = new Dictionary<Guid, int>();
+        foreach (var recipientId in recipientIds)
+        {
+            var since = lastSeenByUserId.TryGetValue(recipientId, out var lastSeen) ? lastSeen : DateTime.MinValue;
+            unreadCountsByUserId[recipientId] = await _db.ChatMessages
+                .CountAsync(m => m.TripId == message.TripId && !m.IsSystem && m.UserId != recipientId && m.CreatedAt > since, ct);
+        }
+
+        var dedupeKeys = recipientIds.ToDictionary(id => id, id => $"chat:{message.Id}:{id}");
         var data = new Dictionary<string, string>
         {
-            ["type"] = "chat_message",
+            ["type"] = "chat",
             ["tripId"] = message.TripId.ToString(),
             ["route"] = $"/trip/{message.TripId}?openChat=1",
         };
 
         await ClaimAndSendAsync(
-            "chat_message",
+            "chat",
             dedupeKeys,
             message.TripId,
-            // Deliberately not the raw message text — chat content is
-            // private group conversation, not something to surface in a
-            // notification banner.
-            lang => PushNotificationTexts.ChatMessage(lang, message.UserName, tripTitle),
+            (userId, lang) => PushNotificationTexts.Chat(lang, unreadCountsByUserId.TryGetValue(userId, out var count) ? count : 1),
             data,
             ct);
     }
@@ -215,18 +296,16 @@ public class NotificationDispatchService : INotificationDispatchService
 
     private async Task ClaimAndSendAsync(
         string type, Dictionary<Guid, string> dedupeKeysByUserId, Guid? tripId,
-        Func<string, (string Title, string Body)> textBuilder, Dictionary<string, string> data, CancellationToken ct)
+        Func<Guid, string, (string Title, string Body)> textBuilder, Dictionary<string, string> data, CancellationToken ct)
     {
-        if (!_enabled)
-        {
-            // TEMPORARY DEBUG: was LogDebug, invisible at the app's default
-            // "Information" log level — bumped so Railway logs actually show
-            // this, the single most likely reason push goes silent. Revert
-            // to LogDebug once the Railway push issue is confirmed fixed.
-            _logger.LogInformation("[PUSH_DEBUG] Push:Enabled=false — skipping {Type} dispatch entirely (no NotificationLog/PushDeliveryAttempt rows created).", type);
-            return;
-        }
-        _logger.LogInformation("[PUSH_DEBUG] {Type} dispatch proceeding for {Count} recipient(s).", type, dedupeKeysByUserId.Count);
+        // NotificationLog is also the in-app notification center's only data
+        // source (see NotificationsController) — it must be claimed
+        // regardless of Push:Enabled. Only the actual Expo send (further
+        // below) is gated by that flag; a disabled push config must never
+        // mean "no record of this notification exists at all".
+        _logger.LogInformation(
+            "[NOTIF_DEBUG] {Type} dispatch starting for recipient(s) [{RecipientIds}] (Push:Enabled={Enabled}).",
+            type, string.Join(", ", dedupeKeysByUserId.Keys), _enabled);
 
         var userIds = dedupeKeysByUserId.Keys.ToList();
         var languagesByUserId = await _db.Users
@@ -240,7 +319,7 @@ public class NotificationDispatchService : INotificationDispatchService
         foreach (var (userId, dedupeKey) in dedupeKeysByUserId)
         {
             var language = languagesByUserId.TryGetValue(userId, out var lang) ? lang : "en";
-            var (title, body) = textBuilder(language);
+            var (title, body) = textBuilder(userId, language);
 
             var log = new NotificationLog
             {
@@ -268,7 +347,21 @@ public class NotificationDispatchService : INotificationDispatchService
             }
         }
 
+        _logger.LogInformation(
+            "[NOTIF_DEBUG] {Type}: inserted {ClaimedCount}/{AttemptedCount} NotificationLog row(s) (the gap is dedupe — already claimed for that recipient).",
+            type, claimedLogs.Count, dedupeKeysByUserId.Count);
+
         if (claimedLogs.Count == 0) return;
+
+        if (!_enabled)
+        {
+            // TEMPORARY DEBUG: was LogDebug, invisible at the app's default
+            // "Information" log level — bumped so Railway logs actually show
+            // this, the single most likely reason push goes silent. Revert
+            // to LogDebug once the Railway push issue is confirmed fixed.
+            _logger.LogInformation("[PUSH_DEBUG] Push:Enabled=false — {Type} claimed ({Count} NotificationLog row(s)) but skipping actual Expo send.", type, claimedLogs.Count);
+            return;
+        }
 
         var attempts = await CreateAttemptsAsync(claimedLogs, ct);
         if (attempts.Count > 0)

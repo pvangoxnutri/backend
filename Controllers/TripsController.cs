@@ -371,6 +371,16 @@ public class TripsController : ControllerBase
 
         await _db.SaveChangesAsync(cancellationToken);
 
+        // Push notification — failures must never break joining a trip.
+        try
+        {
+            await _notifications.SendMemberJoinedAsync(trip, userId, actorName, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to dispatch member_joined push for trip {TripId}.", trip.Id);
+        }
+
         return Ok(new { tripId = trip.Id });
     }
 
@@ -402,6 +412,7 @@ public class TripsController : ControllerBase
                 TripTitle = e.Trip.Title,
                 ActorName = e.ActorName,
                 Type = e.Type,
+                ActivityId = e.ActivityId,
                 CreatedAt = e.CreatedAt,
             })
             .ToListAsync(cancellationToken);
@@ -966,6 +977,19 @@ public class TripsController : ControllerBase
         });
 
         await _db.SaveChangesAsync(cancellationToken);
+
+        // Push notification — failures must never break accepting an invite.
+        try
+        {
+            var trip = await _db.Trips.FindAsync(new object?[] { id }, cancellationToken);
+            if (trip != null)
+                await _notifications.SendMemberJoinedAsync(trip, userId, actor?.Name ?? "Someone", cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to dispatch member_joined push for trip {TripId}.", id);
+        }
+
         return Ok();
     }
 
@@ -1155,6 +1179,7 @@ public class TripsController : ControllerBase
             ActorId = userId,
             ActorName = actorForEvent?.Name ?? "Someone",
             Type = "activity_added",
+            ActivityId = activity.Id,
             CreatedAt = DateTime.UtcNow,
         });
 

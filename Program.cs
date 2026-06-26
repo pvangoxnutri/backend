@@ -20,18 +20,16 @@ builder.Services.AddHttpClient<ISupabaseStorageService, SupabaseStorageService>(
 builder.Services.AddHttpClient<IExpoPushService, ExpoPushService>();
 builder.Services.AddScoped<INotificationDispatchService, NotificationDispatchService>();
 
-// Safe-by-default: the automatic pipeline (teaser/reveal scheduler, and the
-// auto-dispatch on new chat messages / trip invites) only runs when
-// explicitly turned on via the Push:Enabled config key (env var
-// "Push__Enabled=true" on Railway). This lets the push notification code be
-// deployed and the manual POST /api/push-tokens/test-send smoke test run
-// against production WITHOUT activating real sends to real users — that's a
-// separate, deliberate go-live step (flip the env var, no redeploy needed).
+// Always runs — it's also what claims "sidequest_revealed"/"teaser"
+// NotificationLog rows that the in-app notification center reads (see
+// NotificationsController). Push:Enabled only gates the actual Expo send
+// inside NotificationDispatchService.ClaimAndSendAsync, so this scheduler
+// being on does NOT mean real pushes go out to real users while the flag is
+// off — that go-live step (flip the env var, no redeploy needed) still
+// stands; it now just controls delivery, not whether the notification is
+// recorded at all.
+builder.Services.AddHostedService<RevealNotificationScheduler>();
 var pushNotificationsEnabled = builder.Configuration.GetValue<bool>("Push:Enabled");
-if (pushNotificationsEnabled)
-{
-    builder.Services.AddHostedService<RevealNotificationScheduler>();
-}
 
 // Unrelated to push — runs regardless of Push:Enabled. Keeps TripEvents
 // and ChatMessages from growing forever (see DataRetentionScheduler).
@@ -164,7 +162,7 @@ builder.Services.AddCors(options =>
 var app = builder.Build();
 
 app.Logger.LogInformation(
-    "Push notifications automatic pipeline (scheduler + auto-dispatch): {Status}. Manual test-send is unaffected by this flag.",
+    "Push notifications actual Expo delivery: {Status}. NotificationLog rows (in-app notification center) are always recorded regardless of this flag. Manual test-send is unaffected by this flag.",
     pushNotificationsEnabled ? "ENABLED" : "disabled (set Push__Enabled=true to turn on)");
 
 // Run pending migrations and ensure uploads directory exists

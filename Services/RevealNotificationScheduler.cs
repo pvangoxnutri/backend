@@ -116,8 +116,8 @@ public class RevealNotificationScheduler : BackgroundService
         var claimedCount = 0;
         foreach (var activity in dueActivities)
         {
-            var prefix = $"reveal:{activity.Id}:";
-            var alreadyHandled = await db.NotificationLogs.AnyAsync(n => n.Type == "reveal" && n.DedupeKey.StartsWith(prefix), ct);
+            var prefix = $"sidequest_revealed:{activity.Id}:";
+            var alreadyHandled = await db.NotificationLogs.AnyAsync(n => n.Type == "sidequest_revealed" && n.DedupeKey.StartsWith(prefix), ct);
             if (alreadyHandled) continue;
 
             await dispatch.SendRevealAsync(activity, ct);

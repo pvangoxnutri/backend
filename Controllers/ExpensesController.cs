@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using sidequest.backend.Data;
 using sidequest.backend.Dtos;
 using sidequest.backend.Models;
+using sidequest.backend.Services;
 
 namespace sidequest.backend.Controllers;
 
@@ -14,10 +15,14 @@ namespace sidequest.backend.Controllers;
 public class ExpensesController : ControllerBase
 {
     private readonly AppDbContext _db;
+    private readonly INotificationDispatchService _notifications;
+    private readonly ILogger<ExpensesController> _logger;
 
-    public ExpensesController(AppDbContext db)
+    public ExpensesController(AppDbContext db, INotificationDispatchService notifications, ILogger<ExpensesController> logger)
     {
         _db = db;
+        _notifications = notifications;
+        _logger = logger;
     }
 
     private Guid GetCurrentUserId()
@@ -201,6 +206,16 @@ public class ExpensesController : ControllerBase
             .Include(e => e.Payers).ThenInclude(p => p.User)
             .Include(e => e.Participants).ThenInclude(p => p.User)
             .FirstAsync();
+
+        // Push notification — failures must never break adding an expense.
+        try
+        {
+            await _notifications.SendExpenseAsync(saved, userId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to dispatch expense push for expense {ExpenseId}.", saved.Id);
+        }
 
         return CreatedAtAction(nameof(GetExpenses), new { tripId }, MapExpense(saved));
     }

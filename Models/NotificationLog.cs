@@ -11,15 +11,19 @@ public class NotificationLog
 {
     public Guid Id { get; set; } = Guid.NewGuid();
 
-    // "teaser" | "reveal" | "trip_invite" | "chat_message"
+    // "teaser" | "trip_invite" | "member_joined" | "new_activity" |
+    // "new_hidden_sidequest" | "sidequest_revealed" | "chat" | "expense"
     public string Type { get; set; } = string.Empty;
 
     // Uniquely identifies "this exact notification, for this exact
     // recipient" — claimed via insert before anything is sent. Examples:
     //   teaser:{activityId}:{userId}
-    //   reveal:{activityId}:{userId}
     //   trip_invite:{inviteId}
-    //   chat_message:{chatMessageId}:{userId}
+    //   member_joined:{tripId}:{newMemberId}:{userId}
+    //   new_activity:{activityId}:{userId}
+    //   sidequest_revealed:{activityId}:{userId}
+    //   chat:{chatMessageId}:{userId}
+    //   expense:{expenseId}:{userId}
     public string DedupeKey { get; set; } = string.Empty;
 
     public Guid RecipientUserId { get; set; }
