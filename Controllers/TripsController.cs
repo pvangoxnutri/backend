@@ -1438,6 +1438,30 @@ public class TripsController : ControllerBase
 
         var imageUrl = activity.ImageUrl;
 
+        // NotificationLog has no FK to TripActivity (it must survive the
+        // activity being deleted later, since Title/Body/DataJson are
+        // captured once at claim time) — so deleting the activity does not
+        // cascade. Without this, other members keep a stale bell entry
+        // whose route 404s the moment they tap it. DedupeKey embeds the
+        // activity id as its second ":"-segment for every type that's
+        // actually about one activity (see NotificationDispatchService).
+        var activityIdStr = activity.Id.ToString();
+        var teaserPrefix = $"teaser:{activityIdStr}:";
+        var revealedPrefix = $"sidequest_revealed:{activityIdStr}:";
+        var newActivityPrefix = $"new_activity:{activityIdStr}:";
+        var newHiddenPrefix = $"new_hidden_sidequest:{activityIdStr}:";
+        var staleNotifications = await _db.NotificationLogs
+            .Where(n =>
+                n.DedupeKey.StartsWith(teaserPrefix) ||
+                n.DedupeKey.StartsWith(revealedPrefix) ||
+                n.DedupeKey.StartsWith(newActivityPrefix) ||
+                n.DedupeKey.StartsWith(newHiddenPrefix))
+            .ToListAsync(cancellationToken);
+        if (staleNotifications.Count > 0)
+        {
+            _db.NotificationLogs.RemoveRange(staleNotifications);
+        }
+
         _db.TripActivities.Remove(activity);
         await _db.SaveChangesAsync(cancellationToken);
 
