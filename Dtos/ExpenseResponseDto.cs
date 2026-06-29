@@ -11,6 +11,7 @@ public class ExpenseResponseDto
     public string Currency { get; set; } = string.Empty;
     public string? ReceiptUrl { get; set; }
     public DateTime CreatedAt { get; set; }
+    public Guid CreatedByUserId { get; set; }
     public string CreatedByName { get; set; } = string.Empty;
     public List<ExpensePayerDto> Payers { get; set; } = new();
     public List<ExpenseParticipantDto> Participants { get; set; } = new();

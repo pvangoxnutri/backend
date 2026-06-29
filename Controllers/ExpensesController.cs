@@ -36,6 +36,9 @@ public class ExpensesController : ControllerBase
     private async Task<bool> IsTripMember(Guid tripId, Guid userId)
         => await _db.TripMembers.AnyAsync(tm => tm.TripId == tripId && tm.UserId == userId);
 
+    private async Task<bool> IsTripOwner(Guid tripId, Guid userId)
+        => await _db.TripMembers.AnyAsync(tm => tm.TripId == tripId && tm.UserId == userId && tm.IsOwner);
+
     private async Task<bool> TripExists(Guid tripId)
         => await _db.Trips.AnyAsync(t => t.Id == tripId);
 
@@ -51,6 +54,7 @@ public class ExpensesController : ControllerBase
             Currency = expense.Currency,
             ReceiptUrl = expense.ReceiptUrl,
             CreatedAt = expense.CreatedAt,
+            CreatedByUserId = expense.CreatedByUserId,
             CreatedByName = expense.CreatedBy?.Name ?? string.Empty,
             Payers = expense.Payers.Select(p => new ExpensePayerDto
             {
@@ -239,6 +243,9 @@ public class ExpensesController : ControllerBase
 
         if (expense == null)
             return NotFound("Expense not found.");
+
+        if (expense.CreatedByUserId != userId && !await IsTripOwner(tripId, userId))
+            return Forbid();
 
         _db.Expenses.Remove(expense);
         await _db.SaveChangesAsync();
