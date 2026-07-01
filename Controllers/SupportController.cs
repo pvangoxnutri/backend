@@ -9,7 +9,7 @@ using sidequest.backend.Services;
 namespace sidequest.backend.Controllers;
 
 [ApiController]
-[Route("")]
+[Route("api/support")]
 public class SupportController : ControllerBase
 {
     private readonly AppDbContext _db;
@@ -35,7 +35,7 @@ public class SupportController : ControllerBase
     // ── User endpoints ───────────────────────────────────────────────────────
 
     // POST /api/support/tickets
-    [HttpPost("api/support/tickets")]
+    [HttpPost("tickets")]
     [Authorize]
     public async Task<ActionResult> CreateTicket([FromBody] CreateTicketDto dto, CancellationToken ct)
     {
@@ -79,7 +79,7 @@ public class SupportController : ControllerBase
     }
 
     // GET /api/support/tickets
-    [HttpGet("api/support/tickets")]
+    [HttpGet("tickets")]
     [Authorize]
     public async Task<ActionResult<List<SupportTicketSummaryDto>>> ListTickets(CancellationToken ct)
     {
@@ -104,7 +104,7 @@ public class SupportController : ControllerBase
     }
 
     // GET /api/support/tickets/{id}
-    [HttpGet("api/support/tickets/{id:guid}")]
+    [HttpGet("tickets/{id:guid}")]
     [Authorize]
     public async Task<ActionResult<SupportTicketDetailDto>> GetTicket(Guid id, CancellationToken ct)
     {
@@ -126,7 +126,7 @@ public class SupportController : ControllerBase
     }
 
     // POST /api/support/tickets/{id}/messages
-    [HttpPost("api/support/tickets/{id:guid}/messages")]
+    [HttpPost("tickets/{id:guid}/messages")]
     [Authorize]
     public async Task<ActionResult> AddUserMessage(Guid id, [FromBody] AddMessageDto dto, CancellationToken ct)
     {
@@ -167,7 +167,7 @@ public class SupportController : ControllerBase
     // ── Admin endpoints (X-Admin-Key header) ─────────────────────────────────
 
     // GET /api/admin/support/tickets
-    [HttpGet("api/admin/support/tickets")]
+    [HttpGet("~/api/admin/support/tickets")]
     public async Task<ActionResult<List<AdminTicketSummaryDto>>> AdminListTickets(
         [FromQuery] string? status, [FromQuery] string? search, CancellationToken ct)
     {
@@ -211,7 +211,7 @@ public class SupportController : ControllerBase
     }
 
     // GET /api/admin/support/tickets/{id}
-    [HttpGet("api/admin/support/tickets/{id:guid}")]
+    [HttpGet("~/api/admin/support/tickets/{id:guid}")]
     public async Task<ActionResult<AdminTicketDetailDto>> AdminGetTicket(Guid id, CancellationToken ct)
     {
         if (!IsAdminAuthorized()) return Unauthorized();
@@ -259,7 +259,7 @@ public class SupportController : ControllerBase
     }
 
     // POST /api/admin/support/tickets/{id}/messages
-    [HttpPost("api/admin/support/tickets/{id:guid}/messages")]
+    [HttpPost("~/api/admin/support/tickets/{id:guid}/messages")]
     public async Task<ActionResult> AdminReply(Guid id, [FromBody] AddMessageDto dto, CancellationToken ct)
     {
         if (!IsAdminAuthorized()) return Unauthorized();
@@ -298,7 +298,7 @@ public class SupportController : ControllerBase
     }
 
     // PATCH /api/admin/support/tickets/{id}/status
-    [HttpPatch("api/admin/support/tickets/{id:guid}/status")]
+    [HttpPatch("~/api/admin/support/tickets/{id:guid}/status")]
     public async Task<ActionResult> AdminSetStatus(Guid id, [FromBody] SetStatusDto dto, CancellationToken ct)
     {
         if (!IsAdminAuthorized()) return Unauthorized();
