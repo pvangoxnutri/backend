@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using sidequest.backend.Data;
 using sidequest.backend.Dtos;
+using sidequest.backend.Services;
 
 namespace sidequest.backend.Controllers;
 
@@ -59,32 +60,81 @@ public class NotificationsController : ControllerBase
             "[NOTIF_DEBUG] GET /api/notifications userId={UserId}: {TotalForUser} NotificationLog row(s) total for this user, {InCenterCount} match the in-app-center type whitelist and are returned.",
             userId, totalForUser, logs.Count);
 
-        var notifications = logs.Select(n => new NotificationLogDto
+        var language = await _db.Users
+            .Where(u => u.Id == userId)
+            .Select(u => u.Language)
+            .FirstOrDefaultAsync(ct) ?? "en";
+
+        var notifications = logs.Select(n =>
         {
-            Id = n.Id,
-            Type = n.Type,
-            Title = n.Title,
-            Body = n.Body,
-            TripId = n.TripId,
-            Route = ExtractRoute(n.DataJson),
-            ActorName = n.ActorName,
-            ActorAvatarUrl = n.ActorAvatarUrl,
-            CreatedAt = n.CreatedAt,
+            var data = ExtractData(n.DataJson);
+            var (title, body) = HasRenderParams(n.Type, data)
+                ? RenderText(n.Type, data, language)
+                : (n.Title, n.Body);
+
+            return new NotificationLogDto
+            {
+                Id = n.Id,
+                Type = n.Type,
+                Title = title,
+                Body = body,
+                TripId = n.TripId,
+                Route = data.TryGetValue("route", out var route) ? route : null,
+                ActorName = n.ActorName,
+                ActorAvatarUrl = n.ActorAvatarUrl,
+                CreatedAt = n.CreatedAt,
+            };
         });
 
         return Ok(notifications);
     }
 
-    private static string? ExtractRoute(string dataJson)
+    private static Dictionary<string, string> ExtractData(string dataJson)
     {
         try
         {
-            var data = JsonSerializer.Deserialize<Dictionary<string, string>>(dataJson);
-            return data != null && data.TryGetValue("route", out var route) ? route : null;
+            return JsonSerializer.Deserialize<Dictionary<string, string>>(dataJson) ?? new();
         }
         catch (JsonException)
         {
-            return null;
+            return new();
         }
     }
+
+    private static bool HasRenderParams(string type, Dictionary<string, string> data) => type switch
+    {
+        "member_joined" => data.ContainsKey("memberName"),
+        "new_activity" => data.ContainsKey("actorName"),
+        "new_hidden_sidequest" => true,
+        "sidequest_revealed" => true,
+        "chat" => data.ContainsKey("senderName"),
+        "expense" => data.ContainsKey("expenseTitle"),
+        "support_reply" => true,
+        _ => false,
+    };
+
+    private static (string Title, string Body) RenderText(string type, Dictionary<string, string> data, string language) => type switch
+    {
+        "member_joined" => PushNotificationTexts.MemberJoined(
+            language,
+            data.GetValueOrDefault("memberName", ""),
+            data.GetValueOrDefault("tripTitle", ""),
+            int.TryParse(data.GetValueOrDefault("memberCount"), out var mc) ? mc : 0),
+        "new_activity" => PushNotificationTexts.NewActivity(
+            language,
+            data.GetValueOrDefault("actorName", ""),
+            data.GetValueOrDefault("activityTitle", "")),
+        "new_hidden_sidequest" => PushNotificationTexts.NewHiddenSideQuest(language),
+        "sidequest_revealed" => PushNotificationTexts.SideQuestRevealed(language),
+        "chat" => PushNotificationTexts.Chat(
+            language,
+            data.GetValueOrDefault("senderName", ""),
+            int.TryParse(data.GetValueOrDefault("count"), out var cnt) ? cnt : 1),
+        "expense" => PushNotificationTexts.Expense(
+            language,
+            data.GetValueOrDefault("expenseTitle", ""),
+            data.GetValueOrDefault("amount", "")),
+        "support_reply" => PushNotificationTexts.SupportReply(language),
+        _ => ("", ""),
+    };
 }

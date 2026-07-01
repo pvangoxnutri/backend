@@ -145,6 +145,8 @@ public class NotificationDispatchService : INotificationDispatchService
             var actor = await _db.Users.FindAsync(new object?[] { actorId }, ct);
             actorName = actor?.Name ?? "Someone";
             actorAvatarUrl = actor?.AvatarUrl;
+            data["actorName"] = actorName;
+            data["activityTitle"] = activity.Title;
         }
 
         await ClaimAndSendAsync(
@@ -174,6 +176,9 @@ public class NotificationDispatchService : INotificationDispatchService
             ["type"] = "member_joined",
             ["tripId"] = trip.Id.ToString(),
             ["route"] = $"/trip/{trip.Id}",
+            ["memberName"] = newMemberName,
+            ["tripTitle"] = trip.Title,
+            ["memberCount"] = memberCount.ToString(),
         };
 
         await ClaimAndSendAsync(
@@ -200,14 +205,16 @@ public class NotificationDispatchService : INotificationDispatchService
         }
 
         var dedupeKeys = affectedUserIds.ToDictionary(id => id, id => $"expense:{expense.Id}:{id}");
+        var amountText = $"{expense.TotalAmount:0.##} {expense.Currency}";
         var data = new Dictionary<string, string>
         {
             ["type"] = "expense",
             ["tripId"] = expense.TripId.ToString(),
             ["route"] = $"/trip/{expense.TripId}/split",
+            ["expenseTitle"] = expense.Description,
+            ["amount"] = amountText,
         };
 
-        var amountText = $"{expense.TotalAmount:0.##} {expense.Currency}";
         await ClaimAndSendAsync(
             "expense", dedupeKeys, expense.TripId,
             (_, lang) => PushNotificationTexts.Expense(lang, expense.Description, amountText),
@@ -312,7 +319,16 @@ public class NotificationDispatchService : INotificationDispatchService
             // aggregated count instead, so no single avatar applies either.
             userId => unreadCountsByUserId.TryGetValue(userId, out var count) && count <= 1
                 ? (message.UserName, sender?.AvatarUrl)
-                : (null, null));
+                : (null, null),
+            userId =>
+            {
+                var cnt = unreadCountsByUserId.TryGetValue(userId, out var c) ? c : 1;
+                return new Dictionary<string, string>
+                {
+                    ["senderName"] = message.UserName,
+                    ["count"] = cnt.ToString(),
+                };
+            });
     }
 
     public async Task SendSupportReplyAsync(SupportTicket ticket, CancellationToken ct = default)
@@ -335,7 +351,8 @@ public class NotificationDispatchService : INotificationDispatchService
     private async Task ClaimAndSendAsync(
         string type, Dictionary<Guid, string> dedupeKeysByUserId, Guid? tripId,
         Func<Guid, string, (string Title, string Body)> textBuilder, Dictionary<string, string> data, CancellationToken ct,
-        Func<Guid, (string? ActorName, string? ActorAvatarUrl)>? actorResolver = null)
+        Func<Guid, (string? ActorName, string? ActorAvatarUrl)>? actorResolver = null,
+        Func<Guid, Dictionary<string, string>?>? perRecipientExtraData = null)
     {
         // NotificationLog is also the in-app notification center's only data
         // source (see NotificationsController) — it must be claimed
@@ -352,7 +369,7 @@ public class NotificationDispatchService : INotificationDispatchService
             .Select(u => new { u.Id, u.Language })
             .ToDictionaryAsync(u => u.Id, u => u.Language, ct);
 
-        var dataJson = JsonSerializer.Serialize(data);
+        var baseDataJson = JsonSerializer.Serialize(data);
         var claimedLogs = new List<NotificationLog>();
 
         foreach (var (userId, dedupeKey) in dedupeKeysByUserId)
@@ -360,6 +377,11 @@ public class NotificationDispatchService : INotificationDispatchService
             var language = languagesByUserId.TryGetValue(userId, out var lang) ? lang : "en";
             var (title, body) = textBuilder(userId, language);
             var (actorName, actorAvatarUrl) = actorResolver?.Invoke(userId) ?? (null, null);
+
+            var extra = perRecipientExtraData?.Invoke(userId);
+            var dataJson = extra != null
+                ? JsonSerializer.Serialize(data.Concat(extra).ToDictionary(kv => kv.Key, kv => kv.Value))
+                : baseDataJson;
 
             var log = new NotificationLog
             {
