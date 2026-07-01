@@ -16,10 +16,37 @@ public static class PushNotificationTexts
             ? ($"{ownerName} bjöd in dig", $"Gå med i {tripTitle}")
             : ($"{ownerName} invited you", $"Join {tripTitle}");
 
-    public static (string Title, string Body) MemberJoined(string language, string memberName, string tripTitle, int memberCount) =>
-        language == "sv"
-            ? ($"{memberName} gick med i {tripTitle}", $"Äventyret har nu {memberCount} medlemmar.")
-            : ($"{memberName} joined {tripTitle}", $"The adventure now has {memberCount} members.");
+    public static (string Title, string Body) MemberJoined(string language, string memberName, string tripTitle, int memberCount)
+    {
+        var hasName = !string.IsNullOrEmpty(memberName);
+        var hasTrip = !string.IsNullOrEmpty(tripTitle);
+        var body = memberCount > 0
+            ? (language == "sv" ? $"Äventyret har nu {memberCount} medlemmar." : $"The adventure now has {memberCount} members.")
+            : "";
+
+        if (language == "sv")
+        {
+            var title = (hasName, hasTrip) switch
+            {
+                (true, true) => $"{memberName} gick med i {tripTitle}",
+                (false, true) => $"Gick med i {tripTitle}",
+                (true, false) => $"{memberName} gick med",
+                _ => "Ny resekompis anslöt",
+            };
+            return (title, body);
+        }
+        else
+        {
+            var title = (hasName, hasTrip) switch
+            {
+                (true, true) => $"{memberName} joined {tripTitle}",
+                (false, true) => $"Joined {tripTitle}",
+                (true, false) => $"{memberName} joined",
+                _ => "A new member joined",
+            };
+            return (title, body);
+        }
+    }
 
     // Title carries the actor (who), Body carries the activity title (what)
     // — the in-app notification center shows both since the activity isn't

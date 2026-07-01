@@ -68,7 +68,7 @@ public class NotificationsController : ControllerBase
         var notifications = logs.Select(n =>
         {
             var data = ExtractData(n.DataJson);
-            var (title, body) = HasRenderParams(n.Type, data)
+            var (title, body) = InAppCenterTypes.Contains(n.Type)
                 ? RenderText(n.Type, data, language)
                 : (n.Title, n.Body);
 
@@ -101,40 +101,49 @@ public class NotificationsController : ControllerBase
         }
     }
 
-    private static bool HasRenderParams(string type, Dictionary<string, string> data) => type switch
+    private static (string Title, string Body) RenderText(string type, Dictionary<string, string> data, string language)
     {
-        "member_joined" => data.ContainsKey("memberName"),
-        "new_activity" => data.ContainsKey("actorName"),
-        "new_hidden_sidequest" => true,
-        "sidequest_revealed" => true,
-        "chat" => data.ContainsKey("senderName"),
-        "expense" => data.ContainsKey("expenseTitle"),
-        "support_reply" => true,
-        _ => false,
-    };
+        switch (type)
+        {
+            case "member_joined":
+                return PushNotificationTexts.MemberJoined(
+                    language,
+                    data.GetValueOrDefault("memberName", ""),
+                    data.GetValueOrDefault("tripTitle", ""),
+                    int.TryParse(data.GetValueOrDefault("memberCount"), out var mc) ? mc : 0);
 
-    private static (string Title, string Body) RenderText(string type, Dictionary<string, string> data, string language) => type switch
-    {
-        "member_joined" => PushNotificationTexts.MemberJoined(
-            language,
-            data.GetValueOrDefault("memberName", ""),
-            data.GetValueOrDefault("tripTitle", ""),
-            int.TryParse(data.GetValueOrDefault("memberCount"), out var mc) ? mc : 0),
-        "new_activity" => PushNotificationTexts.NewActivity(
-            language,
-            data.GetValueOrDefault("actorName", ""),
-            data.GetValueOrDefault("activityTitle", "")),
-        "new_hidden_sidequest" => PushNotificationTexts.NewHiddenSideQuest(language),
-        "sidequest_revealed" => PushNotificationTexts.SideQuestRevealed(language),
-        "chat" => PushNotificationTexts.Chat(
-            language,
-            data.GetValueOrDefault("senderName", ""),
-            int.TryParse(data.GetValueOrDefault("count"), out var cnt) ? cnt : 1),
-        "expense" => PushNotificationTexts.Expense(
-            language,
-            data.GetValueOrDefault("expenseTitle", ""),
-            data.GetValueOrDefault("amount", "")),
-        "support_reply" => PushNotificationTexts.SupportReply(language),
-        _ => ("", ""),
-    };
+            case "new_activity":
+                if (!data.ContainsKey("actorName"))
+                    return language == "sv" ? ("Ny SideQuest tillagd", "") : ("New SideQuest added", "");
+                return PushNotificationTexts.NewActivity(language, data["actorName"], data.GetValueOrDefault("activityTitle", ""));
+
+            case "new_hidden_sidequest":
+                return PushNotificationTexts.NewHiddenSideQuest(language);
+
+            case "sidequest_revealed":
+                return PushNotificationTexts.SideQuestRevealed(language);
+
+            case "chat":
+            {
+                var hasSender = data.ContainsKey("senderName");
+                var hasCount = int.TryParse(data.GetValueOrDefault("count"), out var cnt);
+                if (hasSender || (hasCount && cnt > 1))
+                    return PushNotificationTexts.Chat(language, data.GetValueOrDefault("senderName", ""), hasCount ? cnt : 1);
+                return language == "sv"
+                    ? ("Nya chattmeddelanden", "Tryck för att hoppa in i konversationen.")
+                    : ("New chat messages", "Tap to jump into the conversation.");
+            }
+
+            case "expense":
+                if (!data.ContainsKey("expenseTitle"))
+                    return language == "sv" ? ("Ny utgift tillagd", "") : ("New expense added", "");
+                return PushNotificationTexts.Expense(language, data["expenseTitle"], data.GetValueOrDefault("amount", ""));
+
+            case "support_reply":
+                return PushNotificationTexts.SupportReply(language);
+
+            default:
+                return ("", "");
+        }
+    }
 }
