@@ -9,6 +9,7 @@ using sidequest.backend.Services;
 namespace sidequest.backend.Controllers;
 
 [ApiController]
+[Route("")]
 public class SupportController : ControllerBase
 {
     private readonly AppDbContext _db;
