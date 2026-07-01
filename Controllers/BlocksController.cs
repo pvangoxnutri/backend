@@ -33,8 +33,9 @@ public class BlocksController : ControllerBase
     }
 
     // POST /api/users/{targetUserId}/block
+    // Optional body: { "tripId": "guid-string" }
     [HttpPost("api/users/{targetUserId:guid}/block")]
-    public async Task<ActionResult> BlockUser(Guid targetUserId, CancellationToken ct)
+    public async Task<ActionResult> BlockUser(Guid targetUserId, [FromBody] BlockUserDto? dto, CancellationToken ct)
     {
         var userId = GetUserId();
         if (userId == targetUserId) return BadRequest("Cannot block yourself.");
@@ -45,6 +46,19 @@ public class BlocksController : ControllerBase
 
         var block = new UserBlock { BlockerId = userId, BlockedUserId = targetUserId };
         _db.UserBlocks.Add(block);
+
+        // Auto-create a moderation report so every block is visible to admins.
+        var tripNote = dto?.TripId != null ? $" TripId: {dto.TripId}" : string.Empty;
+        _db.UserReports.Add(new UserReport
+        {
+            ReporterId = userId,
+            ContentType = "user_block",
+            ContentId = targetUserId.ToString(),
+            Reason = "user_blocked",
+            Notes = $"Auto-report: blocked by {userId}.{tripNote}",
+            Status = "pending",
+        });
+
         await _db.SaveChangesAsync(ct);
         return Created("", new { id = block.Id });
     }
@@ -62,4 +76,9 @@ public class BlocksController : ControllerBase
         await _db.SaveChangesAsync(ct);
         return NoContent();
     }
+}
+
+public class BlockUserDto
+{
+    public string? TripId { get; set; }
 }
