@@ -14,6 +14,7 @@ public interface INotificationDispatchService
     Task SendChatMessageAsync(ChatMessage message, CancellationToken ct = default);
     Task SendMemberJoinedAsync(Trip trip, Guid newMemberId, string newMemberName, CancellationToken ct = default);
     Task SendExpenseAsync(Expense expense, Guid actorId, CancellationToken ct = default);
+    Task SendSupportReplyAsync(SupportTicket ticket, CancellationToken ct = default);
 
     // Scheduler-driven, type-agnostic: retries due attempts and verifies
     // delivery receipts for whatever's outstanding across all notification types.
@@ -312,6 +313,21 @@ public class NotificationDispatchService : INotificationDispatchService
             userId => unreadCountsByUserId.TryGetValue(userId, out var count) && count <= 1
                 ? (message.UserName, sender?.AvatarUrl)
                 : (null, null));
+    }
+
+    public async Task SendSupportReplyAsync(SupportTicket ticket, CancellationToken ct = default)
+    {
+        var dedupeKey = $"support_reply:{ticket.Id}:{DateTime.UtcNow:yyyyMMddHHmm}";
+        var dedupeKeys = new Dictionary<Guid, string> { [ticket.UserId] = dedupeKey };
+        var data = new Dictionary<string, string>
+        {
+            ["type"] = "support_reply",
+            ["ticketId"] = ticket.Id.ToString(),
+            ["route"] = $"/support/{ticket.Id}",
+        };
+
+        await ClaimAndSendAsync("support_reply", dedupeKeys, null,
+            (_, lang) => PushNotificationTexts.SupportReply(lang), data, ct);
     }
 
     // ── Claim (idempotent) + create per-token attempts + first send ────────

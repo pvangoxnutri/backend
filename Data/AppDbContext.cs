@@ -26,6 +26,9 @@ public class AppDbContext : DbContext
     public DbSet<PushDeliveryAttempt> PushDeliveryAttempts => Set<PushDeliveryAttempt>();
     public DbSet<UserReport> UserReports => Set<UserReport>();
     public DbSet<UserBlock> UserBlocks => Set<UserBlock>();
+    public DbSet<SupportTicket> SupportTickets => Set<SupportTicket>();
+    public DbSet<SupportMessage> SupportMessages => Set<SupportMessage>();
+    public DbSet<SupportAttachment> SupportAttachments => Set<SupportAttachment>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -232,5 +235,29 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<UserBlock>()
             .HasIndex(b => new { b.BlockerId, b.BlockedUserId })
             .IsUnique();
+
+        modelBuilder.Entity<SupportTicket>()
+            .HasOne(t => t.User)
+            .WithMany()
+            .HasForeignKey(t => t.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<SupportMessage>()
+            .HasOne(m => m.Ticket)
+            .WithMany(t => t.Messages)
+            .HasForeignKey(m => m.TicketId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<SupportAttachment>()
+            .HasOne(a => a.Message)
+            .WithMany(m => m.Attachments)
+            .HasForeignKey(a => a.MessageId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<SupportTicket>()
+            .HasIndex(t => t.UserId);
+
+        modelBuilder.Entity<SupportTicket>()
+            .HasIndex(t => t.Status);
     }
 }

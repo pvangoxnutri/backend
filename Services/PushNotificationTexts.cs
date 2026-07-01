@@ -57,4 +57,9 @@ public static class PushNotificationTexts
         language == "sv"
             ? ("Ny utgift tillagd", $"{expenseTitle} • {amount}")
             : ("New expense added", $"{expenseTitle} • {amount}");
+
+    public static (string Title, string Body) SupportReply(string language) =>
+        language == "sv"
+            ? ("Supporten svarade på ditt ärende", "Öppna SideQuest för att läsa och svara.")
+            : ("Support replied to your ticket", "Open SideQuest to read and reply.");
 }
