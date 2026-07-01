@@ -24,6 +24,8 @@ public class AppDbContext : DbContext
     public DbSet<PushToken> PushTokens => Set<PushToken>();
     public DbSet<NotificationLog> NotificationLogs => Set<NotificationLog>();
     public DbSet<PushDeliveryAttempt> PushDeliveryAttempts => Set<PushDeliveryAttempt>();
+    public DbSet<UserReport> UserReports => Set<UserReport>();
+    public DbSet<UserBlock> UserBlocks => Set<UserBlock>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -208,5 +210,27 @@ public class AppDbContext : DbContext
         // The receipt-checker's "find accepted tickets to verify" query.
         modelBuilder.Entity<PushDeliveryAttempt>()
             .HasIndex(a => a.Status);
+
+        modelBuilder.Entity<UserReport>()
+            .HasOne(r => r.Reporter)
+            .WithMany()
+            .HasForeignKey(r => r.ReporterId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<UserBlock>()
+            .HasOne(b => b.Blocker)
+            .WithMany()
+            .HasForeignKey(b => b.BlockerId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<UserBlock>()
+            .HasOne(b => b.BlockedUser)
+            .WithMany()
+            .HasForeignKey(b => b.BlockedUserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<UserBlock>()
+            .HasIndex(b => new { b.BlockerId, b.BlockedUserId })
+            .IsUnique();
     }
 }
