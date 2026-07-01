@@ -24,6 +24,7 @@ public class NotificationsController : ControllerBase
         "sidequest_revealed",
         "chat",
         "expense",
+        "support_reply",
     ];
 
     private readonly AppDbContext _db;

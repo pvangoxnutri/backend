@@ -321,6 +321,25 @@ public class SupportController : ControllerBase
         return Ok(new { status = ticket.Status });
     }
 
+    // POST /api/internal/support/tickets/{id}/notify-reply
+    // Called by the website admin after it inserts an admin reply via Supabase.
+    // Authenticated by the Supabase service role key so no extra env var is needed.
+    [HttpPost("~/api/internal/support/tickets/{id:guid}/notify-reply")]
+    public async Task<ActionResult> NotifyReply(Guid id, CancellationToken ct)
+    {
+        var bearer = HttpContext.Request.Headers["Authorization"].FirstOrDefault();
+        var key = bearer?.StartsWith("Bearer ") == true ? bearer[7..] : null;
+        var expected = _config["Supabase:ServiceRoleKey"];
+        if (string.IsNullOrWhiteSpace(expected) || key != expected)
+            return Unauthorized();
+
+        var ticket = await _db.SupportTickets.FirstOrDefaultAsync(t => t.Id == id, ct);
+        if (ticket == null) return NotFound();
+
+        await _notifications.SendSupportReplyAsync(ticket, ct);
+        return Ok();
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private static SupportTicketDetailDto MapTicketDetail(SupportTicket ticket) => new()
