@@ -98,14 +98,19 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
                 {
                     try
                     {
-                        var role = await db.Users
+                        var userData = await db.Users
                             .Where(u => u.Id == userId)
-                            .Select(u => u.Role)
+                            .Select(u => new { u.Role, u.IsBanned })
                             .FirstOrDefaultAsync(context.HttpContext.RequestAborted);
 
-                        if (!string.IsNullOrWhiteSpace(role) && !identity.HasClaim(ClaimTypes.Role, role))
+                        if (!string.IsNullOrWhiteSpace(userData?.Role) && !identity.HasClaim(ClaimTypes.Role, userData.Role))
                         {
-                            identity.AddClaim(new Claim(ClaimTypes.Role, role));
+                            identity.AddClaim(new Claim(ClaimTypes.Role, userData.Role));
+                        }
+
+                        if (userData?.IsBanned == true)
+                        {
+                            identity.AddClaim(new Claim("sidequest:banned", "true"));
                         }
                     }
                     catch
@@ -201,6 +206,24 @@ if (!app.Environment.IsDevelopment())
 }
 app.UseCors("LocalFrontend");
 app.UseAuthentication();
+
+// Return 403 immediately for banned users — lets the mobile app kick them out
+// mid-session without waiting for a restart. /api/auth/* is exempt so the
+// sync endpoint can still return isBanned:true for the graceful startup path.
+app.Use(async (ctx, next) =>
+{
+    if (ctx.User.Identity?.IsAuthenticated == true
+        && ctx.User.HasClaim("sidequest:banned", "true")
+        && !ctx.Request.Path.StartsWithSegments("/api/auth"))
+    {
+        ctx.Response.StatusCode = 403;
+        ctx.Response.ContentType = "application/json";
+        await ctx.Response.WriteAsync("{\"error\":\"banned\"}");
+        return;
+    }
+    await next();
+});
+
 app.UseAuthorization();
 app.MapControllers();
 
