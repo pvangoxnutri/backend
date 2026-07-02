@@ -26,6 +26,7 @@ public class NotificationsController : ControllerBase
         "chat",
         "expense",
         "support_reply",
+        "system_message",
     ];
 
     private readonly AppDbContext _db;
@@ -141,6 +142,10 @@ public class NotificationsController : ControllerBase
 
             case "support_reply":
                 return PushNotificationTexts.SupportReply(language);
+
+            case "system_message":
+                // Title/Body are already set verbatim by the admin — pass through as-is.
+                return (data.GetValueOrDefault("title", ""), data.GetValueOrDefault("body", ""));
 
             default:
                 return ("", "");

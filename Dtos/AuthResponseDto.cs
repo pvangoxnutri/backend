@@ -11,5 +11,6 @@ public class AuthResponseDto
     public string? Bio { get; set; }
     public bool HasCompletedOnboarding { get; set; }
     public string Role { get; set; } = "user";
+    public bool IsBanned { get; set; }
     public string Language { get; set; } = "en";
 }

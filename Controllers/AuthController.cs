@@ -778,6 +778,7 @@ public class AuthController : ControllerBase
             Bio = user.Bio,
             HasCompletedOnboarding = user.HasCompletedOnboarding,
             Role = user.Role,
+            IsBanned = user.IsBanned,
             Language = user.Language,
         };
     }

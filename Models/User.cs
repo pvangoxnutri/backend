@@ -12,6 +12,7 @@ public class User
     public string? Purpose { get; set; }
     public string? PurposeOtherText { get; set; }
     public string Role { get; set; } = "user"; // "user" | "admin"
+    public bool IsBanned { get; set; } = false;
     public string Language { get; set; } = "en"; // "en" | "sv" — drives push notification text
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
