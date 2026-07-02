@@ -78,6 +78,13 @@ public class TripChatController : ControllerBase
                 .ToListAsync(ct);
         }
 
+        // Users who have blocked the current user — their messages should
+        // show as a blocked placeholder on the client side.
+        var blockedByIds = await _db.UserBlocks
+            .Where(ub => ub.BlockedUserId == userId)
+            .Select(ub => ub.BlockerId)
+            .ToHashSetAsync(ct);
+
         var result = new List<ChatMessageDto>();
         foreach (var m in messages)
         {
@@ -93,6 +100,7 @@ public class TripChatController : ControllerBase
                 SystemEventType = m.SystemEventType,
                 CreatedAt = m.CreatedAt,
                 LinkPreview = linkPreview,
+                IsBlockedByAuthor = m.UserId.HasValue && blockedByIds.Contains(m.UserId.Value),
             });
         }
 
