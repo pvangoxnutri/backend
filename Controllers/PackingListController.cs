@@ -24,19 +24,21 @@ public class PackingListController : ControllerBase
         await _db.TripMembers.AnyAsync(tm => tm.TripId == tripId && tm.UserId == userId && tm.IsOwner, ct);
 
     // GET /api/trips/{tripId}/packing-list
+    // Returns { shared: [...], private: [...] }
     [HttpGet("api/trips/{tripId:guid}/packing-list")]
     public async Task<ActionResult> GetPackingList(Guid tripId, CancellationToken ct)
     {
         var userId = GetUserId();
         if (!await IsMember(tripId, userId, ct)) return Forbid();
 
-        var categories = await _db.PackingListCategories
-            .Where(c => c.TripId == tripId)
+        var shared = await _db.PackingListCategories
+            .Where(c => c.TripId == tripId && c.Scope == "shared")
             .OrderBy(c => c.SortOrder).ThenBy(c => c.CreatedAt)
             .Select(c => new
             {
                 id = c.Id,
                 name = c.Name,
+                scope = c.Scope,
                 sortOrder = c.SortOrder,
                 createdByUserId = c.CreatedByUserId,
                 items = c.Items
@@ -48,13 +50,48 @@ public class PackingListController : ControllerBase
                         isChecked = i.IsChecked,
                         sortOrder = i.SortOrder,
                         createdByUserId = i.CreatedByUserId,
+                        assignedToUserId = i.AssignedToUserId,
+                        assignedToName = i.AssignedToUserId != null
+                            ? _db.Users.Where(u => u.Id == i.AssignedToUserId).Select(u => u.Name).FirstOrDefault()
+                            : null,
+                        assignedToAvatarUrl = i.AssignedToUserId != null
+                            ? _db.Users.Where(u => u.Id == i.AssignedToUserId).Select(u => u.AvatarUrl).FirstOrDefault()
+                            : null,
                         checkedByUserId = i.CheckedByUserId,
                         checkedAt = i.CheckedAt,
                     }).ToList(),
             })
             .ToListAsync(ct);
 
-        return Ok(categories);
+        var privateCategories = await _db.PackingListCategories
+            .Where(c => c.TripId == tripId && c.Scope == "private" && c.UserId == userId)
+            .OrderBy(c => c.SortOrder).ThenBy(c => c.CreatedAt)
+            .Select(c => new
+            {
+                id = c.Id,
+                name = c.Name,
+                scope = c.Scope,
+                sortOrder = c.SortOrder,
+                createdByUserId = c.CreatedByUserId,
+                items = c.Items
+                    .OrderBy(i => i.SortOrder).ThenBy(i => i.CreatedAt)
+                    .Select(i => new
+                    {
+                        id = i.Id,
+                        text = i.Text,
+                        isChecked = i.IsChecked,
+                        sortOrder = i.SortOrder,
+                        createdByUserId = i.CreatedByUserId,
+                        assignedToUserId = (Guid?)null,
+                        assignedToName = (string?)null,
+                        assignedToAvatarUrl = (string?)null,
+                        checkedByUserId = i.CheckedByUserId,
+                        checkedAt = i.CheckedAt,
+                    }).ToList(),
+            })
+            .ToListAsync(ct);
+
+        return Ok(new { shared, @private = privateCategories });
     }
 
     // POST /api/trips/{tripId}/packing-list/categories
@@ -65,8 +102,10 @@ public class PackingListController : ControllerBase
         if (!await IsMember(tripId, userId, ct)) return Forbid();
         if (string.IsNullOrWhiteSpace(dto.Name)) return BadRequest("Name is required.");
 
+        var scope = dto.Scope == "private" ? "private" : "shared";
+
         var maxOrder = await _db.PackingListCategories
-            .Where(c => c.TripId == tripId)
+            .Where(c => c.TripId == tripId && c.Scope == scope && (scope == "shared" || c.UserId == userId))
             .Select(c => (int?)c.SortOrder)
             .MaxAsync(ct) ?? -1;
 
@@ -74,13 +113,23 @@ public class PackingListController : ControllerBase
         {
             TripId = tripId,
             Name = dto.Name.Trim(),
+            Scope = scope,
+            UserId = scope == "private" ? userId : null,
             SortOrder = maxOrder + 1,
             CreatedByUserId = userId,
         };
         _db.PackingListCategories.Add(category);
         await _db.SaveChangesAsync(ct);
 
-        return Created("", new { id = category.Id, name = category.Name, sortOrder = category.SortOrder, createdByUserId = category.CreatedByUserId, items = Array.Empty<object>() });
+        return Created("", new
+        {
+            id = category.Id,
+            name = category.Name,
+            scope = category.Scope,
+            sortOrder = category.SortOrder,
+            createdByUserId = category.CreatedByUserId,
+            items = Array.Empty<object>()
+        });
     }
 
     // PATCH /api/trips/{tripId}/packing-list/categories/{categoryId}
@@ -93,6 +142,7 @@ public class PackingListController : ControllerBase
         var category = await _db.PackingListCategories
             .FirstOrDefaultAsync(c => c.Id == categoryId && c.TripId == tripId, ct);
         if (category == null) return NotFound();
+        if (category.Scope == "private" && category.UserId != userId) return Forbid();
 
         if (!string.IsNullOrWhiteSpace(dto.Name)) category.Name = dto.Name.Trim();
         category.UpdatedAt = DateTime.UtcNow;
@@ -111,8 +161,15 @@ public class PackingListController : ControllerBase
             .FirstOrDefaultAsync(c => c.Id == categoryId && c.TripId == tripId, ct);
         if (category == null) return NotFound();
 
-        var isOwner = await IsOwner(tripId, userId, ct);
-        if (!isOwner && category.CreatedByUserId != userId) return Forbid();
+        if (category.Scope == "private")
+        {
+            if (category.UserId != userId) return Forbid();
+        }
+        else
+        {
+            var isOwner = await IsOwner(tripId, userId, ct);
+            if (!isOwner && category.CreatedByUserId != userId) return Forbid();
+        }
 
         _db.PackingListCategories.Remove(category);
         await _db.SaveChangesAsync(ct);
@@ -127,9 +184,19 @@ public class PackingListController : ControllerBase
         if (!await IsMember(tripId, userId, ct)) return Forbid();
         if (string.IsNullOrWhiteSpace(dto.Text)) return BadRequest("Text is required.");
 
-        var categoryExists = await _db.PackingListCategories
-            .AnyAsync(c => c.Id == categoryId && c.TripId == tripId, ct);
-        if (!categoryExists) return NotFound();
+        var category = await _db.PackingListCategories
+            .FirstOrDefaultAsync(c => c.Id == categoryId && c.TripId == tripId, ct);
+        if (category == null) return NotFound();
+        if (category.Scope == "private" && category.UserId != userId) return Forbid();
+
+        // AssignedToUserId only valid for shared categories
+        Guid? assignedTo = null;
+        if (category.Scope == "shared" && dto.AssignedToUserId.HasValue)
+        {
+            var isValidMember = await _db.TripMembers.AnyAsync(
+                tm => tm.TripId == tripId && tm.UserId == dto.AssignedToUserId.Value, ct);
+            assignedTo = isValidMember ? dto.AssignedToUserId : null;
+        }
 
         var maxOrder = await _db.PackingListItems
             .Where(i => i.CategoryId == categoryId)
@@ -142,11 +209,33 @@ public class PackingListController : ControllerBase
             Text = dto.Text.Trim(),
             SortOrder = maxOrder + 1,
             CreatedByUserId = userId,
+            AssignedToUserId = assignedTo,
         };
         _db.PackingListItems.Add(item);
         await _db.SaveChangesAsync(ct);
 
-        return Created("", new { id = item.Id, text = item.Text, isChecked = item.IsChecked, sortOrder = item.SortOrder, createdByUserId = item.CreatedByUserId, checkedByUserId = (Guid?)null, checkedAt = (DateTime?)null });
+        string? assignedName = null;
+        string? assignedAvatar = null;
+        if (assignedTo.HasValue)
+        {
+            var assignee = await _db.Users.FindAsync(new object[] { assignedTo.Value }, ct);
+            assignedName = assignee?.Name;
+            assignedAvatar = assignee?.AvatarUrl;
+        }
+
+        return Created("", new
+        {
+            id = item.Id,
+            text = item.Text,
+            isChecked = item.IsChecked,
+            sortOrder = item.SortOrder,
+            createdByUserId = item.CreatedByUserId,
+            assignedToUserId = item.AssignedToUserId,
+            assignedToName = assignedName,
+            assignedToAvatarUrl = assignedAvatar,
+            checkedByUserId = (Guid?)null,
+            checkedAt = (DateTime?)null,
+        });
     }
 
     // PATCH /api/trips/{tripId}/packing-list/items/{itemId}
@@ -160,18 +249,60 @@ public class PackingListController : ControllerBase
             .Include(i => i.Category)
             .FirstOrDefaultAsync(i => i.Id == itemId && i.Category.TripId == tripId, ct);
         if (item == null) return NotFound();
+        if (item.Category.Scope == "private" && item.Category.UserId != userId) return Forbid();
 
         if (!string.IsNullOrWhiteSpace(dto.Text)) item.Text = dto.Text.Trim();
+
         if (dto.IsChecked.HasValue)
         {
             item.IsChecked = dto.IsChecked.Value;
             item.CheckedByUserId = dto.IsChecked.Value ? userId : null;
             item.CheckedAt = dto.IsChecked.Value ? DateTime.UtcNow : null;
         }
+
+        // AssignedToUserId only on shared items
+        if (dto.AssignedToUserId.HasValue && item.Category.Scope == "shared")
+        {
+            var newAssignee = dto.AssignedToUserId.Value;
+            if (newAssignee == Guid.Empty)
+            {
+                item.AssignedToUserId = null;
+            }
+            else
+            {
+                var isValidMember = await _db.TripMembers.AnyAsync(
+                    tm => tm.TripId == tripId && tm.UserId == newAssignee, ct);
+                if (isValidMember) item.AssignedToUserId = newAssignee;
+            }
+        }
+        else if (dto.ClearAssignment == true)
+        {
+            item.AssignedToUserId = null;
+        }
+
         item.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync(ct);
 
-        return Ok(new { id = item.Id, text = item.Text, isChecked = item.IsChecked, checkedByUserId = item.CheckedByUserId, checkedAt = item.CheckedAt });
+        string? assignedName = null;
+        string? assignedAvatar = null;
+        if (item.AssignedToUserId.HasValue)
+        {
+            var assignee = await _db.Users.FindAsync(new object[] { item.AssignedToUserId.Value }, ct);
+            assignedName = assignee?.Name;
+            assignedAvatar = assignee?.AvatarUrl;
+        }
+
+        return Ok(new
+        {
+            id = item.Id,
+            text = item.Text,
+            isChecked = item.IsChecked,
+            assignedToUserId = item.AssignedToUserId,
+            assignedToName = assignedName,
+            assignedToAvatarUrl = assignedAvatar,
+            checkedByUserId = item.CheckedByUserId,
+            checkedAt = item.CheckedAt,
+        });
     }
 
     // DELETE /api/trips/{tripId}/packing-list/items/{itemId}
@@ -186,8 +317,15 @@ public class PackingListController : ControllerBase
             .FirstOrDefaultAsync(i => i.Id == itemId && i.Category.TripId == tripId, ct);
         if (item == null) return NotFound();
 
-        var isOwner = await IsOwner(tripId, userId, ct);
-        if (!isOwner && item.CreatedByUserId != userId) return Forbid();
+        if (item.Category.Scope == "private")
+        {
+            if (item.Category.UserId != userId) return Forbid();
+        }
+        else
+        {
+            var isOwner = await IsOwner(tripId, userId, ct);
+            if (!isOwner && item.CreatedByUserId != userId) return Forbid();
+        }
 
         _db.PackingListItems.Remove(item);
         await _db.SaveChangesAsync(ct);
@@ -195,7 +333,7 @@ public class PackingListController : ControllerBase
     }
 }
 
-public record CreateCategoryDto(string Name);
+public record CreateCategoryDto(string Name, string? Scope);
 public record UpdateCategoryDto(string? Name);
-public record CreateItemDto(string Text);
-public record UpdateItemDto(string? Text, bool? IsChecked);
+public record CreateItemDto(string Text, Guid? AssignedToUserId);
+public record UpdateItemDto(string? Text, bool? IsChecked, Guid? AssignedToUserId, bool? ClearAssignment);

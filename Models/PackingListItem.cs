@@ -9,6 +9,7 @@ public class PackingListItem
     public bool IsChecked { get; set; }
     public int SortOrder { get; set; }
     public Guid CreatedByUserId { get; set; }
+    public Guid? AssignedToUserId { get; set; }
     public Guid? CheckedByUserId { get; set; }
     public DateTime? CheckedAt { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
