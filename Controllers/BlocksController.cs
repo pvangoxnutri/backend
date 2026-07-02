@@ -32,6 +32,23 @@ public class BlocksController : ControllerBase
         return Ok(ids);
     }
 
+    // GET /api/users/blocked
+    [HttpGet("api/users/blocked")]
+    public async Task<ActionResult> GetBlockedUsers(CancellationToken ct)
+    {
+        var userId = GetUserId();
+        var blocked = await _db.UserBlocks
+            .Where(b => b.BlockerId == userId)
+            .Join(_db.Users, b => b.BlockedUserId, u => u.Id, (b, u) => new
+            {
+                id = u.Id.ToString(),
+                name = u.Name,
+                avatarUrl = u.AvatarUrl,
+            })
+            .ToListAsync(ct);
+        return Ok(blocked);
+    }
+
     // POST /api/users/{targetUserId}/block
     // Optional body: { "tripId": "guid-string" }
     [HttpPost("api/users/{targetUserId:guid}/block")]
