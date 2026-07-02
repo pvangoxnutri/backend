@@ -20,7 +20,6 @@ namespace sidequest.backend.Migrations
                     Name = table.Column<string>(type: "text", nullable: false),
                     SortOrder = table.Column<int>(type: "integer", nullable: false),
                     CreatedByUserId = table.Column<Guid>(type: "uuid", nullable: false),
-                    CreatedById = table.Column<Guid>(type: "uuid", nullable: false),
                     CreatedAt = table.Column<DateTime>(type: "timestamp with time zone", nullable: false),
                     UpdatedAt = table.Column<DateTime>(type: "timestamp with time zone", nullable: false)
                 },
@@ -31,12 +30,6 @@ namespace sidequest.backend.Migrations
                         name: "FK_PackingListCategories_Trips_TripId",
                         column: x => x.TripId,
                         principalTable: "Trips",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
-                    table.ForeignKey(
-                        name: "FK_PackingListCategories_Users_CreatedById",
-                        column: x => x.CreatedById,
-                        principalTable: "Users",
                         principalColumn: "Id",
                         onDelete: ReferentialAction.Cascade);
                 });
@@ -51,7 +44,6 @@ namespace sidequest.backend.Migrations
                     IsChecked = table.Column<bool>(type: "boolean", nullable: false),
                     SortOrder = table.Column<int>(type: "integer", nullable: false),
                     CreatedByUserId = table.Column<Guid>(type: "uuid", nullable: false),
-                    CreatedById = table.Column<Guid>(type: "uuid", nullable: false),
                     CheckedByUserId = table.Column<Guid>(type: "uuid", nullable: true),
                     CheckedAt = table.Column<DateTime>(type: "timestamp with time zone", nullable: true),
                     CreatedAt = table.Column<DateTime>(type: "timestamp with time zone", nullable: false),
@@ -66,18 +58,7 @@ namespace sidequest.backend.Migrations
                         principalTable: "PackingListCategories",
                         principalColumn: "Id",
                         onDelete: ReferentialAction.Cascade);
-                    table.ForeignKey(
-                        name: "FK_PackingListItems_Users_CreatedById",
-                        column: x => x.CreatedById,
-                        principalTable: "Users",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
                 });
-
-            migrationBuilder.CreateIndex(
-                name: "IX_PackingListCategories_CreatedById",
-                table: "PackingListCategories",
-                column: "CreatedById");
 
             migrationBuilder.CreateIndex(
                 name: "IX_PackingListCategories_TripId",
@@ -88,11 +69,6 @@ namespace sidequest.backend.Migrations
                 name: "IX_PackingListItems_CategoryId",
                 table: "PackingListItems",
                 column: "CategoryId");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_PackingListItems_CreatedById",
-                table: "PackingListItems",
-                column: "CreatedById");
         }
 
         /// <inheritdoc />
