@@ -29,6 +29,8 @@ public class AppDbContext : DbContext
     public DbSet<SupportTicket> SupportTickets => Set<SupportTicket>();
     public DbSet<SupportMessage> SupportMessages => Set<SupportMessage>();
     public DbSet<SupportAttachment> SupportAttachments => Set<SupportAttachment>();
+    public DbSet<PackingListCategory> PackingListCategories => Set<PackingListCategory>();
+    public DbSet<PackingListItem> PackingListItems => Set<PackingListItem>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
