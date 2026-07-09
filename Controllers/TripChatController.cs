@@ -37,6 +37,34 @@ public class TripChatController : ControllerBase
     private async Task<bool> IsMember(Guid tripId, Guid userId, CancellationToken ct = default)
         => await _db.TripMembers.AnyAsync(tm => tm.TripId == tripId && tm.UserId == userId, ct);
 
+    // The reaction picker's fixed set — anything else is rejected so the
+    // chips can never render arbitrary strings sent by a modified client.
+    private static readonly HashSet<string> AllowedReactionEmojis =
+        ["❤️", "😂", "😮", "😢", "👍", "👎"];
+
+    // Per-emoji summary for a set of messages, in first-reaction order.
+    private async Task<Dictionary<Guid, List<ChatReactionSummaryDto>>> GetReactionSummaries(
+        List<Guid> messageIds, Guid requesterId, CancellationToken ct)
+    {
+        var reactions = await _db.ChatMessageReactions
+            .Where(r => messageIds.Contains(r.ChatMessageId))
+            .ToListAsync(ct);
+
+        return reactions
+            .GroupBy(r => r.ChatMessageId)
+            .ToDictionary(
+                g => g.Key,
+                g => g.GroupBy(r => r.Emoji)
+                    .OrderBy(eg => eg.Min(r => r.CreatedAt))
+                    .Select(eg => new ChatReactionSummaryDto
+                    {
+                        Emoji = eg.Key,
+                        Count = eg.Count(),
+                        ReactedByMe = eg.Any(r => r.UserId == requesterId),
+                    })
+                    .ToList());
+    }
+
     // ── GET /api/trips/{tripId}/chat ──────────────────────────────────────────
     // Returns up to 80 recent messages. Pass ?since=ISO_DATETIME to get only
     // messages newer than that timestamp (used for polling).
@@ -85,6 +113,9 @@ public class TripChatController : ControllerBase
             .Select(ub => ub.BlockerId)
             .ToHashSetAsync(ct);
 
+        var reactionsByMessage = await GetReactionSummaries(
+            messages.Select(m => m.Id).ToList(), userId, ct);
+
         var result = new List<ChatMessageDto>();
         foreach (var m in messages)
         {
@@ -101,6 +132,7 @@ public class TripChatController : ControllerBase
                 CreatedAt = m.CreatedAt,
                 LinkPreview = linkPreview,
                 IsBlockedByAuthor = m.UserId.HasValue && blockedByIds.Contains(m.UserId.Value),
+                Reactions = reactionsByMessage.GetValueOrDefault(m.Id) ?? [],
             });
         }
 
@@ -165,6 +197,65 @@ public class TripChatController : ControllerBase
             CreatedAt = msg.CreatedAt,
             LinkPreview = linkPreview,
         });
+    }
+
+    // ── POST /api/trips/{tripId}/chat/{messageId}/reactions ───────────────────
+    // Toggles the caller's reaction with the given emoji: adds it if absent,
+    // removes it if present. Returns the message's updated reaction summary.
+
+    [HttpPost("{messageId}/reactions")]
+    public async Task<ActionResult<List<ChatReactionSummaryDto>>> ToggleReaction(
+        Guid tripId,
+        Guid messageId,
+        [FromBody] ToggleChatReactionDto dto,
+        CancellationToken ct)
+    {
+        var userId = GetUserId();
+        if (!await IsMember(tripId, userId, ct)) return Forbid();
+
+        var emoji = dto.Emoji?.Trim() ?? string.Empty;
+        if (!AllowedReactionEmojis.Contains(emoji))
+            return BadRequest("Unsupported reaction emoji.");
+
+        // The message must belong to THIS trip — a valid member of trip A
+        // must not be able to react into trip B via a foreign message id.
+        var message = await _db.ChatMessages
+            .FirstOrDefaultAsync(m => m.Id == messageId && m.TripId == tripId, ct);
+        if (message == null) return NotFound();
+        if (message.IsSystem) return BadRequest("System messages cannot be reacted to.");
+
+        var existing = await _db.ChatMessageReactions.FirstOrDefaultAsync(
+            r => r.ChatMessageId == messageId && r.UserId == userId && r.Emoji == emoji, ct);
+
+        if (existing != null)
+        {
+            _db.ChatMessageReactions.Remove(existing);
+            await _db.SaveChangesAsync(ct);
+        }
+        else
+        {
+            _db.ChatMessageReactions.Add(new ChatMessageReaction
+            {
+                ChatMessageId = messageId,
+                UserId = userId,
+                Emoji = emoji,
+                CreatedAt = DateTime.UtcNow,
+            });
+            try
+            {
+                await _db.SaveChangesAsync(ct);
+            }
+            catch (DbUpdateException)
+            {
+                // Two rapid toggles raced past the FirstOrDefault read — the
+                // unique (message, user, emoji) index kept the data correct;
+                // fall through and return the current summary.
+                _db.ChangeTracker.Clear();
+            }
+        }
+
+        var summaries = await GetReactionSummaries([messageId], userId, ct);
+        return Ok(summaries.GetValueOrDefault(messageId) ?? []);
     }
 
     // ── PUT /api/trips/{tripId}/chat/presence ─────────────────────────────────

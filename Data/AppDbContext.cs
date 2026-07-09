@@ -19,6 +19,7 @@ public class AppDbContext : DbContext
     public DbSet<Settlement> Settlements => Set<Settlement>();
     public DbSet<TripEvent> TripEvents => Set<TripEvent>();
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
+    public DbSet<ChatMessageReaction> ChatMessageReactions => Set<ChatMessageReaction>();
     public DbSet<ChatPresenceEntry> ChatPresence => Set<ChatPresenceEntry>();
     public DbSet<Feedback> Feedbacks => Set<Feedback>();
     public DbSet<PushToken> PushTokens => Set<PushToken>();
@@ -48,6 +49,17 @@ public class AppDbContext : DbContext
 
         modelBuilder.Entity<ChatPresenceEntry>()
             .HasKey(cp => new { cp.TripId, cp.UserId });
+
+        modelBuilder.Entity<ChatMessageReaction>()
+            .HasOne(r => r.ChatMessage)
+            .WithMany()
+            .HasForeignKey(r => r.ChatMessageId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // One reaction per user+emoji per message — toggling is delete/insert.
+        modelBuilder.Entity<ChatMessageReaction>()
+            .HasIndex(r => new { r.ChatMessageId, r.UserId, r.Emoji })
+            .IsUnique();
 
         modelBuilder.Entity<User>()
             .HasIndex(u => u.Email)
