@@ -37,10 +37,20 @@ public class TripChatController : ControllerBase
     private async Task<bool> IsMember(Guid tripId, Guid userId, CancellationToken ct = default)
         => await _db.TripMembers.AnyAsync(tm => tm.TripId == tripId && tm.UserId == userId, ct);
 
-    // The reaction picker's fixed set — anything else is rejected so the
-    // chips can never render arbitrary strings sent by a modified client.
-    private static readonly HashSet<string> AllowedReactionEmojis =
-        ["❤️", "😂", "😮", "😢", "👍", "👎"];
+    // Reactions accept any emoji the client's keyboard produces (the six
+    // quick reactions PLUS the "+" keyboard picker). We don't whitelist a
+    // fixed set, but we DO guard against arbitrary text/markup being stored:
+    // must be short, non-empty, contain a pictographic char, and carry no
+    // letters/digits/whitespace (which a real emoji grapheme never does).
+    private static bool IsValidReactionEmoji(string emoji)
+    {
+        if (string.IsNullOrEmpty(emoji) || emoji.Length > 16) return false;
+        if (emoji.Any(c => char.IsLetterOrDigit(c) || char.IsWhiteSpace(c))) return false;
+        // At least one astral-plane / symbol char — rules out pure ASCII
+        // punctuation like ":)" while allowing ZWJ / variation-selector /
+        // skin-tone sequences.
+        return emoji.Any(c => char.IsSurrogate(c) || c > 0x2000);
+    }
 
     // Per-emoji summary for a set of messages, in first-reaction order.
     private async Task<Dictionary<Guid, List<ChatReactionSummaryDto>>> GetReactionSummaries(
@@ -214,7 +224,7 @@ public class TripChatController : ControllerBase
         if (!await IsMember(tripId, userId, ct)) return Forbid();
 
         var emoji = dto.Emoji?.Trim() ?? string.Empty;
-        if (!AllowedReactionEmojis.Contains(emoji))
+        if (!IsValidReactionEmoji(emoji))
             return BadRequest("Unsupported reaction emoji.");
 
         // The message must belong to THIS trip — a valid member of trip A
