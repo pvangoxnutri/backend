@@ -301,6 +301,7 @@ public class AuthController : ControllerBase
                 Description = a.Description,
                 Time = a.Time,
                 Category = a.Category,
+                CustomCategoryLabel = a.CustomCategoryLabel,
                 ImageUrl = a.ImageUrl,
                 SpotifyUrl = a.SpotifyUrl,
                 Visibility = a.Visibility,

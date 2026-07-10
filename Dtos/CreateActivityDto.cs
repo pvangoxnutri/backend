@@ -16,6 +16,11 @@ public class CreateActivityDto
 
     public string? Category { get; set; }
 
+    // Custom category display name (paired with the symbol key in Category).
+    // Null/empty for built-in categories.
+    [MaxLength(60)]
+    public string? CustomCategoryLabel { get; set; }
+
     public string? ImageUrl { get; set; }
 
     public string? SpotifyUrl { get; set; }

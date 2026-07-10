@@ -13,7 +13,13 @@ public class TripActivity
     // end of that day's list on create; only the reorder endpoint rewrites it
     // afterwards, so a manual arrangement survives unrelated edits.
     public int SortIndex { get; set; }
+    // The selected symbol/category key (built-in key like "food"/"car", or
+    // "sidequest"). For a CUSTOM category this still holds the chosen
+    // existing symbol key; CustomCategoryLabel below carries the user's name.
     public string? Category { get; set; }
+    // User-entered display name for a custom category. Null for built-in
+    // categories (which render their localized label from Category instead).
+    public string? CustomCategoryLabel { get; set; }
     public string? ImageUrl { get; set; }
     public string? SpotifyUrl { get; set; }
     public string Visibility { get; set; } = "public";

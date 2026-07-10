@@ -73,6 +73,7 @@ public class ExportedActivityDto
     public string? Description { get; set; }
     public string? Time { get; set; }
     public string? Category { get; set; }
+    public string? CustomCategoryLabel { get; set; }
     public string? ImageUrl { get; set; }
     public string? SpotifyUrl { get; set; }
     public string Visibility { get; set; } = "public";

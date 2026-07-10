@@ -111,6 +111,11 @@ public class TripsController : ControllerBase
             Time = activity.Time,
             SortIndex = activity.SortIndex,
             Category = activity.Category,
+            // Category symbol is always sent (drives the fallback icon even
+            // for hidden activities); the custom NAME is treated like Title —
+            // withheld until the viewer can see the full activity, so it can't
+            // spoil a hidden reveal.
+            CustomCategoryLabel = canViewFull ? activity.CustomCategoryLabel : null,
             ImageUrl = activity.ImageUrl,
             SpotifyUrl = activity.SpotifyUrl,
             Visibility = activity.Visibility,
@@ -1175,6 +1180,7 @@ public class TripsController : ControllerBase
             Description = NormalizeOptionalText(dto.Description),
             Time = nextTime,
             Category = NormalizeOptionalText(dto.Category),
+            CustomCategoryLabel = NormalizeOptionalText(dto.CustomCategoryLabel),
             ImageUrl = NormalizeOptionalText(dto.ImageUrl),
             SpotifyUrl = NormalizeOptionalText(dto.SpotifyUrl),
             Visibility = finalVisibility,
@@ -1295,6 +1301,8 @@ public class TripsController : ControllerBase
         if (dto.Description != null) activity.Description = NormalizeOptionalText(dto.Description);
         if (dto.Time != null) activity.Time = nextTime;
         if (dto.Category != null) activity.Category = NormalizeOptionalText(dto.Category);
+        if (dto.ClearCustomCategoryLabel) activity.CustomCategoryLabel = null;
+        else if (dto.CustomCategoryLabel != null) activity.CustomCategoryLabel = NormalizeOptionalText(dto.CustomCategoryLabel);
         if (dto.ClearImage) activity.ImageUrl = null;
         else if (dto.ImageUrl != null) activity.ImageUrl = NormalizeOptionalText(dto.ImageUrl);
         activity.SpotifyUrl = nextSpotifyUrl;
@@ -1732,6 +1740,7 @@ public class TripsController : ControllerBase
                 OwnerId = userGuid,
                 Title = activity.Title,
                 Category = activity.Category,
+                CustomCategoryLabel = activity.CustomCategoryLabel,
                 Date = activity.Date,
                 Time = activity.Time,
                 Description = activity.Description,
