@@ -269,9 +269,12 @@ public class TripChatController : ControllerBase
     }
 
     // ── PUT /api/trips/{tripId}/chat/presence ─────────────────────────────────
-    // Heartbeat — call every ~15 s while chat is open.
-    // If the user was previously offline (> 60 s gap or first time), a system
-    // message "X joined the chat." is added automatically.
+    // Heartbeat — call every ~15 s while chat is open. Tracks presence ONLY.
+    // The "X joined." system message is deliberately NOT created here: tying
+    // it to presence meant every chat reopen/reconnect after a gap re-announced
+    // the user, spamming the chat. It is created exactly once per actual
+    // membership creation instead (TripsController: JoinByCode, InviteMember,
+    // AcceptInvite).
 
     [HttpPut("presence")]
     public async Task<ActionResult> UpdatePresence(Guid tripId, CancellationToken ct)
@@ -285,14 +288,6 @@ public class TripChatController : ControllerBase
 
         var existing = await _db.ChatPresence
             .FirstOrDefaultAsync(cp => cp.TripId == tripId && cp.UserId == userId, ct);
-
-        // Only announce "X joined." on a genuine return — first time ever, or
-        // after the user has been away longer than this window. Otherwise just
-        // reopening the chat (or the 15s heartbeat) would spam the message.
-        const int rejoinGapSeconds = 300; // 5 minutes
-
-        var shouldAnnounceJoin = existing == null
-            || (now - existing.LastSeenAt).TotalSeconds > rejoinGapSeconds;
 
         if (existing == null)
         {
@@ -310,23 +305,6 @@ public class TripChatController : ControllerBase
             existing.LastSeenAt = now;
             existing.UserName = userName;
             existing.AvatarUrl = user?.AvatarUrl;
-        }
-
-        if (shouldAnnounceJoin)
-        {
-            _db.ChatMessages.Add(new ChatMessage
-            {
-                TripId = tripId,
-                UserId = userId,
-                UserName = userName,
-                // Text is an English fallback for app builds older than the
-                // SystemEventType field — current clients render their own
-                // localized string from SystemEventType + UserName instead.
-                Text = $"{userName} joined.",
-                IsSystem = true,
-                SystemEventType = "member_joined",
-                CreatedAt = now,
-            });
         }
 
         await _db.SaveChangesAsync(ct);
@@ -371,11 +349,8 @@ public class TripChatController : ControllerBase
 
         if (presence != null)
         {
-            // Keep the entry and just stamp the leave time. Removing it made the
-            // next open look like a first-time join, which re-announced
-            // "X joined." every single time. Keeping LastSeenAt lets the rejoin
-            // grace window in UpdatePresence work; the user still drops out of
-            // the live presence list after the normal 60s window.
+            // Keep the entry and just stamp the leave time — the user drops
+            // out of the live presence list after the normal 60s window.
             presence.LastSeenAt = DateTime.UtcNow;
             await _db.SaveChangesAsync(ct);
         }

@@ -30,6 +30,25 @@ public class TripsController : ControllerBase
 
     // ── Permission helpers ────────────────────────────────────────────────────
 
+    // The chat's "X joined." system message. Created exactly once per actual
+    // membership creation (join by code, direct add, accepted invite) — never
+    // from presence/heartbeat, which used to re-announce on every chat reopen.
+    private void AddMemberJoinedChatMessage(Guid tripId, Guid userId, string userName)
+    {
+        _db.ChatMessages.Add(new ChatMessage
+        {
+            TripId = tripId,
+            UserId = userId,
+            UserName = userName,
+            // English fallback for app builds older than the SystemEventType
+            // field — current clients render their own localized string.
+            Text = $"{userName} joined.",
+            IsSystem = true,
+            SystemEventType = "member_joined",
+            CreatedAt = DateTime.UtcNow,
+        });
+    }
+
     private static bool IsRevealedNow(Trip trip)
         => trip.RevealAt.HasValue && DateTime.UtcNow >= trip.RevealAt.Value;
 
@@ -373,6 +392,8 @@ public class TripsController : ControllerBase
             Type = "member_joined",
             CreatedAt = DateTime.UtcNow,
         });
+
+        AddMemberJoinedChatMessage(trip.Id, userId, actorName);
 
         await _db.SaveChangesAsync(cancellationToken);
 
@@ -825,6 +846,7 @@ public class TripsController : ControllerBase
             return Conflict("User is already a member of this trip.");
 
         _db.TripMembers.Add(new TripMember { TripId = id, UserId = invitee.Id, IsOwner = false });
+        AddMemberJoinedChatMessage(id, invitee.Id, invitee.Name);
         await _db.SaveChangesAsync();
 
         return Ok(new TripMemberDto { Id = invitee.Id, Name = invitee.Name, AvatarUrl = invitee.AvatarUrl, IsOwner = false });
@@ -983,15 +1005,18 @@ public class TripsController : ControllerBase
         var alreadyMember = await _db.TripMembers
             .AnyAsync(m => m.TripId == id && m.UserId == userId, cancellationToken);
 
+        // Emit member_joined event so existing members are notified
+        var actor = await _db.Users.FindAsync([userId], cancellationToken);
+
         if (!alreadyMember)
         {
             _db.TripMembers.Add(new TripMember { TripId = id, UserId = userId, IsOwner = false });
+            // Chat announcement only on a genuine membership creation — a
+            // stale invite accepted by an existing member must not re-announce.
+            AddMemberJoinedChatMessage(id, userId, actor?.Name ?? "Someone");
         }
 
         invite.Status = "accepted";
-
-        // Emit member_joined event so existing members are notified
-        var actor = await _db.Users.FindAsync([userId], cancellationToken);
         _db.TripEvents.Add(new TripEvent
         {
             TripId = id,
