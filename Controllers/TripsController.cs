@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net;
 using System.Security.Claims;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
@@ -19,16 +20,55 @@ public class TripsController : ControllerBase
     private readonly ISupabaseStorageService _storage;
     private readonly ILogger<TripsController> _logger;
     private readonly INotificationDispatchService _notifications;
+    private readonly IEmailSender _emailSender;
 
-    public TripsController(AppDbContext db, ISupabaseStorageService storage, ILogger<TripsController> logger, INotificationDispatchService notifications)
+    public TripsController(AppDbContext db, ISupabaseStorageService storage, ILogger<TripsController> logger, INotificationDispatchService notifications, IEmailSender emailSender)
     {
         _db = db;
         _storage = storage;
         _logger = logger;
         _notifications = notifications;
+        _emailSender = emailSender;
     }
 
     // ── Permission helpers ────────────────────────────────────────────────────
+
+    // Invitation email for addresses without a SideQuest account. The link is
+    // the same https://sidequesttravel.app/invite/{code} used by the in-app
+    // share sheet, so email invitees get the identical landing-page →
+    // store/app → join flow.
+    private static (string Subject, string HtmlBody, string TextBody) BuildInviteEmail(Trip trip, string? inviterName)
+    {
+        var title = string.IsNullOrWhiteSpace(trip.Title) ? "an adventure" : $"\"{trip.Title}\"";
+        var inviteUrl = $"https://sidequesttravel.app/invite/{trip.InviteCode}";
+        var invitedBy = string.IsNullOrWhiteSpace(inviterName) || inviterName.Contains('@')
+            ? "A friend"
+            : WebUtility.HtmlEncode(inviterName);
+        var htmlTitle = WebUtility.HtmlEncode(title);
+
+        var subject = $"You're invited to join {title} on SideQuest";
+
+        var htmlBody = $@"<div style=""font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#F7F3EC;padding:32px 16px;"">
+  <div style=""max-width:440px;margin:0 auto;background:#ffffff;border-radius:24px;padding:36px 28px;text-align:center;"">
+    <div style=""font-size:26px;font-weight:900;color:#111217;margin-bottom:20px;"">SideQuest<span style=""color:#ff9cab;"">.</span></div>
+    <h1 style=""font-size:24px;font-weight:800;color:#14161d;margin:0 0 10px;"">🌍 You're invited!</h1>
+    <p style=""font-size:15px;color:#6B7280;line-height:1.6;margin:0 0 24px;"">{invitedBy} has invited you to join {htmlTitle} on SideQuest — plan trips together, split costs and keep every memory in one place.</p>
+    <a href=""{inviteUrl}"" style=""display:inline-block;background:#ff4f74;color:#ffffff;border-radius:24px;padding:14px 32px;font-size:16px;font-weight:700;text-decoration:none;"">Join the adventure</a>
+    <p style=""font-size:12px;color:#9AA2AE;margin:24px 0 0;"">Or open this link: <a href=""{inviteUrl}"" style=""color:#ff4f74;"">{inviteUrl}</a></p>
+    <p style=""font-size:12px;color:#9AA2AE;margin:16px 0 0;"">Not expecting this? You can safely ignore this email.</p>
+  </div>
+</div>";
+
+        var textBody = $@"🌍 You're invited!
+
+{(invitedBy == "A friend" ? "A friend" : inviterName)} has invited you to join {title} on SideQuest — plan trips together, split costs and keep every memory in one place.
+
+Join here: {inviteUrl}
+
+Not expecting this? You can safely ignore this email.";
+
+        return (subject, htmlBody, textBody);
+    }
 
     // The chat's "X joined." system message. Created exactly once per actual
     // membership creation (join by code, direct add, accepted invite) — never
@@ -801,10 +841,12 @@ public class TripsController : ControllerBase
 
         await _db.SaveChangesAsync();
 
-        // Only push if the invited email belongs to an existing SideQuest
-        // account — otherwise there's no one to notify yet (they'd need to
-        // sign up first, at which point this invite just shows up in their
-        // pending list when they next open the app).
+        // Existing account → push notification + in-app pending invite.
+        // No account yet → send an invitation email, otherwise the invite
+        // would sit invisible until this address happened to sign up. The
+        // email link is the same /invite/{code} flow the share sheet uses
+        // (landing page → store/app → join), and JoinByCode marks this
+        // pending invite accepted when they come in through it.
         if (existingUser != null)
         {
             try
@@ -814,6 +856,21 @@ public class TripsController : ControllerBase
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to dispatch trip invite push for invite {InviteId}.", invite.Id);
+            }
+        }
+        else if (!string.IsNullOrWhiteSpace(trip.InviteCode))
+        {
+            try
+            {
+                var inviter = await _db.Users.FindAsync(userId);
+                var (subject, htmlBody, textBody) = BuildInviteEmail(trip, inviter?.Name);
+                await _emailSender.SendAsync(normalizedEmail, subject, htmlBody, textBody, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                // Email failure must never break creating the invite itself —
+                // the pending invite still shows up in-app after signup.
+                _logger.LogError(ex, "Failed to send trip invite email for invite {InviteId}.", invite.Id);
             }
         }
 
