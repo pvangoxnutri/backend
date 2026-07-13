@@ -19,10 +19,10 @@ builder.Services.AddHttpClient<LinkPreviewService>();
 builder.Services.AddHttpClient<ISupabaseStorageService, SupabaseStorageService>();
 builder.Services.AddHttpClient<IExpoPushService, ExpoPushService>();
 builder.Services.AddScoped<INotificationDispatchService, NotificationDispatchService>();
-// Sends the trip-invite email to addresses without a SideQuest account.
-// Without Email:SmtpHost configured it logs the intended mail and returns,
-// so environments without SMTP keep working.
-builder.Services.AddScoped<IEmailSender, EmailSender>();
+// Trip-invite emails to addresses without a SideQuest account — sent via
+// the same Resend account/domain as the website's auth/approval mails
+// (RESEND_API_KEY). Without the key it logs the intended mail and returns.
+builder.Services.AddHttpClient<IEmailSender, ResendEmailSender>();
 
 // Always runs — it's also what claims "sidequest_revealed"/"teaser"
 // NotificationLog rows that the in-app notification center reads (see
