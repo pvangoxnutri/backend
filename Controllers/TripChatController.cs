@@ -90,6 +90,11 @@ public class TripChatController : ControllerBase
 
         var query = _db.ChatMessages.Where(m => m.TripId == tripId);
 
+        // Deletion tombstones only matter on the polling path (they tell an
+        // open chat to drop a message) — a fresh load should never see them.
+        if (string.IsNullOrEmpty(since))
+            query = query.Where(m => m.SystemEventType != "message_deleted");
+
         if (!string.IsNullOrEmpty(since) && DateTime.TryParse(since, null, System.Globalization.DateTimeStyles.RoundtripKind, out var sinceDate))
             query = query.Where(m => m.CreatedAt > sinceDate);
 
@@ -270,7 +275,11 @@ public class TripChatController : ControllerBase
 
     // ── DELETE /api/trips/{tripId}/chat/{messageId} ───────────────────────────
     // Only the sender can delete their own message (never system messages).
-    // Hard delete — reactions cascade with the row.
+    // The row becomes its own tombstone: content stripped, marked
+    // "message_deleted" and CreatedAt bumped to NOW so it rides the existing
+    // `since` polling cursor — other open chats pick it up on the next poll
+    // and drop the message by id. Initial loads filter tombstones out, and
+    // the retention scheduler ages them out like any other chat row.
 
     [HttpDelete("{messageId}")]
     public async Task<ActionResult> DeleteMessage(Guid tripId, Guid messageId, CancellationToken ct)
@@ -283,7 +292,19 @@ public class TripChatController : ControllerBase
         if (message == null) return NotFound();
         if (message.IsSystem || message.UserId != userId) return Forbid();
 
-        _db.ChatMessages.Remove(message);
+        message.Text = string.Empty;
+        message.ImageUrl = null;
+        message.IsSystem = true;
+        message.SystemEventType = "message_deleted";
+        message.CreatedAt = DateTime.UtcNow;
+
+        // Reactions used to cascade with the hard delete — remove them
+        // explicitly now so they don't linger on the tombstone.
+        var reactions = await _db.ChatMessageReactions
+            .Where(r => r.ChatMessageId == messageId)
+            .ToListAsync(ct);
+        _db.ChatMessageReactions.RemoveRange(reactions);
+
         await _db.SaveChangesAsync(ct);
         return NoContent();
     }
