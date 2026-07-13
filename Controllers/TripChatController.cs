@@ -268,6 +268,26 @@ public class TripChatController : ControllerBase
         return Ok(summaries.GetValueOrDefault(messageId) ?? []);
     }
 
+    // ── DELETE /api/trips/{tripId}/chat/{messageId} ───────────────────────────
+    // Only the sender can delete their own message (never system messages).
+    // Hard delete — reactions cascade with the row.
+
+    [HttpDelete("{messageId}")]
+    public async Task<ActionResult> DeleteMessage(Guid tripId, Guid messageId, CancellationToken ct)
+    {
+        var userId = GetUserId();
+        if (!await IsMember(tripId, userId, ct)) return Forbid();
+
+        var message = await _db.ChatMessages
+            .FirstOrDefaultAsync(m => m.Id == messageId && m.TripId == tripId, ct);
+        if (message == null) return NotFound();
+        if (message.IsSystem || message.UserId != userId) return Forbid();
+
+        _db.ChatMessages.Remove(message);
+        await _db.SaveChangesAsync(ct);
+        return NoContent();
+    }
+
     // ── PUT /api/trips/{tripId}/chat/presence ─────────────────────────────────
     // Heartbeat — call every ~15 s while chat is open. Tracks presence ONLY.
     // The "X joined." system message is deliberately NOT created here: tying
