@@ -1476,6 +1476,56 @@ Not expecting this? You can safely ignore this email.";
         return NoContent();
     }
 
+    // ── PATCH /api/trips/{id}/activities/{activityId}/move ───────────────────
+    // Drag-to-move across days: sets the activity's new date and rewrites the
+    // TARGET day's SortIndex from the full ordered id list (which includes
+    // the moved activity) in one atomic save. Same trip-wide permission as
+    // reorder — moving is collaborative feed curation, not content editing.
+
+    [HttpPatch("{id}/activities/{activityId}/move")]
+    [Authorize]
+    public async Task<ActionResult> MoveActivity(Guid id, Guid activityId, [FromBody] MoveActivityDto dto)
+    {
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        if (!await CanEditActivitiesAsync(id, userId)) return Forbid();
+
+        if (dto.ActivityIds == null || dto.ActivityIds.Count == 0 || !dto.ActivityIds.Contains(activityId))
+            return BadRequest("activityIds must include the moved activity.");
+
+        var trip = await _db.Trips.FindAsync(id);
+        if (trip == null) return NotFound();
+
+        // Same range rule as editing an activity's date.
+        if (dto.Date < trip.StartDate || dto.Date > trip.EndDate)
+            return BadRequest($"Activity date must be within the trip dates ({trip.StartDate:yyyy-MM-dd} – {trip.EndDate:yyyy-MM-dd}).");
+
+        var activities = await _db.TripActivities
+            .Where(a => a.TripId == id && dto.ActivityIds.Contains(a.Id))
+            .ToListAsync();
+
+        if (activities.Count != dto.ActivityIds.Count)
+            return BadRequest("One or more activities do not belong to this trip.");
+
+        var moved = activities.FirstOrDefault(a => a.Id == activityId);
+        if (moved == null) return NotFound();
+
+        // Everything except the moved activity must already live on the
+        // target day — the id list is that day's final order, nothing else.
+        if (activities.Any(a => a.Id != activityId && a.Date != dto.Date))
+            return BadRequest("activityIds must contain only the target day's activities.");
+
+        moved.Date = dto.Date;
+
+        var byId = activities.ToDictionary(a => a.Id);
+        for (var i = 0; i < dto.ActivityIds.Count; i++)
+        {
+            byId[dto.ActivityIds[i]].SortIndex = i;
+        }
+
+        await _db.SaveChangesAsync();
+        return NoContent();
+    }
+
     [HttpPatch("{id}/activities/{activityId}/spotify")]
     [Authorize]
     public async Task<ActionResult<ActivityResponseDto>> UpdateActivitySpotify(Guid id, Guid activityId, [FromBody] UpdateActivitySpotifyDto dto)
