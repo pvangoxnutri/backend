@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Claims;
 using System.IdentityModel.Tokens.Jwt;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -224,6 +225,41 @@ app.Use(async (ctx, next) =>
         ctx.Response.ContentType = "application/json";
         await ctx.Response.WriteAsync("{\"error\":\"banned\"}");
         return;
+    }
+    await next();
+});
+
+// Presence: any authenticated request counts as "seen", powering the green
+// online dot. Writes are throttled per user via an in-memory map (single
+// instance deployment) so busy screens don't turn every request into an
+// UPDATE — at most one write per user per 60s. Failures are swallowed:
+// presence must never break a real request.
+var lastSeenWrites = new ConcurrentDictionary<Guid, DateTime>();
+app.Use(async (ctx, next) =>
+{
+    var idClaim = ctx.User.Identity?.IsAuthenticated == true
+        ? ctx.User.FindFirstValue(ClaimTypes.NameIdentifier)
+        : null;
+    if (idClaim != null && Guid.TryParse(idClaim, out var seenUserId))
+    {
+        var now = DateTime.UtcNow;
+        var lastWrite = lastSeenWrites.GetValueOrDefault(seenUserId);
+        if (now - lastWrite > TimeSpan.FromSeconds(60))
+        {
+            lastSeenWrites[seenUserId] = now;
+            try
+            {
+                var db = ctx.RequestServices.GetRequiredService<AppDbContext>();
+                await db.Users
+                    .Where(u => u.Id == seenUserId)
+                    .ExecuteUpdateAsync(s => s.SetProperty(u => u.LastSeenAt, now));
+            }
+            catch
+            {
+                // Roll back the throttle stamp so the next request retries.
+                lastSeenWrites.TryRemove(seenUserId, out _);
+            }
+        }
     }
     await next();
 });

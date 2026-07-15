@@ -15,4 +15,7 @@ public class User
     public bool IsBanned { get; set; } = false;
     public string Language { get; set; } = "en"; // "en" | "sv" — drives push notification text
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    // Bumped (throttled) on every authenticated request — powers the green
+    // online dot. Null for users who haven't been seen since the column landed.
+    public DateTime? LastSeenAt { get; set; }
 }

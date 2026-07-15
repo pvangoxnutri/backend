@@ -766,6 +766,7 @@ Not expecting this? You can safely ignore this email.";
         if (!await _db.Trips.AnyAsync(t => t.Id == id))
             return NotFound();
 
+        var onlineCutoff = PresenceHelper.OnlineCutoff;
         var members = await _db.TripMembers
             .Where(tm => tm.TripId == id)
             .Select(tm => new TripMemberDto
@@ -773,7 +774,8 @@ Not expecting this? You can safely ignore this email.";
                 Id = tm.User.Id,
                 Name = tm.User.Name,
                 AvatarUrl = tm.User.AvatarUrl,
-                IsOwner = tm.IsOwner
+                IsOwner = tm.IsOwner,
+                IsOnline = tm.User.LastSeenAt != null && tm.User.LastSeenAt > onlineCutoff
             })
             .ToListAsync();
 

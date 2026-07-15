@@ -6,4 +6,5 @@ public class TripMemberDto
     public string Name { get; set; } = string.Empty;
     public string? AvatarUrl { get; set; }
     public bool IsOwner { get; set; }
+    public bool IsOnline { get; set; }
 }

@@ -1,6 +1,8 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using sidequest.backend.Data;
+using sidequest.backend.Services;
 
 namespace sidequest.backend.Controllers;
 
@@ -41,9 +43,19 @@ public class UsersController : ControllerBase
             AvatarUrl = user.AvatarUrl,
             TripsJoined = tripsJoined,
             SidequestsCreated = sidequestsCreated,
-            CountriesVisited = countriesVisited
+            CountriesVisited = countriesVisited,
+            IsOnline = PresenceHelper.IsOnline(user.LastSeenAt)
         });
     }
+
+    // ── PUT /api/users/me/heartbeat ───────────────────────────────────────────
+    // Deliberately empty: the presence middleware in Program.cs stamps
+    // LastSeenAt on every authenticated request, this just gives the app a
+    // zero-cost request to make while idle in the foreground.
+
+    [HttpPut("me/heartbeat")]
+    [Authorize]
+    public ActionResult Heartbeat() => NoContent();
 }
 
 public class UserProfileDto
@@ -55,4 +67,5 @@ public class UserProfileDto
     public int TripsJoined { get; set; }
     public int SidequestsCreated { get; set; }
     public int CountriesVisited { get; set; }
+    public bool IsOnline { get; set; }
 }
