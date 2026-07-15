@@ -409,7 +409,7 @@ Not expecting this? You can safely ignore this email.";
             return Conflict("You're already part of this adventure.");
 
         var user = await _db.Users.FindAsync([userId], cancellationToken);
-        var actorName = user?.Name ?? "Someone";
+        var actorName = DisplayNameHelper.OrFallback(user?.Name);
 
         _db.TripMembers.Add(new TripMember { TripId = trip.Id, UserId = userId, IsOwner = false });
 
@@ -984,7 +984,7 @@ Not expecting this? You can safely ignore this email.";
         }
 
         var user = await _db.Users.FindAsync([userId]);
-        var actorName = user?.Name ?? "Someone";
+        var actorName = DisplayNameHelper.OrFallback(user?.Name);
 
         _db.TripMembers.Remove(member);
 
@@ -1070,7 +1070,7 @@ Not expecting this? You can safely ignore this email.";
             _db.TripMembers.Add(new TripMember { TripId = id, UserId = userId, IsOwner = false });
             // Chat announcement only on a genuine membership creation — a
             // stale invite accepted by an existing member must not re-announce.
-            AddMemberJoinedChatMessage(id, userId, actor?.Name ?? "Someone");
+            AddMemberJoinedChatMessage(id, userId, DisplayNameHelper.OrFallback(actor?.Name));
         }
 
         invite.Status = "accepted";
@@ -1078,7 +1078,7 @@ Not expecting this? You can safely ignore this email.";
         {
             TripId = id,
             ActorId = userId,
-            ActorName = actor?.Name ?? "Someone",
+            ActorName = DisplayNameHelper.OrFallback(actor?.Name),
             Type = "member_joined",
             CreatedAt = DateTime.UtcNow,
         });
@@ -1090,7 +1090,7 @@ Not expecting this? You can safely ignore this email.";
         {
             var trip = await _db.Trips.FindAsync(new object?[] { id }, cancellationToken);
             if (trip != null)
-                await _notifications.SendMemberJoinedAsync(trip, userId, actor?.Name ?? "Someone", cancellationToken);
+                await _notifications.SendMemberJoinedAsync(trip, userId, DisplayNameHelper.OrFallback(actor?.Name), cancellationToken);
         }
         catch (Exception ex)
         {
@@ -1287,7 +1287,7 @@ Not expecting this? You can safely ignore this email.";
         {
             TripId = id,
             ActorId = userId,
-            ActorName = actorForEvent?.Name ?? "Someone",
+            ActorName = DisplayNameHelper.OrFallback(actorForEvent?.Name),
             Type = "activity_added",
             ActivityId = activity.Id,
             IsHidden = finalVisibility == "hidden",
@@ -1419,7 +1419,7 @@ Not expecting this? You can safely ignore this email.";
             {
                 TripId = id,
                 ActorId = userId,
-                ActorName = actorForEvent?.Name ?? "Someone",
+                ActorName = DisplayNameHelper.OrFallback(actorForEvent?.Name),
                 Type = "sidequest_revealed",
                 ActivityId = activity.Id,
                 ActivityTitle = activity.Title,

@@ -131,7 +131,7 @@ public class RevealNotificationScheduler : BackgroundService
             {
                 TripId = activity.TripId,
                 ActorId = activity.OwnerId,
-                ActorName = owner?.Name ?? "Someone",
+                ActorName = DisplayNameHelper.OrFallback(owner?.Name),
                 Type = "sidequest_revealed",
                 ActivityId = activity.Id,
                 ActivityTitle = activity.Title,

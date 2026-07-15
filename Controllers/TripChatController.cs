@@ -179,7 +179,7 @@ public class TripChatController : ControllerBase
         {
             TripId = tripId,
             UserId = userId,
-            UserName = user?.Name ?? "Someone",
+            UserName = DisplayNameHelper.OrFallback(user?.Name),
             Text = text,
             ImageUrl = imageUrl,
             IsSystem = false,
@@ -324,7 +324,7 @@ public class TripChatController : ControllerBase
         if (!await IsMember(tripId, userId, ct)) return Forbid();
 
         var user = await _db.Users.FindAsync([userId], ct);
-        var userName = user?.Name ?? "Someone";
+        var userName = DisplayNameHelper.OrFallback(user?.Name);
         var now = DateTime.UtcNow;
 
         var existing = await _db.ChatPresence

@@ -143,7 +143,7 @@ public class NotificationDispatchService : INotificationDispatchService
         if (!isHidden)
         {
             var actor = await _db.Users.FindAsync(new object?[] { actorId }, ct);
-            actorName = actor?.Name ?? "Someone";
+            actorName = DisplayNameHelper.OrFallback(actor?.Name);
             actorAvatarUrl = actor?.AvatarUrl;
             data["actorName"] = actorName;
             data["activityTitle"] = activity.Title;
@@ -225,7 +225,7 @@ public class NotificationDispatchService : INotificationDispatchService
     {
         var trip = await _db.Trips.FindAsync(new object?[] { invite.TripId }, ct);
         var owner = await _db.Users.FindAsync(new object?[] { invite.InvitedByUserId }, ct);
-        var ownerName = owner?.Name ?? "Someone";
+        var ownerName = DisplayNameHelper.OrFallback(owner?.Name);
         var tripTitle = trip?.Title ?? "an adventure";
 
         var dedupeKeys = new Dictionary<Guid, string> { [recipientUserId] = $"trip_invite:{invite.Id}" };
