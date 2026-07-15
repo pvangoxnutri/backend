@@ -9,6 +9,12 @@ public class TripActivity
     public string Title { get; set; } = string.Empty;
     public string? Description { get; set; }
     public string? Time { get; set; }
+    // Multi-day stay support (hotel reservations): Date/Time act as
+    // check-in, EndDate/EndTime as check-out. Null EndDate = ordinary
+    // single-day activity — every pre-existing row keeps its behavior.
+    // The structure is category-agnostic; only the hotel UX exposes it.
+    public DateOnly? EndDate { get; set; }
+    public string? EndTime { get; set; }
     // Manual drag-to-reorder position within (TripId, Date). Defaults to the
     // end of that day's list on create; only the reorder endpoint rewrites it
     // afterwards, so a manual arrangement survives unrelated edits.

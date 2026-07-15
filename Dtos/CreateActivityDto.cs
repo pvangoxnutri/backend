@@ -14,6 +14,12 @@ public class CreateActivityDto
 
     public string? Time { get; set; }
 
+    // Hotel stay (check-out). EndDate must be after Date and inside the
+    // trip range; EndTime requires EndDate. Omitted by old clients.
+    public DateOnly? EndDate { get; set; }
+
+    public string? EndTime { get; set; }
+
     public string? Category { get; set; }
 
     // Custom category display name (paired with the symbol key in Category).

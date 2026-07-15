@@ -6,6 +6,12 @@ public class UpdateActivityDto
     public string? Title { get; set; }
     public string? Description { get; set; }
     public string? Time { get; set; }
+    // Hotel stay (check-out): null = keep. EndTime follows Time's
+    // convention (empty string clears, null keeps). ClearEndDate removes
+    // the whole stay (both EndDate and EndTime).
+    public DateOnly? EndDate { get; set; }
+    public string? EndTime { get; set; }
+    public bool ClearEndDate { get; set; }
     public string? Category { get; set; }
     public string? CustomCategoryLabel { get; set; }
     public bool ClearCustomCategoryLabel { get; set; }

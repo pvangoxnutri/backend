@@ -168,6 +168,10 @@ Not expecting this? You can safely ignore this email.";
             Title = canViewFull ? activity.Title : null,
             Description = canViewFull ? activity.Description : null,
             Time = activity.Time,
+            // Stay length/checkout would leak a sealed reveal — withheld
+            // exactly like Title until the viewer can see the activity.
+            EndDate = canViewFull ? activity.EndDate : null,
+            EndTime = canViewFull ? activity.EndTime : null,
             SortIndex = activity.SortIndex,
             Category = activity.Category,
             // Category symbol is always sent (drives the fallback icon even
@@ -194,6 +198,22 @@ Not expecting this? You can safely ignore this email.";
             AssignedToName = activity.AssignedTo?.Name,
             CreatedAt = activity.CreatedAt,
         };
+    }
+
+    // Hotel-stay (check-out) validation shared by create/update/move:
+    // check-out strictly after check-in, whole stay inside the trip range,
+    // and no check-out time without a check-out date.
+    private static string? ValidateStayRange(DateOnly date, DateOnly? endDate, string? endTime, Trip trip)
+    {
+        if (!endDate.HasValue)
+        {
+            return endTime != null ? "Check-out time requires a check-out date." : null;
+        }
+        if (endDate.Value <= date)
+            return "Check-out must be after check-in.";
+        if (endDate.Value > trip.EndDate)
+            return $"Check-out must be within the trip dates ({trip.StartDate:yyyy-MM-dd} – {trip.EndDate:yyyy-MM-dd}).";
+        return null;
     }
 
     private static string? ValidateActivityPayload(
@@ -1240,6 +1260,9 @@ Not expecting this? You can safely ignore this email.";
         if (dto.Date < tripForRange.StartDate || dto.Date > tripForRange.EndDate)
             return BadRequest($"Activity date must be within the trip dates ({tripForRange.StartDate:yyyy-MM-dd} – {tripForRange.EndDate:yyyy-MM-dd}).");
 
+        var stayError = ValidateStayRange(dto.Date, dto.EndDate, NormalizeOptionalText(dto.EndTime), tripForRange);
+        if (stayError != null) return BadRequest(stayError);
+
         var visibility = NormalizeVisibility(dto.Visibility);
         var teaser = NormalizeOptionalText(dto.Teaser);
         var validationError = ValidateActivityPayload(visibility, dto.RevealAt, teaser, dto.TeaserOffsetMinutes);
@@ -1261,6 +1284,8 @@ Not expecting this? You can safely ignore this email.";
             Title = dto.Title.Trim(),
             Description = NormalizeOptionalText(dto.Description),
             Time = nextTime,
+            EndDate = dto.EndDate,
+            EndTime = dto.EndDate.HasValue ? NormalizeOptionalText(dto.EndTime) : null,
             Category = NormalizeOptionalText(dto.Category),
             CustomCategoryLabel = NormalizeOptionalText(dto.CustomCategoryLabel),
             ImageUrl = NormalizeOptionalText(dto.ImageUrl),
@@ -1361,6 +1386,21 @@ Not expecting this? You can safely ignore this email.";
                 return BadRequest($"Activity date must be within the trip dates ({tripForRange.StartDate:yyyy-MM-dd} – {tripForRange.EndDate:yyyy-MM-dd}).");
         }
 
+        // Resolve the stay (check-out) the update would result in, and
+        // validate the combination — the date may change without the
+        // end-date changing and vice versa.
+        var nextEndDate = dto.ClearEndDate ? null : (dto.EndDate ?? activity.EndDate);
+        var nextEndTime = dto.ClearEndDate
+            ? null
+            : (dto.EndTime != null ? NormalizeOptionalText(dto.EndTime) : activity.EndTime);
+        if (nextEndDate == null) nextEndTime = null;
+        {
+            var tripForStay = await _db.Trips.FindAsync(id);
+            if (tripForStay == null) return NotFound();
+            var stayError = ValidateStayRange(dto.Date ?? activity.Date, nextEndDate, nextEndTime, tripForStay);
+            if (stayError != null) return BadRequest(stayError);
+        }
+
         var previousImageUrl = activity.ImageUrl;
         var wasHiddenBeforeUpdate = activity.Visibility == "hidden";
 
@@ -1382,6 +1422,8 @@ Not expecting this? You can safely ignore this email.";
         if (dto.Title != null) activity.Title = dto.Title.Trim();
         if (dto.Description != null) activity.Description = NormalizeOptionalText(dto.Description);
         if (dto.Time != null) activity.Time = nextTime;
+        activity.EndDate = nextEndDate;
+        activity.EndTime = nextEndTime;
         if (dto.Category != null) activity.Category = NormalizeOptionalText(dto.Category);
         if (dto.ClearCustomCategoryLabel) activity.CustomCategoryLabel = null;
         else if (dto.CustomCategoryLabel != null) activity.CustomCategoryLabel = NormalizeOptionalText(dto.CustomCategoryLabel);
@@ -1514,7 +1556,20 @@ Not expecting this? You can safely ignore this email.";
         if (activities.Any(a => a.Id != activityId && a.Date != dto.Date))
             return BadRequest("activityIds must contain only the target day's activities.");
 
+        // Hotel stays move as a whole: shift check-out by the same number of
+        // days so the stay length is preserved, and block the move when the
+        // shifted stay would poke outside the trip.
+        DateOnly? shiftedEndDate = null;
+        if (moved.EndDate.HasValue)
+        {
+            var deltaDays = dto.Date.DayNumber - moved.Date.DayNumber;
+            shiftedEndDate = DateOnly.FromDayNumber(moved.EndDate.Value.DayNumber + deltaDays);
+            var stayError = ValidateStayRange(dto.Date, shiftedEndDate, moved.EndTime, trip);
+            if (stayError != null) return BadRequest(stayError);
+        }
+
         moved.Date = dto.Date;
+        if (shiftedEndDate.HasValue) moved.EndDate = shiftedEndDate;
 
         var byId = activities.ToDictionary(a => a.Id);
         for (var i = 0; i < dto.ActivityIds.Count; i++)
@@ -1875,6 +1930,8 @@ Not expecting this? You can safely ignore this email.";
                 CustomCategoryLabel = activity.CustomCategoryLabel,
                 Date = activity.Date,
                 Time = activity.Time,
+                EndDate = activity.EndDate,
+                EndTime = activity.EndTime,
                 Description = activity.Description,
                 ImageUrl = activity.ImageUrl,
                 SpotifyUrl = activity.SpotifyUrl,

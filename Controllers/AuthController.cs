@@ -300,6 +300,8 @@ public class AuthController : ControllerBase
                 Title = a.Title,
                 Description = a.Description,
                 Time = a.Time,
+                EndDate = a.EndDate,
+                EndTime = a.EndTime,
                 Category = a.Category,
                 CustomCategoryLabel = a.CustomCategoryLabel,
                 ImageUrl = a.ImageUrl,

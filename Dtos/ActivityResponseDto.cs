@@ -8,6 +8,10 @@ public class ActivityResponseDto
     public string? Title { get; set; }
     public string? Description { get; set; }
     public string? Time { get; set; }
+    // Check-out for hotel stays; withheld for sealed viewers (duration
+    // leaks the surprise). Null for single-day activities.
+    public DateOnly? EndDate { get; set; }
+    public string? EndTime { get; set; }
     public int SortIndex { get; set; }
     public string? Category { get; set; }
     public string? CustomCategoryLabel { get; set; }

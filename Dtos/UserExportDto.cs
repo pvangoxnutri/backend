@@ -72,6 +72,8 @@ public class ExportedActivityDto
     public string Title { get; set; } = string.Empty;
     public string? Description { get; set; }
     public string? Time { get; set; }
+    public DateOnly? EndDate { get; set; }
+    public string? EndTime { get; set; }
     public string? Category { get; set; }
     public string? CustomCategoryLabel { get; set; }
     public string? ImageUrl { get; set; }
