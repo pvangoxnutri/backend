@@ -45,6 +45,11 @@ public class NotificationLog
     // a generic type icon.
     public string? ActorName { get; set; }
     public string? ActorAvatarUrl { get; set; }
+    // Lets the notification center resolve the actor's *current* avatar at
+    // read time — the snapshot above is often empty because new members
+    // upload their picture (in onboarding) after the notification was
+    // claimed. Null for older rows and anonymous notifications.
+    public Guid? ActorId { get; set; }
 
     // Rollup across this notification's PushDeliveryAttempts:
     // "pending" | "delivered" | "failed_permanent"

@@ -496,7 +496,22 @@ Not expecting this? You can safely ignore this email.";
                 Id = e.Id,
                 TripId = e.TripId,
                 TripTitle = e.Trip.Title,
-                ActorName = e.ActorName,
+                ActorId = e.IsHidden ? null : e.ActorId,
+                // Prefer the actor's *current* name/avatar over the snapshot
+                // taken when the event was written — new members typically
+                // set both in onboarding after their join event exists.
+                ActorName = e.IsHidden
+                    ? ""
+                    : _db.Users
+                        .Where(u => u.Id == e.ActorId && u.Name.Trim() != "")
+                        .Select(u => u.Name)
+                        .FirstOrDefault() ?? e.ActorName,
+                ActorAvatarUrl = e.IsHidden
+                    ? null
+                    : _db.Users
+                        .Where(u => u.Id == e.ActorId)
+                        .Select(u => u.AvatarUrl)
+                        .FirstOrDefault(),
                 Type = e.Type,
                 ActivityId = e.ActivityId,
                 IsHidden = e.IsHidden,

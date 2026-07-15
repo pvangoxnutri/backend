@@ -66,6 +66,16 @@ public class NotificationsController : ControllerBase
             .Select(u => u.Language)
             .FirstOrDefaultAsync(ct) ?? "en";
 
+        // Actor avatars are resolved live: the stored snapshot is often empty
+        // because a new member uploads their picture (in onboarding) *after*
+        // e.g. their member_joined notification was claimed.
+        var actorIds = logs.Where(n => n.ActorId != null).Select(n => n.ActorId!.Value).Distinct().ToList();
+        var actorAvatars = actorIds.Count == 0
+            ? new Dictionary<Guid, string?>()
+            : await _db.Users
+                .Where(u => actorIds.Contains(u.Id))
+                .ToDictionaryAsync(u => u.Id, u => u.AvatarUrl, ct);
+
         var notifications = logs.Select(n =>
         {
             var data = ExtractData(n.DataJson);
@@ -82,7 +92,12 @@ public class NotificationsController : ControllerBase
                 TripId = n.TripId,
                 Route = data.TryGetValue("route", out var route) ? route : null,
                 ActorName = n.ActorName,
-                ActorAvatarUrl = n.ActorAvatarUrl,
+                // Current avatar when the actor is known and still exists
+                // (even if they removed their picture — null means initials);
+                // the claim-time snapshot only for old rows without ActorId.
+                ActorAvatarUrl = n.ActorId != null && actorAvatars.TryGetValue(n.ActorId.Value, out var liveAvatar)
+                    ? liveAvatar
+                    : n.ActorAvatarUrl,
                 CreatedAt = n.CreatedAt,
             };
         });

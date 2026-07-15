@@ -155,7 +155,7 @@ public class NotificationDispatchService : INotificationDispatchService
             data, ct,
             // Hidden SideQuests must not reveal who added them — no actor,
             // no avatar, the bell falls back to its anonymous lock icon.
-            isHidden ? null : (_ => (actorName, actorAvatarUrl)));
+            isHidden ? null : (_ => ((Guid?)actorId, actorName, actorAvatarUrl)));
     }
 
     public async Task SendMemberJoinedAsync(Trip trip, Guid newMemberId, string newMemberName, CancellationToken ct = default)
@@ -185,7 +185,7 @@ public class NotificationDispatchService : INotificationDispatchService
             "member_joined", dedupeKeys, trip.Id,
             (_, lang) => PushNotificationTexts.MemberJoined(lang, newMemberName, trip.Title, memberCount),
             data, ct,
-            _ => (newMemberName, newMember?.AvatarUrl));
+            _ => ((Guid?)newMemberId, newMemberName, newMember?.AvatarUrl));
     }
 
     public async Task SendExpenseAsync(Expense expense, Guid actorId, CancellationToken ct = default)
@@ -318,8 +318,8 @@ public class NotificationDispatchService : INotificationDispatchService
             // unread message — once there's more than one, the bell shows an
             // aggregated count instead, so no single avatar applies either.
             userId => unreadCountsByUserId.TryGetValue(userId, out var count) && count <= 1
-                ? (message.UserName, sender?.AvatarUrl)
-                : (null, null),
+                ? (message.UserId, message.UserName, sender?.AvatarUrl)
+                : ((Guid?)null, (string?)null, (string?)null),
             userId =>
             {
                 var cnt = unreadCountsByUserId.TryGetValue(userId, out var c) ? c : 1;
@@ -351,7 +351,7 @@ public class NotificationDispatchService : INotificationDispatchService
     private async Task ClaimAndSendAsync(
         string type, Dictionary<Guid, string> dedupeKeysByUserId, Guid? tripId,
         Func<Guid, string, (string Title, string Body)> textBuilder, Dictionary<string, string> data, CancellationToken ct,
-        Func<Guid, (string? ActorName, string? ActorAvatarUrl)>? actorResolver = null,
+        Func<Guid, (Guid? ActorId, string? ActorName, string? ActorAvatarUrl)>? actorResolver = null,
         Func<Guid, Dictionary<string, string>?>? perRecipientExtraData = null)
     {
         // NotificationLog is also the in-app notification center's only data
@@ -376,7 +376,7 @@ public class NotificationDispatchService : INotificationDispatchService
         {
             var language = languagesByUserId.TryGetValue(userId, out var lang) ? lang : "en";
             var (title, body) = textBuilder(userId, language);
-            var (actorName, actorAvatarUrl) = actorResolver?.Invoke(userId) ?? (null, null);
+            var (actorId, actorName, actorAvatarUrl) = actorResolver?.Invoke(userId) ?? (null, null, null);
 
             var extra = perRecipientExtraData?.Invoke(userId);
             var dataJson = extra != null
@@ -394,6 +394,7 @@ public class NotificationDispatchService : INotificationDispatchService
                 DataJson = dataJson,
                 ActorName = actorName,
                 ActorAvatarUrl = actorAvatarUrl,
+                ActorId = actorId,
                 Status = "pending",
             };
 
