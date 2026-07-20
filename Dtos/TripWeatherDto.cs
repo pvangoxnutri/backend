@@ -29,4 +29,9 @@ public class TripWeatherDayDto
     public double TempMaxC { get; set; }
     public int PrecipitationProbability { get; set; }
     public double UvIndexMax { get; set; }
+    // Which resolved location this day's forecast came from — a
+    // TripDayLocation anchor (explicit or carried forward), or the trip
+    // destination fallback. Lets the client group consecutive same-location
+    // days without recomputing anything.
+    public string LocationLabel { get; set; } = string.Empty;
 }

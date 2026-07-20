@@ -32,6 +32,7 @@ public class AppDbContext : DbContext
     public DbSet<SupportAttachment> SupportAttachments => Set<SupportAttachment>();
     public DbSet<PackingListCategory> PackingListCategories => Set<PackingListCategory>();
     public DbSet<PackingListItem> PackingListItems => Set<PackingListItem>();
+    public DbSet<TripDayLocation> TripDayLocations => Set<TripDayLocation>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -49,6 +50,22 @@ public class AppDbContext : DbContext
 
         modelBuilder.Entity<ChatPresenceEntry>()
             .HasKey(cp => new { cp.TripId, cp.UserId });
+
+        // "Only one location per calendar day" enforced at the DB level,
+        // not just in application code.
+        modelBuilder.Entity<TripDayLocation>()
+            .HasIndex(d => new { d.TripId, d.StartDate })
+            .IsUnique();
+
+        // Without this, EF's convention-based FK discovery doesn't match
+        // CreatedByUserId to the CreatedBy navigation (it looks for
+        // CreatedById) and silently adds a second, shadow FK column instead
+        // of reusing the explicit one.
+        modelBuilder.Entity<TripDayLocation>()
+            .HasOne(d => d.CreatedBy)
+            .WithMany()
+            .HasForeignKey(d => d.CreatedByUserId)
+            .OnDelete(DeleteBehavior.Restrict);
 
         modelBuilder.Entity<ChatMessageReaction>()
             .HasOne(r => r.ChatMessage)

@@ -8,8 +8,16 @@ using Npgsql;
 using sidequest.backend.Data;
 using sidequest.backend.Services;
 
+// Must run BEFORE CreateBuilder: the environment-variable configuration
+// provider snapshots Environment.GetEnvironmentVariable at builder-creation
+// time, so values set afterward (as this used to do) never reach
+// builder.Configuration during a plain `dotnet run` — only appeared to work
+// via `dotnet ef`, which loads .env.local itself (DesignTimeDbContextFactory)
+// instead of going through this file at all. Real environment variables set
+// before the process starts still win — LoadLocalEnvFile only fills gaps.
+LoadLocalEnvFile(Path.Combine(Directory.GetCurrentDirectory(), ".env.local"));
+
 var builder = WebApplication.CreateBuilder(args);
-LoadLocalEnvFile(Path.Combine(builder.Environment.ContentRootPath, ".env.local"));
 
 // Avoid Windows EventLog writes in this local environment; console logs are enough for dev.
 builder.Logging.ClearProviders();
@@ -18,6 +26,7 @@ builder.Logging.AddConsole();
 builder.Services.AddControllers();
 builder.Services.AddHttpClient<LinkPreviewService>();
 builder.Services.AddHttpClient<WeatherService>();
+builder.Services.AddScoped<TripDayLocationService>();
 builder.Services.AddHttpClient<ISupabaseStorageService, SupabaseStorageService>();
 builder.Services.AddHttpClient<IExpoPushService, ExpoPushService>();
 builder.Services.AddScoped<INotificationDispatchService, NotificationDispatchService>();
