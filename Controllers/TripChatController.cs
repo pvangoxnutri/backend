@@ -317,8 +317,17 @@ public class TripChatController : ControllerBase
     // membership creation instead (TripsController: JoinByCode, InviteMember,
     // AcceptInvite).
 
+    // How long a typing stamp counts as "still typing". The client refreshes
+    // its stamp every ~2.5 s while the user keeps typing and sends an explicit
+    // false after ~3.5 s of inactivity — 8 s tolerates a dropped refresh yet
+    // clears a crashed/offline client's indicator within seconds.
+    private static readonly TimeSpan TypingWindow = TimeSpan.FromSeconds(8);
+
     [HttpPut("presence")]
-    public async Task<ActionResult> UpdatePresence(Guid tripId, CancellationToken ct)
+    public async Task<ActionResult> UpdatePresence(
+        Guid tripId,
+        [FromBody(EmptyBodyBehavior = Microsoft.AspNetCore.Mvc.ModelBinding.EmptyBodyBehavior.Allow)] UpdateChatPresenceDto? dto,
+        CancellationToken ct)
     {
         var userId = GetUserId();
         if (!await IsMember(tripId, userId, ct)) return Forbid();
@@ -326,6 +335,13 @@ public class TripChatController : ControllerBase
         var user = await _db.Users.FindAsync([userId], ct);
         var userName = DisplayNameHelper.OrFallback(user?.Name);
         var now = DateTime.UtcNow;
+        // No body (the plain heartbeat) leaves TypingAt untouched.
+        DateTime? typingAt = dto?.IsTyping switch
+        {
+            true => now,
+            false => null,
+            null => (DateTime?)null,
+        };
 
         var existing = await _db.ChatPresence
             .FirstOrDefaultAsync(cp => cp.TripId == tripId && cp.UserId == userId, ct);
@@ -339,6 +355,7 @@ public class TripChatController : ControllerBase
                 UserName = userName,
                 AvatarUrl = user?.AvatarUrl,
                 LastSeenAt = now,
+                TypingAt = typingAt,
             });
         }
         else
@@ -346,6 +363,7 @@ public class TripChatController : ControllerBase
             existing.LastSeenAt = now;
             existing.UserName = userName;
             existing.AvatarUrl = user?.AvatarUrl;
+            if (dto?.IsTyping != null) existing.TypingAt = typingAt;
         }
 
         await _db.SaveChangesAsync(ct);
@@ -363,6 +381,7 @@ public class TripChatController : ControllerBase
         if (!await IsMember(tripId, userId, ct)) return Forbid();
 
         var cutoff = DateTime.UtcNow.AddSeconds(-60);
+        var typingCutoff = DateTime.UtcNow - TypingWindow;
         var presence = await _db.ChatPresence
             .Where(cp => cp.TripId == tripId && cp.LastSeenAt >= cutoff)
             .OrderBy(cp => cp.UserName)
@@ -371,6 +390,7 @@ public class TripChatController : ControllerBase
                 UserId = cp.UserId,
                 UserName = cp.UserName,
                 AvatarUrl = cp.AvatarUrl,
+                IsTyping = cp.TypingAt != null && cp.TypingAt >= typingCutoff,
             })
             .ToListAsync(ct);
 
@@ -392,7 +412,9 @@ public class TripChatController : ControllerBase
         {
             // Keep the entry and just stamp the leave time — the user drops
             // out of the live presence list after the normal 60s window.
+            // Leaving the chat also always ends "typing".
             presence.LastSeenAt = DateTime.UtcNow;
+            presence.TypingAt = null;
             await _db.SaveChangesAsync(ct);
         }
 

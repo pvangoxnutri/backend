@@ -349,6 +349,12 @@ Not expecting this? You can safely ignore this email.";
         return ownerIds.Contains(userId);
     }
 
+    // Both must be present and inside valid ranges — a half-set or bogus
+    // pair is treated as "no coordinates" rather than rejected, since
+    // coordinates are always optional extras on top of the text destination.
+    private static bool IsValidCoordinate(double? latitude, double? longitude)
+        => latitude is >= -90 and <= 90 && longitude is >= -180 and <= 180;
+
     private TripResponseDto BuildResponse(Trip trip, List<Guid> ownerIds, bool canViewFull)
         => new()
         {
@@ -365,6 +371,9 @@ Not expecting this? You can safely ignore this email.";
             ImageUrl = trip.ImageUrl,        // always (frontend blurs when hidden)
             SpotifyUrl = trip.SpotifyUrl,
             Destination = trip.Destination,  // always (shown in date/location row)
+            DestinationLatitude = trip.DestinationLatitude,
+            DestinationLongitude = trip.DestinationLongitude,
+            DestinationPlaceId = trip.DestinationPlaceId,
             Countries = new(),
             InviteCode = trip.InviteCode,
             Title = canViewFull ? trip.Title : null,
@@ -578,6 +587,9 @@ Not expecting this? You can safely ignore this email.";
             Title = dto.Title,
             Description = dto.Description,
             Destination = dto.Destination,
+            DestinationLatitude = IsValidCoordinate(dto.DestinationLatitude, dto.DestinationLongitude) ? dto.DestinationLatitude : null,
+            DestinationLongitude = IsValidCoordinate(dto.DestinationLatitude, dto.DestinationLongitude) ? dto.DestinationLongitude : null,
+            DestinationPlaceId = IsValidCoordinate(dto.DestinationLatitude, dto.DestinationLongitude) ? NormalizeOptionalText(dto.DestinationPlaceId) : null,
             StartDate = dto.StartDate,
             EndDate = dto.EndDate,
             ImageUrl = dto.ImageUrl,
@@ -671,6 +683,18 @@ Not expecting this? You can safely ignore this email.";
             if (dto.Title != null) trip.Title = dto.Title;
             if (dto.Description != null) trip.Description = dto.Description;
             if (dto.Destination != null) trip.Destination = dto.Destination;
+            if (dto.ClearDestinationCoordinates)
+            {
+                trip.DestinationLatitude = null;
+                trip.DestinationLongitude = null;
+                trip.DestinationPlaceId = null;
+            }
+            else if (IsValidCoordinate(dto.DestinationLatitude, dto.DestinationLongitude))
+            {
+                trip.DestinationLatitude = dto.DestinationLatitude;
+                trip.DestinationLongitude = dto.DestinationLongitude;
+                trip.DestinationPlaceId = NormalizeOptionalText(dto.DestinationPlaceId);
+            }
             if (dto.ClearImage) trip.ImageUrl = null;
             else if (dto.ImageUrl != null) trip.ImageUrl = dto.ImageUrl;
             if (dto.ClearSpotifyUrl) trip.SpotifyUrl = null;

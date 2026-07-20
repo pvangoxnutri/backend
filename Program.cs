@@ -17,6 +17,7 @@ builder.Logging.AddConsole();
 
 builder.Services.AddControllers();
 builder.Services.AddHttpClient<LinkPreviewService>();
+builder.Services.AddHttpClient<WeatherService>();
 builder.Services.AddHttpClient<ISupabaseStorageService, SupabaseStorageService>();
 builder.Services.AddHttpClient<IExpoPushService, ExpoPushService>();
 builder.Services.AddScoped<INotificationDispatchService, NotificationDispatchService>();

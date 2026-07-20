@@ -17,6 +17,9 @@ public class TripResponseDto
     public string? ImageUrl { get; set; }
     public string? SpotifyUrl { get; set; }
     public string? Destination { get; set; }
+    public double? DestinationLatitude { get; set; }
+    public double? DestinationLongitude { get; set; }
+    public string? DestinationPlaceId { get; set; }
     public List<string> Countries { get; set; } = new();
     public string InviteCode { get; set; } = string.Empty;
 

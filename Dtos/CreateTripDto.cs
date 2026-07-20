@@ -14,6 +14,13 @@ public class CreateTripDto
     [MaxLength(200)]
     public string Destination { get; set; } = string.Empty;
 
+    // Set only when the user picked a place suggestion — free-text
+    // destinations legitimately have no coordinates.
+    public double? DestinationLatitude { get; set; }
+    public double? DestinationLongitude { get; set; }
+    [MaxLength(300)]
+    public string? DestinationPlaceId { get; set; }
+
     public string? ImageUrl { get; set; }
     public string? InviteCode { get; set; }
     public List<string> Countries { get; set; } = new();

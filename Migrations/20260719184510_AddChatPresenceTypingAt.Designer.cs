@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using sidequest.backend.Data;
@@ -11,13 +12,15 @@ using sidequest.backend.Data;
 namespace sidequest.backend.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260719184510_AddChatPresenceTypingAt")]
+    partial class AddChatPresenceTypingAt
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "9.0.18")
+                .HasAnnotation("ProductVersion", "9.0.17")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
@@ -642,15 +645,6 @@ namespace sidequest.backend.Migrations
 
                     b.Property<string>("Destination")
                         .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<double?>("DestinationLatitude")
-                        .HasColumnType("double precision");
-
-                    b.Property<double?>("DestinationLongitude")
-                        .HasColumnType("double precision");
-
-                    b.Property<string>("DestinationPlaceId")
                         .HasColumnType("text");
 
                     b.Property<DateOnly>("EndDate")

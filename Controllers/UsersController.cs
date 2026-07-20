@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -49,13 +50,39 @@ public class UsersController : ControllerBase
     }
 
     // ── PUT /api/users/me/heartbeat ───────────────────────────────────────────
-    // Deliberately empty: the presence middleware in Program.cs stamps
-    // LastSeenAt on every authenticated request, this just gives the app a
-    // zero-cost request to make while idle in the foreground.
+    // The presence middleware in Program.cs stamps LastSeenAt on every
+    // authenticated request (throttled to one write per user per 60s), so
+    // the body-less beat stays a zero-cost request to make while idle in
+    // the foreground. The optional body handles the two transitions the
+    // throttle can't:
+    //   { "online": false } — app backgrounded: backdate LastSeenAt past the
+    //     online window so the user reads offline immediately instead of
+    //     after the 2-minute fallback.
+    //   { "online": true }  — foreground (re)entry: stamp explicitly; after
+    //     a backdate the middleware throttle may skip writes for up to 60s,
+    //     which would leave an actively-returning user looking offline.
 
     [HttpPut("me/heartbeat")]
     [Authorize]
-    public ActionResult Heartbeat() => NoContent();
+    public async Task<ActionResult> Heartbeat(
+        [FromBody(EmptyBodyBehavior = Microsoft.AspNetCore.Mvc.ModelBinding.EmptyBodyBehavior.Allow)] HeartbeatDto? dto)
+    {
+        if (dto?.Online is bool online)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var stamp = online ? DateTime.UtcNow : DateTime.UtcNow - PresenceHelper.OnlineWindow;
+            await _db.Users
+                .Where(u => u.Id == userId)
+                .ExecuteUpdateAsync(s => s.SetProperty(u => u.LastSeenAt, stamp));
+        }
+        return NoContent();
+    }
+}
+
+// Optional heartbeat body — absent for the plain idle beat.
+public class HeartbeatDto
+{
+    public bool? Online { get; set; }
 }
 
 public class UserProfileDto

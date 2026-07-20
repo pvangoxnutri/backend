@@ -6,6 +6,13 @@ public class Trip
     public string Title { get; set; } = string.Empty;
     public string? Description { get; set; }
     public string Destination { get; set; } = string.Empty;
+    // Coordinates of the destination, captured when the user picks a place
+    // suggestion during create/edit (never geocoded from the free-text
+    // string). Null on old trips and free-text destinations — weather then
+    // reports no_coordinates instead of guessing.
+    public double? DestinationLatitude { get; set; }
+    public double? DestinationLongitude { get; set; }
+    public string? DestinationPlaceId { get; set; }
     public DateOnly StartDate { get; set; }
     public DateOnly EndDate { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
