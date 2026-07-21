@@ -110,32 +110,50 @@ public class TripWeatherController : ControllerBase
         {
             if (resolved == null) continue;
             var (forecast, stale) = forecastsByCoordinate[(resolved.Latitude, resolved.Longitude)];
-            if (forecast == null) continue;
+            var dayForecast = forecast?.Days.FirstOrDefault(d => d.Date == resolved.Date);
 
-            var dayForecast = forecast.Days.FirstOrDefault(d => d.Date == resolved.Date);
-            if (dayForecast == null) continue; // outside THIS location's own provider window
-
-            days.Add(new TripWeatherDayDto
+            if (forecast != null && dayForecast is { IsForecastAvailable: true })
             {
-                Date = resolved.Date,
-                Code = dayForecast.Code,
-                TempMinC = dayForecast.TempMinC,
-                TempMaxC = dayForecast.TempMaxC,
-                PrecipitationProbability = dayForecast.PrecipitationProbability,
-                UvIndexMax = dayForecast.UvIndexMax,
-                LocationLabel = resolved.LocationLabel,
-            });
+                days.Add(new TripWeatherDayDto
+                {
+                    Date = resolved.Date,
+                    IsForecastAvailable = true,
+                    Code = dayForecast.Code,
+                    TempMinC = dayForecast.TempMinC,
+                    TempMaxC = dayForecast.TempMaxC,
+                    PrecipitationProbability = dayForecast.PrecipitationProbability,
+                    UvIndexMax = dayForecast.UvIndexMax,
+                    LocationLabel = resolved.LocationLabel,
+                });
 
-            primaryTimezone ??= forecast.Timezone;
-            if (stale) anyStale = true;
-            if (latestUpdatedAt == null || forecast.FetchedAt > latestUpdatedAt) latestUpdatedAt = forecast.FetchedAt;
+                primaryTimezone ??= forecast.Timezone;
+                if (stale) anyStale = true;
+                if (latestUpdatedAt == null || forecast.FetchedAt > latestUpdatedAt) latestUpdatedAt = forecast.FetchedAt;
+            }
+            else
+            {
+                // Outside this location's provider window, the provider
+                // call failed entirely, or the provider returned this exact
+                // date with no real values (e.g. the last day of its
+                // window) — never fabricate a forecast. The date and its
+                // resolved location still show; only the numbers are
+                // withheld.
+                days.Add(new TripWeatherDayDto
+                {
+                    Date = resolved.Date,
+                    IsForecastAvailable = false,
+                    LocationLabel = resolved.LocationLabel,
+                });
+            }
         }
 
         if (days.Count == 0)
         {
-            // Every resolved location is outside its own provider window
-            // (timezone-edge case), or every provider call failed with no
-            // usable stale cache anywhere.
+            // No resolved day had ANY location source to even attempt —
+            // e.g. no destination coordinates and no anchor covers any
+            // trip date. Distinguished from the per-day "unavailable"
+            // entries above, which now always populate when a location is
+            // known.
             var lastProviderDay = forecastsByCoordinate.Values
                 .Where(v => v.Forecast != null)
                 .SelectMany(v => v.Forecast!.Days)

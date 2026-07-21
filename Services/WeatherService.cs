@@ -10,11 +10,16 @@ namespace sidequest.backend.Services;
 public class WeatherDay
 {
     public DateOnly Date { get; set; }
-    public string Code { get; set; } = "cloudy";
-    public double TempMinC { get; set; }
-    public double TempMaxC { get; set; }
-    public int PrecipitationProbability { get; set; }
-    public double UvIndexMax { get; set; }
+    // False when the provider's response covers this date in `time` but
+    // returned null for its core values (observed on the last day of a
+    // forecast_days request) — the date is real, the forecast isn't. Every
+    // other field is null in that case; never a fabricated zero.
+    public bool IsForecastAvailable { get; set; }
+    public string? Code { get; set; }
+    public double? TempMinC { get; set; }
+    public double? TempMaxC { get; set; }
+    public int? PrecipitationProbability { get; set; }
+    public double? UvIndexMax { get; set; }
 }
 
 public class WeatherForecast
@@ -172,14 +177,22 @@ public class WeatherService
             var dateRaw = times[i].GetString();
             if (dateRaw == null || !DateOnly.TryParse(dateRaw, CultureInfo.InvariantCulture, out var date)) continue;
 
+            // `time` is always the full requested length, but Open-Meteo can
+            // return null in the value arrays for a date it doesn't have real
+            // model data for yet (reliably observed on the LAST day of a
+            // forecast_days request). Code/max/min missing means there is no
+            // real forecast for this date — never substitute zero for it.
+            var isAvailable = IsNumberAt(codes, i) && IsNumberAt(maxes, i) && IsNumberAt(mins, i);
+
             forecast.Days.Add(new WeatherDay
             {
                 Date = date,
-                Code = MapWmoCode(GetIntAt(codes, i)),
-                TempMaxC = Math.Round(GetDoubleAt(maxes, i), 1),
-                TempMinC = Math.Round(GetDoubleAt(mins, i), 1),
-                PrecipitationProbability = Math.Clamp(GetIntAt(precip, i), 0, 100),
-                UvIndexMax = Math.Round(GetDoubleAt(uv, i), 1),
+                IsForecastAvailable = isAvailable,
+                Code = isAvailable ? MapWmoCode(GetIntAt(codes, i)) : null,
+                TempMaxC = isAvailable ? Math.Round(GetDoubleAt(maxes, i), 1) : null,
+                TempMinC = isAvailable ? Math.Round(GetDoubleAt(mins, i), 1) : null,
+                PrecipitationProbability = isAvailable && IsNumberAt(precip, i) ? Math.Clamp(GetIntAt(precip, i), 0, 100) : null,
+                UvIndexMax = isAvailable && IsNumberAt(uv, i) ? Math.Round(GetDoubleAt(uv, i), 1) : null,
             });
         }
 
@@ -188,6 +201,9 @@ public class WeatherService
 
     private static JsonElement? GetArray(JsonElement daily, string name)
         => daily.TryGetProperty(name, out var el) && el.ValueKind == JsonValueKind.Array ? el : null;
+
+    private static bool IsNumberAt(JsonElement? array, int index)
+        => array is { } arr && index < arr.GetArrayLength() && arr[index].ValueKind == JsonValueKind.Number;
 
     private static double GetDoubleAt(JsonElement? array, int index)
     {

@@ -24,14 +24,19 @@ public class TripWeatherDto
 public class TripWeatherDayDto
 {
     public DateOnly Date { get; set; }
-    public string Code { get; set; } = "cloudy";
-    public double TempMinC { get; set; }
-    public double TempMaxC { get; set; }
-    public int PrecipitationProbability { get; set; }
-    public double UvIndexMax { get; set; }
+    // Explicit availability flag — never inferred from whether the numeric
+    // fields happen to be zero. False means the provider had no real
+    // forecast for this date yet (e.g. the last day of its window); every
+    // field below is null in that case, not a fabricated zero.
+    public bool IsForecastAvailable { get; set; }
+    public string? Code { get; set; }
+    public double? TempMinC { get; set; }
+    public double? TempMaxC { get; set; }
+    public int? PrecipitationProbability { get; set; }
+    public double? UvIndexMax { get; set; }
     // Which resolved location this day's forecast came from — a
     // TripDayLocation anchor (explicit or carried forward), or the trip
-    // destination fallback. Lets the client group consecutive same-location
-    // days without recomputing anything.
+    // destination fallback. Always set, even when IsForecastAvailable is
+    // false, so the day still shows where the travellers are.
     public string LocationLabel { get; set; } = string.Empty;
 }
