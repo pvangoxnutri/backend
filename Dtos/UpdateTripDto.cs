@@ -28,4 +28,7 @@ public class UpdateTripDto
 
     // Owner-controlled: whether non-owner members may edit activities.
     public bool? MembersCanEdit { get; set; }
+
+    // Slideshow cover on/off. Null = leave untouched.
+    public bool? SlideshowEnabled { get; set; }
 }

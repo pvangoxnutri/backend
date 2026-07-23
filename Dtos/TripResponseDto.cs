@@ -30,4 +30,7 @@ public class TripResponseDto
 
     // Owner-controlled: whether non-owner members may edit activities.
     public bool MembersCanEdit { get; set; } = true;
+
+    // Slideshow cover — presentation preference (default on).
+    public bool SlideshowEnabled { get; set; } = true;
 }

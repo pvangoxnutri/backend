@@ -35,4 +35,8 @@ public class CreateTripDto
     public string Visibility { get; set; } = "public"; // "public" | "hidden"
     public DateTime? RevealAt { get; set; }
     public string? Teaser { get; set; }
+
+    // Slideshow cover — defaults on; older clients that omit the field get
+    // the default.
+    public bool SlideshowEnabled { get; set; } = true;
 }

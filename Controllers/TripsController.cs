@@ -380,6 +380,7 @@ Not expecting this? You can safely ignore this email.";
             Description = canViewFull ? trip.Description : null,
             ShareCode = canViewFull ? trip.ShareCode : null,
             MembersCanEdit = trip.MembersCanEdit,
+            SlideshowEnabled = trip.SlideshowEnabled,
         };
 
     // ── GET /api/trips/invites/me ─────────────────────────────────────────────
@@ -598,6 +599,7 @@ Not expecting this? You can safely ignore this email.";
             Visibility = dto.Visibility == "hidden" ? "hidden" : "public",
             RevealAt = dto.RevealAt,
             Teaser = dto.Teaser,
+            SlideshowEnabled = dto.SlideshowEnabled,
         };
 
         if (string.IsNullOrWhiteSpace(trip.InviteCode))
@@ -711,6 +713,7 @@ Not expecting this? You can safely ignore this email.";
             if (dto.ClearRevealAt) trip.RevealAt = null;
             else if (dto.RevealAt.HasValue) trip.RevealAt = dto.RevealAt.Value;
             if (dto.MembersCanEdit.HasValue) trip.MembersCanEdit = dto.MembersCanEdit.Value;
+            if (dto.SlideshowEnabled.HasValue) trip.SlideshowEnabled = dto.SlideshowEnabled.Value;
         }
         else if (isAdmin)
         {
@@ -1950,6 +1953,7 @@ Not expecting this? You can safely ignore this email.";
             OwnerId = userGuid,
             Status = "active",
             InviteCode = GenerateInviteCode(),
+            SlideshowEnabled = originalTrip.SlideshowEnabled,
         };
 
         _db.Trips.Add(newTrip);

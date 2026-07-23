@@ -37,4 +37,9 @@ public class Trip
     // (collaborative planning). When false, only the owner can edit; members
     // have read-only access. Owner-controlled via trip settings.
     public bool MembersCanEdit { get; set; } = true;
+
+    // When true (default), the trip cover on Home and the trip header cycles
+    // through the cover image plus activity photos as a slideshow. Purely a
+    // presentation preference; set at create time and via trip settings.
+    public bool SlideshowEnabled { get; set; } = true;
 }
