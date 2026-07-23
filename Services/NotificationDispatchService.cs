@@ -46,7 +46,9 @@ public class NotificationDispatchService : INotificationDispatchService
 {
     // A device whose heartbeat is newer than this is treated as "the chat is
     // open right now" — the mobile heartbeat fires every 15s, so this gives
-    // one missed beat of slack before we start pushing to them again.
+    // one missed beat of slack before we start pushing to them again. An
+    // explicit leave (chat closed / app backgrounded) short-circuits the
+    // window entirely via ChatPresence.LeftAt — see SendChatMessageAsync.
     private static readonly TimeSpan ChatOpenWindow = TimeSpan.FromSeconds(25);
 
     private static readonly TimeSpan RetryBaseDelay = TimeSpan.FromSeconds(30);
@@ -263,9 +265,16 @@ public class NotificationDispatchService : INotificationDispatchService
 
         // Don't push to anyone who currently has this exact trip chat open —
         // they'll see the message arrive live via the chat's own polling.
+        // "Open" = a fresh heartbeat AND no explicit leave: LeftAt is set
+        // the moment the app reports the chat is off screen (closed or
+        // backgrounded), which must beat a heartbeat sent seconds earlier —
+        // an app in the background must never eat a notification. Rows from
+        // older clients always have LeftAt == null ⇒ old behavior.
         var openChatCutoff = DateTime.UtcNow - ChatOpenWindow;
         var currentlyOpenUserIds = await _db.ChatPresence
-            .Where(cp => cp.TripId == message.TripId && cp.LastSeenAt >= openChatCutoff)
+            .Where(cp => cp.TripId == message.TripId
+                && cp.LeftAt == null
+                && cp.LastSeenAt >= openChatCutoff)
             .Select(cp => cp.UserId)
             .ToListAsync(ct);
 

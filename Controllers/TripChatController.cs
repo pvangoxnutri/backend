@@ -364,6 +364,9 @@ public class TripChatController : ControllerBase
             existing.UserName = userName;
             existing.AvatarUrl = user?.AvatarUrl;
             if (dto?.IsTyping != null) existing.TypingAt = typingAt;
+            // A heartbeat means the chat is on screen again — undo any
+            // earlier explicit leave.
+            existing.LeftAt = null;
         }
 
         await _db.SaveChangesAsync(ct);
@@ -410,10 +413,16 @@ public class TripChatController : ControllerBase
 
         if (presence != null)
         {
-            // Keep the entry and just stamp the leave time — the user drops
-            // out of the live presence list after the normal 60s window.
-            // Leaving the chat also always ends "typing".
+            // Keep the entry and stamp BOTH timestamps. LastSeenAt = now is
+            // the honest "last read" anchor (they saw everything up to this
+            // moment) that the push unread count builds on — it must never
+            // be written backwards. LeftAt = now is the explicit "chat no
+            // longer on screen" signal (chat closed OR app backgrounded):
+            // push suppression requires LeftAt == null, so the user becomes
+            // pushable IMMEDIATELY without waiting out the heartbeat
+            // window. Leaving the chat also always ends "typing".
             presence.LastSeenAt = DateTime.UtcNow;
+            presence.LeftAt = DateTime.UtcNow;
             presence.TypingAt = null;
             await _db.SaveChangesAsync(ct);
         }

@@ -250,7 +250,13 @@ app.Use(async (ctx, next) =>
     var idClaim = ctx.User.Identity?.IsAuthenticated == true
         ? ctx.User.FindFirstValue(ClaimTypes.NameIdentifier)
         : null;
-    if (idClaim != null && Guid.TryParse(idClaim, out var seenUserId))
+    // Requests the app fires while it is NOT on screen (late background
+    // timers, in-flight work finishing after an app switch) carry this
+    // header and must not count as "seen" — a backgrounded app is not
+    // online. Older clients never send the header, so they keep the
+    // previous behavior unchanged.
+    var isBackgroundRequest = ctx.Request.Headers.ContainsKey("X-App-Background");
+    if (!isBackgroundRequest && idClaim != null && Guid.TryParse(idClaim, out var seenUserId))
     {
         var now = DateTime.UtcNow;
         var lastWrite = lastSeenWrites.GetValueOrDefault(seenUserId);
