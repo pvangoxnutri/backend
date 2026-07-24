@@ -18,14 +18,22 @@ public class TripsController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly ISupabaseStorageService _storage;
+    private readonly ITripDocumentStorageService _documentStorage;
     private readonly ILogger<TripsController> _logger;
     private readonly INotificationDispatchService _notifications;
     private readonly IEmailSender _emailSender;
 
-    public TripsController(AppDbContext db, ISupabaseStorageService storage, ILogger<TripsController> logger, INotificationDispatchService notifications, IEmailSender emailSender)
+    public TripsController(
+        AppDbContext db,
+        ISupabaseStorageService storage,
+        ITripDocumentStorageService documentStorage,
+        ILogger<TripsController> logger,
+        INotificationDispatchService notifications,
+        IEmailSender emailSender)
     {
         _db = db;
         _storage = storage;
+        _documentStorage = documentStorage;
         _logger = logger;
         _notifications = notifications;
         _emailSender = emailSender;
@@ -789,6 +797,22 @@ Not expecting this? You can safely ignore this email.";
             .Where(m => m.TripId == id)
             .Select(m => m.ImageUrl)
             .ToListAsync(cancellationToken));
+
+        var documentPaths = await _db.TripDocuments
+            .Where(d => d.TripId == id)
+            .Select(d => d.StoragePath)
+            .ToListAsync(cancellationToken);
+
+        // Private objects are removed before their rows cascade. If storage is
+        // unavailable, keep the trip and metadata intact so deletion can be
+        // retried instead of leaving inaccessible orphaned travel documents.
+        if (!await _documentStorage.DeleteManyAsync(documentPaths, cancellationToken))
+        {
+            return StatusCode(StatusCodes.Status502BadGateway, new
+            {
+                error = "document_storage_delete_failed",
+            });
+        }
 
         _db.Trips.Remove(trip);
         await _db.SaveChangesAsync(cancellationToken);

@@ -33,6 +33,7 @@ public class AppDbContext : DbContext
     public DbSet<PackingListCategory> PackingListCategories => Set<PackingListCategory>();
     public DbSet<PackingListItem> PackingListItems => Set<PackingListItem>();
     public DbSet<TripDayLocation> TripDayLocations => Set<TripDayLocation>();
+    public DbSet<TripDocument> TripDocuments => Set<TripDocument>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -66,6 +67,55 @@ public class AppDbContext : DbContext
             .WithMany()
             .HasForeignKey(d => d.CreatedByUserId)
             .OnDelete(DeleteBehavior.Restrict);
+
+        modelBuilder.Entity<TripDocument>()
+            .HasOne(d => d.Trip)
+            .WithMany()
+            .HasForeignKey(d => d.TripId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<TripDocument>()
+            .HasOne(d => d.CreatedBy)
+            .WithMany()
+            .HasForeignKey(d => d.CreatedByUserId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        modelBuilder.Entity<TripDocument>()
+            .HasOne(d => d.Activity)
+            .WithMany()
+            .HasForeignKey(d => d.ActivityId)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        modelBuilder.Entity<TripDocument>()
+            .HasIndex(d => d.StoragePath)
+            .IsUnique();
+
+        modelBuilder.Entity<TripDocument>()
+            .HasIndex(d => new { d.TripId, d.UploadedAt });
+
+        modelBuilder.Entity<TripDocument>()
+            .Property(d => d.Name)
+            .HasMaxLength(200);
+
+        modelBuilder.Entity<TripDocument>()
+            .Property(d => d.Category)
+            .HasMaxLength(40);
+
+        modelBuilder.Entity<TripDocument>()
+            .Property(d => d.FileType)
+            .HasMaxLength(100);
+
+        modelBuilder.Entity<TripDocument>()
+            .Property(d => d.StoragePath)
+            .HasMaxLength(300);
+
+        modelBuilder.Entity<TripDocument>()
+            .Property(d => d.Note)
+            .HasMaxLength(2000);
+
+        modelBuilder.Entity<TripDocument>()
+            .Property(d => d.BookingReference)
+            .HasMaxLength(200);
 
         modelBuilder.Entity<ChatMessageReaction>()
             .HasOne(r => r.ChatMessage)

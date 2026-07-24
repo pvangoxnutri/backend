@@ -21,19 +21,22 @@ public class AuthController : ControllerBase
     private readonly IConfiguration _configuration;
     private readonly ILogger<AuthController> _logger;
     private readonly ISupabaseStorageService _storage;
+    private readonly ITripDocumentStorageService _documentStorage;
 
     public AuthController(
         AppDbContext db,
         IHttpClientFactory httpClientFactory,
         IConfiguration configuration,
         ILogger<AuthController> logger,
-        ISupabaseStorageService storage)
+        ISupabaseStorageService storage,
+        ITripDocumentStorageService documentStorage)
     {
         _db = db;
         _httpClientFactory = httpClientFactory;
         _configuration = configuration;
         _logger = logger;
         _storage = storage;
+        _documentStorage = documentStorage;
     }
 
     [HttpPost("sync")]
@@ -432,6 +435,42 @@ public class AuthController : ControllerBase
             imagesToDelete = new List<string?>();
         }
 
+        List<string> documentPaths;
+        phase.Restart();
+        try
+        {
+            documentPaths = await CollectDocumentPathsForUserDeletionAsync(userId, cancellationToken);
+            _logger.LogInformation(
+                "[TIMING] DELETE /api/auth/me phase=collectDocuments documentCount={Count} elapsedMs={Elapsed}",
+                documentPaths.Count,
+                phase.ElapsedMilliseconds);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "[TIMING] DELETE /api/auth/me phase=collectDocuments FAILED elapsedMs={Elapsed}",
+                phase.ElapsedMilliseconds);
+            return StatusCode(500, "Could not prepare private document cleanup.");
+        }
+
+        phase.Restart();
+        if (!await _documentStorage.DeleteManyAsync(documentPaths, cancellationToken))
+        {
+            _logger.LogWarning(
+                "[TIMING] DELETE /api/auth/me phase=deleteDocuments FAILED documentCount={Count} elapsedMs={Elapsed}",
+                documentPaths.Count,
+                phase.ElapsedMilliseconds);
+            return StatusCode(StatusCodes.Status502BadGateway, new
+            {
+                error = "document_storage_delete_failed",
+            });
+        }
+        _logger.LogInformation(
+            "[TIMING] DELETE /api/auth/me phase=deleteDocuments documentCount={Count} elapsedMs={Elapsed}",
+            documentPaths.Count,
+            phase.ElapsedMilliseconds);
+
         phase.Restart();
         try
         {
@@ -526,6 +565,27 @@ public class AuthController : ControllerBase
         return images;
     }
 
+    /// <summary>
+    /// Collect private document objects that disappear with the account:
+    /// documents in owned trips and documents authored in other trips.
+    /// Storage keys are deliberately never written to logs.
+    /// </summary>
+    private async Task<List<string>> CollectDocumentPathsForUserDeletionAsync(
+        Guid userId,
+        CancellationToken cancellationToken)
+    {
+        var ownedTripIds = await _db.Trips
+            .Where(t => t.OwnerId == userId)
+            .Select(t => t.Id)
+            .ToListAsync(cancellationToken);
+
+        return await _db.TripDocuments
+            .Where(d => d.CreatedByUserId == userId || ownedTripIds.Contains(d.TripId))
+            .Select(d => d.StoragePath)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+    }
+
     private async Task DeleteLocalUserDataAsync(Guid userId, string? email, CancellationToken cancellationToken)
     {
         var connectionString = _configuration.GetConnectionString("DefaultConnection")
@@ -589,6 +649,15 @@ public class AuthController : ControllerBase
             await deleteMyActivities.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        // Owned-trip documents already cascaded with their trips above.
+        // Remove documents authored by this user in trips owned by others so
+        // the required CreatedBy FK does not block deleting the user row.
+        await using (var deleteMyDocuments = new NpgsqlCommand("""delete from "TripDocuments" where "CreatedByUserId" = @userId""", conn, tx))
+        {
+            deleteMyDocuments.Parameters.AddWithValue("userId", userId);
+            await deleteMyDocuments.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         await using (var deleteMyInvites = new NpgsqlCommand("""delete from "TripInvites" where "InvitedByUserId" = @userId""", conn, tx))
         {
             deleteMyInvites.Parameters.AddWithValue("userId", userId);
@@ -620,7 +689,7 @@ public class AuthController : ControllerBase
             deleteComments.Parameters.AddWithValue("userId", userId);
             await deleteComments.ExecuteNonQueryAsync(cancellationToken);
         }
-        _logger.LogInformation("[TIMING] deleteLocal step=userScopedCleanup(6stmts) elapsedMs={Elapsed}", sw.ElapsedMilliseconds);
+        _logger.LogInformation("[TIMING] deleteLocal step=userScopedCleanup(7stmts) elapsedMs={Elapsed}", sw.ElapsedMilliseconds);
 
         sw.Restart();
         // Delete settlements involving this user

@@ -28,6 +28,11 @@ builder.Services.AddHttpClient<LinkPreviewService>();
 builder.Services.AddHttpClient<WeatherService>();
 builder.Services.AddScoped<TripDayLocationService>();
 builder.Services.AddHttpClient<ISupabaseStorageService, SupabaseStorageService>();
+builder.Services
+    .AddHttpClient<ITripDocumentStorageService, TripDocumentStorageService>()
+    // Default HttpClientFactory logging includes the request URI. Private
+    // document URIs contain the storage key, which must never reach logs.
+    .RemoveAllLoggers();
 builder.Services.AddHttpClient<IExpoPushService, ExpoPushService>();
 builder.Services.AddScoped<INotificationDispatchService, NotificationDispatchService>();
 // Trip-invite emails to addresses without a SideQuest account — sent via
