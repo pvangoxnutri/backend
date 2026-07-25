@@ -34,6 +34,7 @@ public class AppDbContext : DbContext
     public DbSet<PackingListItem> PackingListItems => Set<PackingListItem>();
     public DbSet<TripDayLocation> TripDayLocations => Set<TripDayLocation>();
     public DbSet<TripDocument> TripDocuments => Set<TripDocument>();
+    public DbSet<UserTravelStats> UserTravelStats => Set<UserTravelStats>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -67,6 +68,15 @@ public class AppDbContext : DbContext
             .WithMany()
             .HasForeignKey(d => d.CreatedByUserId)
             .OnDelete(DeleteBehavior.Restrict);
+
+        // One aggregate travel-stats row per user; dies with the account.
+        modelBuilder.Entity<UserTravelStats>()
+            .HasKey(s => s.UserId);
+        modelBuilder.Entity<UserTravelStats>()
+            .HasOne(s => s.User)
+            .WithOne()
+            .HasForeignKey<UserTravelStats>(s => s.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
 
         modelBuilder.Entity<TripDocument>()
             .HasOne(d => d.Trip)

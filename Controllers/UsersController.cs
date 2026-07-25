@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using sidequest.backend.Data;
+using sidequest.backend.Models;
 using sidequest.backend.Services;
 
 namespace sidequest.backend.Controllers;
@@ -16,6 +17,66 @@ public class UsersController : ControllerBase
     public UsersController(AppDbContext db)
     {
         _db = db;
+    }
+
+    // ── Travel Tracker aggregate stats ───────────────────────────────────
+    // The tracker's raw country statuses never leave the device; the app
+    // syncs ONLY these aggregate numbers so other members' profiles can
+    // show them. GET works for any authenticated user (own or others) and
+    // never exposes a country list, e-mail or any other personal data.
+
+    /// <summary>Upserts the caller's own aggregate stats. The caller can
+    /// only ever write their own row (id from the JWT, never the body).</summary>
+    [Authorize]
+    [HttpPut("me/travel-stats")]
+    public async Task<ActionResult> PutMyTravelStats([FromBody] UpdateTravelStatsDto dto)
+    {
+        var idClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!Guid.TryParse(idClaim, out var userId)) return Unauthorized();
+
+        // Sanity bounds — aggregates only, and never trust absurd values.
+        if (dto.CountriesVisited < 0 || dto.CountriesVisited > 300
+            || dto.ContinentsReached < 0 || dto.ContinentsReached > 7)
+            return BadRequest("Stats out of range.");
+
+        var row = await _db.UserTravelStats.FindAsync(userId);
+        if (row == null)
+        {
+            _db.UserTravelStats.Add(new UserTravelStats
+            {
+                UserId = userId,
+                CountriesVisited = dto.CountriesVisited,
+                ContinentsReached = dto.ContinentsReached,
+                UpdatedAt = DateTime.UtcNow,
+            });
+        }
+        else
+        {
+            row.CountriesVisited = dto.CountriesVisited;
+            row.ContinentsReached = dto.ContinentsReached;
+            row.UpdatedAt = DateTime.UtcNow;
+        }
+        await _db.SaveChangesAsync();
+        return NoContent();
+    }
+
+    /// <summary>Aggregate stats for any user (self or others). 404 when the
+    /// user does not exist OR has never synced stats — the client hides the
+    /// section then instead of showing fabricated zeros.</summary>
+    [Authorize]
+    [HttpGet("{userId:guid}/travel-stats")]
+    public async Task<ActionResult<TravelStatsDto>> GetTravelStats(Guid userId)
+    {
+        var row = await _db.UserTravelStats.AsNoTracking()
+            .FirstOrDefaultAsync(s => s.UserId == userId);
+        if (row == null) return NotFound();
+
+        return Ok(new TravelStatsDto
+        {
+            CountriesVisited = row.CountriesVisited,
+            ContinentsReached = row.ContinentsReached,
+            UpdatedAt = row.UpdatedAt,
+        });
     }
 
     [HttpGet("{userId}/profile")]
@@ -83,6 +144,19 @@ public class UsersController : ControllerBase
 public class HeartbeatDto
 {
     public bool? Online { get; set; }
+}
+
+public class UpdateTravelStatsDto
+{
+    public int CountriesVisited { get; set; }
+    public int ContinentsReached { get; set; }
+}
+
+public class TravelStatsDto
+{
+    public int CountriesVisited { get; set; }
+    public int ContinentsReached { get; set; }
+    public DateTime UpdatedAt { get; set; }
 }
 
 public class UserProfileDto
