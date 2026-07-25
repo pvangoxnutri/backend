@@ -318,10 +318,12 @@ public class TripChatController : ControllerBase
     // AcceptInvite).
 
     // How long a typing stamp counts as "still typing". The client refreshes
-    // its stamp every ~2.5 s while the user keeps typing and sends an explicit
-    // false after ~3.5 s of inactivity — 8 s tolerates a dropped refresh yet
-    // clears a crashed/offline client's indicator within seconds.
-    private static readonly TimeSpan TypingWindow = TimeSpan.FromSeconds(8);
+    // its stamp every ~1.2 s while the user keeps typing and sends an explicit
+    // false after ~1.8 s of inactivity — 5 s tolerates a few dropped
+    // refreshes yet clears a crashed/offline client's indicator fast. This
+    // window is the SAFETY NET only; normal show/hide latency is driven by
+    // the explicit start/stop signals plus the receiver's sub-second poll.
+    private static readonly TimeSpan TypingWindow = TimeSpan.FromSeconds(5);
 
     [HttpPut("presence")]
     public async Task<ActionResult> UpdatePresence(
