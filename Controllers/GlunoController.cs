@@ -33,6 +33,7 @@ public class GlunoController : ControllerBase
     private readonly IRoutingService _routing;
     private readonly IDayPlanPlanner _dayPlanner;
     private readonly ILiveTravelRegistry _liveTravel;
+    private readonly ILogger<GlunoController> _logger;
 
     public GlunoController(
         GlunoAvailability availability,
@@ -42,9 +43,11 @@ public class GlunoController : ControllerBase
         IGlunoProposalApplyService apply,
         IRoutingService routing,
         IDayPlanPlanner dayPlanner,
-        ILiveTravelRegistry liveTravel)
+        ILiveTravelRegistry liveTravel,
+        ILogger<GlunoController> logger)
     {
         _liveTravel = liveTravel;
+        _logger = logger;
         _availability = availability;
         _chat = chat;
         _conversations = conversations;
@@ -271,9 +274,28 @@ public class GlunoController : ControllerBase
     [HttpPost("messages")]
     public async Task<ActionResult<GlunoTurnResponseDto>> SendMessage([FromBody] SendGlunoMessageDto dto)
     {
-        var result = await _chat.SendAsync(
-            GetUserId(), dto.ConversationId, dto.TripId, dto.Message ?? string.Empty,
-            dto.Screen, dto.IdempotencyKey, HttpContext.RequestAborted);
+        GlunoTurnResult result;
+
+        try
+        {
+            result = await _chat.SendAsync(
+                GetUserId(), dto.ConversationId, dto.TripId, dto.Message ?? string.Empty,
+                dto.Screen, dto.IdempotencyKey, HttpContext.RequestAborted);
+        }
+        catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
+        {
+            return StatusCode(499, new { error = GlunoFailureCodes.Cancelled, retryable = false });
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            // The last resort. The service has its own boundary; this one
+            // covers the case where that boundary itself fails, so there is no
+            // path at all by which this endpoint answers without the envelope
+            // the app depends on.
+            _logger.LogError("[GLUNO] send escaped the service boundary: {Category}", ex.GetType().Name);
+
+            return StatusCode(502, new { error = "unknown", retryable = true });
+        }
 
         switch (result.Error)
         {

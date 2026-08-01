@@ -218,7 +218,100 @@ public sealed class GlunoChatService : IGlunoChatService
         _logger = logger;
     }
 
+    /// <summary>
+    /// The outermost boundary for a turn.
+    ///
+    /// WHY THIS EXISTS. The turn's own try/catch only ever covered the model
+    /// call. Everything before it — loading the conversation, building the
+    /// context, the history query, persisting the user's message — and
+    /// everything after it — the quality gate, grounding, persisting the
+    /// answer, telemetry — ran unprotected. An exception in any of those
+    /// escaped to the host, and the app got a bare 5xx with NO BODY: no code,
+    /// no retry flag, nothing to say to the user beyond a shrug.
+    ///
+    /// This guarantees the JSON contract for every outcome. It is a safety
+    /// net, not a diagnosis — the log line still carries the exception type
+    /// and the last stage reached, which is what actually identifies the bug.
+    /// </summary>
     public async Task<GlunoTurnResult> SendAsync(
+        Guid userId, Guid? conversationId, Guid? tripId, string message, string? screen,
+        string? idempotencyKey, CancellationToken ct)
+    {
+        try
+        {
+            return await SendCoreAsync(userId, conversationId, tripId, message, screen, idempotencyKey, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // The user pressed stop. Handled first and separately so it can
+            // never be reported as a failure.
+            await ReleaseClaimAsync(userId, idempotencyKey, GlunoFailureCodes.Cancelled, ct);
+
+            return new GlunoTurnResult
+            {
+                Error = GlunoTurnError.Cancelled,
+                FailureCode = GlunoFailureCodes.Cancelled,
+            };
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            // Type name only — an exception message can carry a connection
+            // string, a request URI, or a row's contents.
+            _logger.LogError(
+                "[GLUNO] turn escaped its own handling: {Category}", ex.GetType().Name);
+
+            // Best effort, and deliberately not allowed to mask the original
+            // failure: the claim would otherwise sit in-flight until its
+            // five-minute timeout and block the user's own retry.
+            await ReleaseClaimAsync(userId, idempotencyKey, GlunoFailureCodes.AiMalformedResponse, ct);
+
+            // No proposal, no assistant message. The user's question stays in
+            // the conversation exactly as the ordinary failure paths leave it.
+            return new GlunoTurnResult
+            {
+                Error = GlunoTurnError.ProviderFailed,
+                FailureCode = GlunoFailureCodes.AiMalformedResponse,
+            };
+        }
+    }
+
+    /// <summary>
+    /// Marks an in-flight claim failed so the same message can be retried at
+    /// once rather than after the in-flight timeout.
+    ///
+    /// Swallows everything. This runs while another failure is already being
+    /// reported, and a cleanup error must not replace it.
+    /// </summary>
+    private async Task ReleaseClaimAsync(
+        Guid userId, string? idempotencyKey, string failureCode, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(idempotencyKey)) return;
+
+        try
+        {
+            _db.ChangeTracker.Clear();
+
+            var claim = await _db.GlunoTurnRequests.FirstOrDefaultAsync(
+                row => row.UserId == userId
+                    && row.IdempotencyKey == idempotencyKey
+                    && row.Status == GlunoTurnRequestStatuses.InFlight,
+                CancellationToken.None);
+
+            if (claim == null) return;
+
+            claim.Status = GlunoTurnRequestStatuses.Failed;
+            claim.FailureCode = failureCode;
+            claim.UpdatedAt = DateTime.UtcNow;
+
+            await _db.SaveChangesAsync(CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("[GLUNO] claim release failed: {Category}", ex.GetType().Name);
+        }
+    }
+
+    private async Task<GlunoTurnResult> SendCoreAsync(
         Guid userId, Guid? conversationId, Guid? tripId, string message, string? screen,
         string? idempotencyKey, CancellationToken ct)
     {

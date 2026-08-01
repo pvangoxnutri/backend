@@ -44,7 +44,8 @@ public class TurnFailureContractEvals
             apply: null!,
             routing: null!,
             dayPlanner: null!,
-            liveTravel: null!);
+            liveTravel: null!,
+            logger: Microsoft.Extensions.Logging.Abstractions.NullLogger<GlunoController>.Instance);
 
         // The endpoint reads the caller from the principal, never from the
         // body — so the test has to supply one the same way auth would.
