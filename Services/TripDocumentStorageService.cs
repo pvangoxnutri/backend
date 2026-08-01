@@ -20,6 +20,19 @@ public interface ITripDocumentStorageService
         string storagePath,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Reads a private document into memory, server-side.
+    ///
+    /// Deliberately separate from <see cref="CreateSignedReadUrlAsync"/>. That
+    /// one hands a short-lived URL to the app so a person can open their own
+    /// file. This one is for the backend to process the bytes itself — and the
+    /// URL must never leave the process, because a signed URL to somebody's
+    /// booking confirmation is a bearer token for that document.
+    /// </summary>
+    Task<byte[]> DownloadAsync(
+        string storagePath,
+        CancellationToken cancellationToken = default);
+
     Task<bool> DeleteAsync(
         string storagePath,
         CancellationToken cancellationToken = default);
@@ -91,6 +104,49 @@ public sealed partial class TripDocumentStorageService : ITripDocumentStorageSer
         catch (HttpRequestException)
         {
             await BestEffortDeleteAfterAmbiguousUploadAsync(storagePath);
+            throw new TripDocumentStorageException("Private document storage is unavailable.");
+        }
+    }
+
+    /// <summary>
+    /// Fetches the object with the service-role credential, in-process.
+    ///
+    /// Uses the authenticated object endpoint directly rather than signing a
+    /// URL and following it: a signed URL is a bearer token for a private
+    /// document, and minting one that only this method will use creates a
+    /// credential with no purpose and a window in which it could leak.
+    /// </summary>
+    public async Task<byte[]> DownloadAsync(
+        string storagePath,
+        CancellationToken cancellationToken = default)
+    {
+        using var request = CreateRequest(HttpMethod.Get, $"object/{EncodeStorageTarget(storagePath)}");
+
+        try
+        {
+            using var response = await _httpClient.SendAsync(
+                request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                // Status only. The message must not carry the object path —
+                // that is the private location of somebody's document.
+                throw new TripDocumentStorageException(
+                    $"Private document read failed with status {(int)response.StatusCode}.");
+            }
+
+            return await response.Content.ReadAsByteArrayAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            throw new TripDocumentStorageException("Private document read timed out.");
+        }
+        catch (HttpRequestException)
+        {
             throw new TripDocumentStorageException("Private document storage is unavailable.");
         }
     }

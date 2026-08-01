@@ -68,8 +68,12 @@ public class TripWeatherController : ControllerBase
         // the timeline so the resolver never has to iterate a backwards or
         // meaningless date range.
         var today = DateOnly.FromDateTime(DateTime.UtcNow);
-        if (trip.EndDate < trip.StartDate || trip.StartDate.Year < 2000 || trip.EndDate < today)
+        if (trip.EndDate < trip.StartDate || trip.StartDate.Year < 2000
+            || (trip.EndDate.HasValue && trip.EndDate.Value < today))
         {
+            // An open-ended adventure is never "fully past" — it stays
+            // forecastable until the traveller gives it an end date or
+            // completes it.
             dto.Status = "unavailable";
             return Ok(dto);
         }
@@ -85,8 +89,16 @@ public class TripWeatherController : ControllerBase
             return Ok(dto);
         }
 
+        // The forecast horizon is the hard ceiling on how far the timeline is
+        // walked. A trip WITH an end date past the horizon was already clipped
+        // by the provider returning nothing for those days; doing it here means
+        // an OPEN-ENDED trip cannot ask for an unbounded number of days in the
+        // first place, rather than relying on a downstream filter.
+        var rangeEnd = TripDateRange.EffectiveEnd(trip.StartDate, trip.EndDate, today);
+        if (rangeEnd > lastForecastDay) rangeEnd = lastForecastDay;
+
         var timeline = _resolver.ResolveTimeline(
-            trip.StartDate, trip.EndDate, dayLocations,
+            trip.StartDate, rangeEnd, dayLocations,
             trip.Destination, trip.DestinationLatitude, trip.DestinationLongitude);
 
         // One provider call per unique coordinate actually visited by the
@@ -172,6 +184,65 @@ public class TripWeatherController : ControllerBase
             }
             return Ok(dto);
         }
+
+        // ── Per-location forecasts ────────────────────────────────────────
+        // One entry per STORED row, additional stops included. Days[] above
+        // stays the main-location-only view, so nothing here can change what an
+        // older client reads.
+        //
+        // Reuses forecastsByCoordinate, so a stop that shares coordinates with
+        // the day's main location (or with any other day) costs no extra
+        // provider call. Only genuinely new coordinates are fetched.
+        var locationForecasts = new List<TripWeatherLocationDto>();
+        foreach (var row in dayLocations.OrderBy(d => d.StartDate).ThenBy(d => d.SortIndex))
+        {
+            // A stop outside the forecastable range would only produce an entry
+            // with no numbers; skip it rather than pad the list. rangeEnd is
+            // already clipped to the provider's horizon, so an open-ended trip
+            // adds no extra provider calls here either.
+            if (row.StartDate < trip.StartDate || row.StartDate > rangeEnd) continue;
+
+            var key = (row.Latitude, row.Longitude);
+            if (!forecastsByCoordinate.ContainsKey(key))
+            {
+                try
+                {
+                    var extra = await _weather.GetForecastAsync(row.Latitude, row.Longitude, ct);
+                    forecastsByCoordinate[key] = (extra.Forecast, extra.Stale);
+                }
+                catch
+                {
+                    // One stop's provider call failing must never take the whole
+                    // trip's weather down — record it as unavailable and move on.
+                    forecastsByCoordinate[key] = (null, false);
+                }
+            }
+
+            var (locForecast, locStale) = forecastsByCoordinate[key];
+            var locDay = locForecast?.Days.FirstOrDefault(d => d.Date == row.StartDate);
+            var available = locForecast != null && locDay is { IsForecastAvailable: true };
+
+            locationForecasts.Add(new TripWeatherLocationDto
+            {
+                DayLocationId = row.Id,
+                Date = row.StartDate,
+                SortIndex = row.SortIndex,
+                LocationLabel = row.LocationLabel,
+                Latitude = row.Latitude,
+                Longitude = row.Longitude,
+                PlaceId = row.PlaceId,
+                IsForecastAvailable = available,
+                Code = available ? locDay!.Code : null,
+                TempMinC = available ? locDay!.TempMinC : null,
+                TempMaxC = available ? locDay!.TempMaxC : null,
+                PrecipitationProbability = available ? locDay!.PrecipitationProbability : null,
+                UvIndexMax = available ? locDay!.UvIndexMax : null,
+            });
+
+            if (available && locStale) anyStale = true;
+        }
+
+        dto.LocationForecasts = locationForecasts;
 
         dto.Status = "available";
         dto.Timezone = primaryTimezone;

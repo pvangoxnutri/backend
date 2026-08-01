@@ -6,7 +6,16 @@ public class ChatMessageDto
     public Guid? UserId { get; set; }
     public string UserName { get; set; } = string.Empty;
     public string Text { get; set; } = string.Empty;
+    // ONLY ever a legacy public URL from before chat images moved to private
+    // storage. Null for every image stored privately — the raw object path is
+    // not a client identifier, and handing it out would put a stable, guessable
+    // storage key in every chat payload. The message id is the access key
+    // instead; see HasPrivateImage.
     public string? ImageUrl { get; set; }
+    // True when this message has an image in the private chat bucket. The
+    // client trades the message id for a short-lived signed URL through
+    // GET /api/trips/{tripId}/chat/{messageId}/image.
+    public bool HasPrivateImage { get; set; }
     public bool IsSystem { get; set; }
     public string? SystemEventType { get; set; }
     public DateTime CreatedAt { get; set; }

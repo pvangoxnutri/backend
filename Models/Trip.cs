@@ -14,7 +14,11 @@ public class Trip
     public double? DestinationLongitude { get; set; }
     public string? DestinationPlaceId { get; set; }
     public DateOnly StartDate { get; set; }
-    public DateOnly EndDate { get; set; }
+    // Null = the traveller does not know when this adventure ends yet. The
+    // trip stays active until they set an end date or mark it completed, and
+    // nothing substitutes a placeholder date — see TripDateRange for how code
+    // that needs a finite range derives one at read time.
+    public DateOnly? EndDate { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     public string? ImageUrl { get; set; }

@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Gluno's local eval suite.
+
+    Deliberately a SEPARATE project, not part of the backend: nothing here
+    ships, and nothing here can be reached at runtime. It never touches a
+    database, never calls Anthropic, and never calls Tripadvisor — every
+    scenario is built in memory and every external answer is mocked, so a run
+    is deterministic, offline and free.
+
+    Run with:  dotnet test backend/Gluno.Evals/Gluno.Evals.csproj
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <RollForward>Major</RollForward>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
+    <PackageReference Include="xunit" Version="2.*" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\sidequest.backend.csproj" />
+  </ItemGroup>
+
+</Project>

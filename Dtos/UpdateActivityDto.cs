@@ -16,6 +16,10 @@ public class UpdateActivityDto
     public string? CustomCategoryLabel { get; set; }
     public bool ClearCustomCategoryLabel { get; set; }
     public string? ImageUrl { get; set; }
+    // Nullable so it follows this DTO's "null = leave untouched" convention:
+    // a client that does not know about the field cannot silently re-include
+    // an image the user chose to hide.
+    public bool? ExcludeFromSlideshow { get; set; }
     public string? SpotifyUrl { get; set; }
     public bool ClearImage { get; set; }
     public bool ClearSpotifyUrl { get; set; }

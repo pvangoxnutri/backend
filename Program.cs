@@ -7,6 +7,7 @@ using Microsoft.IdentityModel.Tokens;
 using Npgsql;
 using sidequest.backend.Data;
 using sidequest.backend.Services;
+using sidequest.backend.Services.Gluno;
 
 // Must run BEFORE CreateBuilder: the environment-variable configuration
 // provider snapshots Environment.GetEnvironmentVariable at builder-creation
@@ -33,6 +34,116 @@ builder.Services
     // Default HttpClientFactory logging includes the request URI. Private
     // document URIs contain the storage key, which must never reach logs.
     .RemoveAllLoggers();
+builder.Services
+    .AddHttpClient<IChatImageStorageService, ChatImageStorageService>()
+    // Same reason: these request URIs carry the private chat object path, and
+    // the signing response carries a working short-lived URL.
+    .RemoveAllLoggers();
+// Create-if-absent only, never modifies an existing bucket, never blocks
+// startup. See the class comment for why that is safe to run on every boot.
+builder.Services.AddHostedService<ChatImageBucketProvisioner>();
+// Registered so it can be injected, NOT scheduled. Its only trigger is the
+// Development-gated ChatImageBackfillController.
+builder.Services.AddScoped<ChatImageBackfillService>();
+// ── Gluno ────────────────────────────────────────────────────────────────
+// Layered on purpose (see Services/Gluno/): context builder → action executor
+// → AI provider → chat orchestrator. Each depends only on the interface below
+// it, which is what keeps "Gluno may only propose" enforceable in one place
+// instead of being a convention spread across the app.
+//
+// The AI provider is a singleton because it owns one HTTP client to the model
+// API; everything that touches the database is scoped.
+builder.Services.AddSingleton<IGlunoAiProvider, AnthropicGlunoAiProvider>();
+// External travel data. Adding a provider is one registration here; nothing
+// above the registry knows which providers exist.
+builder.Services.AddSingleton<TravelDataCache>();
+builder.Services
+    .AddHttpClient(TripadvisorTravelProvider.HttpClientName)
+    // MANDATORY, not an optimisation. Tripadvisor's Content API takes the API
+    // key as a QUERY PARAMETER, so every request URI contains the secret — and
+    // the default HttpClientFactory logging writes request URIs at Information
+    // level. Removing these loggers is what keeps the key out of the logs.
+    .RemoveAllLoggers();
+// A named client rather than a typed one: the provider is a singleton (the
+// registry holds it), and a typed HttpClient captured in a singleton pins one
+// message handler forever.
+builder.Services.AddSingleton<ITravelDataProvider, TripadvisorTravelProvider>();
+builder.Services.AddSingleton<ITravelDataRegistry, TravelDataRegistry>();
+// Verified travel times. Same shape as the travel-data registration above, and
+// for the same reasons: named client (the provider is a singleton), loggers
+// removed (an API key rides in a header and request URIs are logged by
+// default), and OFF unless Routing:Enabled is set — deploying this must not
+// start calling a paid API by itself.
+builder.Services
+    .AddHttpClient(GoogleRoutingProvider.HttpClientName)
+    .RemoveAllLoggers();
+builder.Services.AddSingleton<IRoutingProvider, GoogleRoutingProvider>();
+// Scoped, because its per-turn call budget IS the request lifetime.
+builder.Services.AddScoped<IRoutingService, RoutingService>();
+// Deterministic planning: how long things take, and how a day is laid out.
+// Neither is the model's job — see the class comments.
+builder.Services.AddSingleton<ActivityDurationTable>();
+builder.Services.AddSingleton<DayScheduleEngine>();
+builder.Services.AddScoped<IDayPlanPlanner, DayPlanPlanner>();
+builder.Services.AddSingleton<GlunoAvailability>();
+// Per-user ceiling on external provider calls. A backstop against runaway
+// usage, not a plan tier — see the class comment.
+builder.Services.AddSingleton<GlunoUsageLimiter>();
+builder.Services.AddScoped<IGlunoContextBuilder, GlunoContextBuilder>();
+// Gluno's memory for how someone wants to travel — planning preferences only,
+// on an allow-listed set of keys. See GlunoPreferenceKeys.
+builder.Services.AddScoped<IGlunoPreferenceService, GlunoPreferenceService>();
+builder.Services.AddScoped<IGlunoActionExecutor, GlunoActionExecutor>();
+// Decision quality: the deterministic layers that decide what a turn is allowed
+// to do, resolve what the user pointed at, and check the answer before it goes
+// out. All stateless except the working-state store.
+builder.Services.AddSingleton<GlunoQualityGate>();
+// Model selection, turn planning, usage ceilings and context budgeting. All
+// deterministic, all configuration-driven — no model id is hardcoded anywhere
+// in the Gluno implementation.
+builder.Services.AddSingleton<GlunoModelPolicy>();
+builder.Services.AddSingleton<GlunoTurnPlanner>();
+builder.Services.AddSingleton<GlunoContextBudget>();
+// Singleton: the usage windows ARE process state, like the presence throttle.
+builder.Services.AddSingleton<GlunoUsageBudget>();
+builder.Services.AddScoped<IGlunoIdempotencyStore, GlunoIdempotencyStore>();
+// Live travel information — strikes, closures, events, holidays. OFF by
+// default (Gluno__LiveInfo__Enabled). Retrieval happens on the model provider's
+// side, so this backend never fetches a URL chosen by a model or a web page.
+builder.Services.AddSingleton<ILiveTravelInformationProvider, WebSearchLiveTravelProvider>();
+// Scoped: its per-turn search budget IS the request lifetime.
+builder.Services.AddScoped<ILiveTravelRegistry, LiveTravelRegistry>();
+// Group planning: the shared profile, decisions and polls. Only trip_shared
+// preferences ever reach the profile — see TripPlanningProfile.
+builder.Services.AddScoped<ITripPlanningProfileBuilder, TripPlanningProfileBuilder>();
+builder.Services.AddScoped<IGlunoGroupDecisionService, GlunoGroupDecisionService>();
+// Learning from what the user does. NOT model training — see
+// GlunoFeedbackService: append-only product data, narrowest scope, and nothing
+// influences a plan until the user confirms it.
+builder.Services.AddScoped<IGlunoFeedbackService, GlunoFeedbackService>();
+// Document understanding. OFF by default (Gluno__Documents__Enabled) like every
+// other external integration — shipping the code must not start reading
+// people's booking confirmations.
+builder.Services.AddSingleton<GlunoDocumentConfig>();
+builder.Services.AddSingleton<GlunoDocumentValidator>();
+builder.Services.AddSingleton<IGlunoDocumentReader, AnthropicGlunoDocumentReader>();
+builder.Services.AddScoped<IGlunoDocumentAnalysisService, GlunoDocumentAnalysisService>();
+// Removes working files a crashed analysis left behind. A leaked temp file is
+// a private document outside the storage system built to protect it.
+builder.Services.AddHostedService<GlunoDocumentTempSweeper>();
+// Grounding: the deterministic check that no number reaches the user without
+// a ledger entry behind it. See GlunoGroundingValidator for why a prompt alone
+// cannot achieve this.
+builder.Services.AddSingleton<GlunoGroundingValidator>();
+builder.Services.AddScoped<IGlunoWorkingStateStore, GlunoWorkingStateStore>();
+builder.Services.AddScoped<IGlunoConversationService, GlunoConversationService>();
+builder.Services.AddScoped<IGlunoChatService, GlunoChatService>();
+// The proposal half: the store records what Gluno suggested, and the apply
+// service is the ONLY thing that turns one into a real change — always behind
+// an explicit user action, never from the model.
+builder.Services.AddScoped<IGlunoProposalStore, GlunoProposalStore>();
+builder.Services.AddScoped<IGlunoProposalApplyService, GlunoProposalApplyService>();
+
 builder.Services.AddHttpClient<IExpoPushService, ExpoPushService>();
 builder.Services.AddScoped<INotificationDispatchService, NotificationDispatchService>();
 // Trip-invite emails to addresses without a SideQuest account — sent via
@@ -190,6 +301,21 @@ app.Logger.LogInformation(
     "Push notifications actual Expo delivery: {Status}. NotificationLog rows (in-app notification center) are always recorded regardless of this flag. Manual test-send is unaffected by this flag.",
     pushNotificationsEnabled ? "ENABLED" : "disabled (set Push__Enabled=true to turn on)");
 
+// Development-only. Lets a token rejection be told apart from a transport
+// problem at a glance: if the phone's Supabase project ref differs from the one
+// printed here, every authenticated call is a 401 and no amount of network
+// debugging will help. Issuer, audience and project ref only — never a key,
+// never a JWT.
+if (app.Environment.IsDevelopment())
+{
+    var projectRef = supabaseUrl is null
+        ? "(unset)"
+        : new Uri(supabaseUrl).Host.Split('.').FirstOrDefault() ?? "(unknown)";
+    app.Logger.LogInformation(
+        "[DEV] Auth expects issuer={Issuer} audience={Audience} supabaseProjectRef={ProjectRef}. The mobile app's EXPO_PUBLIC_SUPABASE_URL must carry the same project ref.",
+        $"{supabaseUrl}/auth/v1", supabaseAudience, projectRef);
+}
+
 // Run pending migrations and ensure uploads directory exists
 using (var scope = app.Services.CreateScope())
 {
@@ -288,14 +414,22 @@ app.Use(async (ctx, next) =>
 app.UseAuthorization();
 app.MapControllers();
 
-// Lightweight health endpoint for load balancers / uptime checks.
+// Lightweight health endpoint for load balancers / uptime checks — and the
+// neutral probe that separates "the phone cannot reach this process at all"
+// from "it reached the API and the request itself failed".
+//
+// Deliberately touches nothing: no [Authorize], no database query, no Supabase
+// call. If this answers, the transport chain (Wi-Fi → LAN address → port →
+// Kestrel) is intact and any remaining failure is above it. It exposes only a
+// fixed status string, the service name, the environment name and the server
+// clock — no user data, and nothing that changes production behaviour.
 app.MapGet("/health", () => Results.Ok(new
 {
     status = "ok",
     service = "sidequest-backend",
     environment = app.Environment.EnvironmentName,
     timestamp = DateTime.UtcNow
-}));
+})).AllowAnonymous();
 
 
 app.Run();

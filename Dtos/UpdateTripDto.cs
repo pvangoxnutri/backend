@@ -17,7 +17,12 @@ public class UpdateTripDto
     public bool ClearImage { get; set; }
     public bool ClearSpotifyUrl { get; set; }
     public DateOnly? StartDate { get; set; }
+    // Null here means "leave untouched", the same convention every other
+    // optional field on this DTO uses — it does NOT mean "remove the end
+    // date". Switching an adventure to open-ended is an explicit act, so it
+    // has its own flag, mirroring ClearRevealAt / ClearImage below.
     public DateOnly? EndDate { get; set; }
+    public bool ClearEndDate { get; set; }
     public List<string>? Countries { get; set; }
 
     // Hidden SideQuest fields

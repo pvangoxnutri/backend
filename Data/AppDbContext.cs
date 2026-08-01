@@ -35,9 +35,290 @@ public class AppDbContext : DbContext
     public DbSet<TripDayLocation> TripDayLocations => Set<TripDayLocation>();
     public DbSet<TripDocument> TripDocuments => Set<TripDocument>();
     public DbSet<UserTravelStats> UserTravelStats => Set<UserTravelStats>();
+    public DbSet<GlunoConversation> GlunoConversations => Set<GlunoConversation>();
+    public DbSet<GlunoMessage> GlunoMessages => Set<GlunoMessage>();
+    public DbSet<GlunoProposalRecord> GlunoProposals => Set<GlunoProposalRecord>();
+    public DbSet<GlunoPreference> GlunoPreferences => Set<GlunoPreference>();
+    /// One compact working-memory row per conversation — see GlunoWorkingState.
+    public DbSet<GlunoConversationState> GlunoConversationStates => Set<GlunoConversationState>();
+    /// Idempotency claims for chat sends — see GlunoIdempotencyStore.
+    public DbSet<GlunoTurnRequest> GlunoTurnRequests => Set<GlunoTurnRequest>();
+    /// Document readings — see GlunoDocumentAnalysisService.
+    public DbSet<GlunoDocumentAnalysis> GlunoDocumentAnalyses => Set<GlunoDocumentAnalysis>();
+    /// Group decisions and their votes — see GlunoGroupDecisionService.
+    public DbSet<GlunoGroupDecision> GlunoGroupDecisions => Set<GlunoGroupDecision>();
+    public DbSet<GlunoGroupVote> GlunoGroupVotes => Set<GlunoGroupVote>();
+    /// Append-only learning signals — see GlunoFeedbackService.
+    public DbSet<GlunoFeedbackEvent> GlunoFeedbackEvents => Set<GlunoFeedbackEvent>();
+    public DbSet<GlunoPreferenceCandidate> GlunoPreferenceCandidates => Set<GlunoPreferenceCandidate>();
+    public DbSet<GlunoRejection> GlunoRejections => Set<GlunoRejection>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        // ── Gluno ─────────────────────────────────────────────────────────
+        // Conversations die with their owner. They are personal — there is no
+        // path that shows one user another user's Gluno history — so keeping
+        // them after the account is gone would serve nobody.
+        modelBuilder.Entity<GlunoConversation>()
+            .HasOne(c => c.User)
+            .WithMany()
+            .HasForeignKey(c => c.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // A trip-scoped conversation survives its Adventure being deleted, as
+        // a global one: SetNull rather than Cascade, because what the user
+        // asked and what Gluno answered is still theirs. The context builder
+        // already treats a missing trip as "no Adventure selected".
+        modelBuilder.Entity<GlunoConversation>()
+            .HasOne(c => c.Trip)
+            .WithMany()
+            .HasForeignKey(c => c.TripId)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        // The conversation list query: this user's, newest first.
+        modelBuilder.Entity<GlunoConversation>()
+            .HasIndex(c => new { c.UserId, c.UpdatedAt });
+
+        modelBuilder.Entity<GlunoConversation>()
+            .HasIndex(c => new { c.UserId, c.TripId });
+
+        modelBuilder.Entity<GlunoConversation>()
+            .Property(c => c.Title)
+            .HasMaxLength(120);
+
+        modelBuilder.Entity<GlunoMessage>()
+            .HasOne(m => m.Conversation)
+            .WithMany()
+            .HasForeignKey(m => m.ConversationId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // Every read of a conversation is "its messages, oldest first".
+        modelBuilder.Entity<GlunoMessage>()
+            .HasIndex(m => new { m.ConversationId, m.CreatedAt });
+
+        modelBuilder.Entity<GlunoMessage>()
+            .Property(m => m.Role)
+            .HasMaxLength(20);
+
+        modelBuilder.Entity<GlunoMessage>()
+            .Property(m => m.ToolName)
+            .HasMaxLength(60);
+
+        modelBuilder.Entity<GlunoMessage>()
+            .Property(m => m.ToolCallId)
+            .HasMaxLength(80);
+
+        // Proposals die with their conversation — a proposal without the
+        // exchange that produced it is unreviewable, so keeping it would only
+        // leave an un-auditable pending change behind.
+        modelBuilder.Entity<GlunoProposalRecord>()
+            .HasOne(p => p.Conversation)
+            .WithMany()
+            .HasForeignKey(p => p.ConversationId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<GlunoProposalRecord>()
+            .HasOne(p => p.User)
+            .WithMany()
+            .HasForeignKey(p => p.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // Deleting the Adventure leaves the proposal readable as history; it
+        // can no longer be applied, because apply re-resolves the trip and
+        // finds nothing.
+        modelBuilder.Entity<GlunoProposalRecord>()
+            .HasOne(p => p.Trip)
+            .WithMany()
+            .HasForeignKey(p => p.TripId)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        // The chat's own lookup: every proposal attached to a rendered turn.
+        modelBuilder.Entity<GlunoProposalRecord>()
+            .HasIndex(p => p.MessageId);
+
+        modelBuilder.Entity<GlunoProposalRecord>()
+            .HasIndex(p => new { p.UserId, p.Status });
+
+        modelBuilder.Entity<GlunoProposalRecord>()
+            .Property(p => p.ActionType)
+            .HasMaxLength(60);
+
+        modelBuilder.Entity<GlunoProposalRecord>()
+            .Property(p => p.Status)
+            .HasMaxLength(20);
+
+        modelBuilder.Entity<GlunoProposalRecord>()
+            .Property(p => p.FailureCode)
+            .HasMaxLength(60);
+
+        modelBuilder.Entity<GlunoProposalRecord>()
+            .Property(p => p.Summary)
+            .HasMaxLength(300);
+
+        // Preferences die with their user, and a conversation-scoped one dies
+        // with its conversation — "forget this chat" has to mean the things
+        // said in it are gone too.
+        modelBuilder.Entity<GlunoPreference>()
+            .HasOne(p => p.User)
+            .WithMany()
+            .HasForeignKey(p => p.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<GlunoPreference>()
+            .HasIndex(p => new { p.UserId, p.Key });
+
+        modelBuilder.Entity<GlunoPreference>()
+            .HasIndex(p => new { p.UserId, p.ConversationId });
+
+        modelBuilder.Entity<GlunoPreference>()
+            .HasIndex(p => new { p.UserId, p.TripId });
+
+        modelBuilder.Entity<GlunoPreference>()
+            .Property(p => p.Key)
+            .HasMaxLength(40);
+
+        modelBuilder.Entity<GlunoPreference>()
+            .Property(p => p.Scope)
+            .HasMaxLength(20);
+
+        modelBuilder.Entity<GlunoPreference>()
+            .Property(p => p.Value)
+            .HasMaxLength(240);
+
+        // Working memory: exactly one row per conversation, and it goes when
+        // the conversation goes. Nothing in it outlives the chat it belongs to.
+        modelBuilder.Entity<GlunoConversationState>()
+            .HasIndex(s => s.ConversationId)
+            .IsUnique();
+
+        modelBuilder.Entity<GlunoConversationState>()
+            .HasOne<GlunoConversation>()
+            .WithMany()
+            .HasForeignKey(s => s.ConversationId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // The unique index IS the idempotency guarantee. Two concurrent sends
+        // with the same key race here, and the database decides — a read-then-
+        // write check in application code would let both through.
+        modelBuilder.Entity<GlunoTurnRequest>()
+            .HasIndex(r => new { r.UserId, r.ConversationId, r.IdempotencyKey })
+            .IsUnique();
+
+        modelBuilder.Entity<GlunoTurnRequest>()
+            .HasOne<GlunoConversation>()
+            .WithMany()
+            .HasForeignKey(r => r.ConversationId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // Deleting the document deletes its readings. An extraction is derived
+        // from a file, and keeping it after the file is gone leaves a record of
+        // somebody's booking that they believe they removed.
+        modelBuilder.Entity<GlunoDocumentAnalysis>()
+            .HasOne(a => a.Document)
+            .WithMany()
+            .HasForeignKey(a => a.DocumentId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // The person who asked for the analysis. Without this the row survives
+        // their account: an orphaned UserId next to the flight numbers, hotel
+        // names and booking references read out of their documents. Trip
+        // deletion is already covered by the document cascade above.
+        modelBuilder.Entity<GlunoDocumentAnalysis>()
+            .HasOne<User>()
+            .WithMany()
+            .HasForeignKey(a => a.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // The dedupe lookup: "have we already read these exact bytes?"
+        modelBuilder.Entity<GlunoDocumentAnalysis>()
+            .HasIndex(a => new { a.DocumentId, a.SourceFileHash });
+
+        modelBuilder.Entity<GlunoDocumentAnalysis>()
+            .HasIndex(a => new { a.TripId, a.Status });
+
+        modelBuilder.Entity<GlunoGroupDecision>()
+            .HasOne(d => d.Trip)
+            .WithMany()
+            .HasForeignKey(d => d.TripId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<GlunoGroupDecision>()
+            .HasIndex(d => new { d.TripId, d.Status });
+
+        // Optimistic concurrency on the decision row: two people resolving a
+        // poll at the same moment must not silently overwrite each other.
+        modelBuilder.Entity<GlunoGroupDecision>()
+            .Property(d => d.RowVersion)
+            .IsRowVersion();
+
+        // ONE vote per member per decision, enforced by the database. Changing
+        // a vote updates the row; it never adds a second.
+        modelBuilder.Entity<GlunoGroupVote>()
+            .HasIndex(v => new { v.DecisionId, v.UserId })
+            .IsUnique();
+
+        modelBuilder.Entity<GlunoGroupVote>()
+            .HasOne(v => v.Decision)
+            .WithMany()
+            .HasForeignKey(v => v.DecisionId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // ── Learning signals ──────────────────────────────────────────────
+        //
+        // All three cascade with the USER. Account deletion must take every
+        // feedback row, candidate and rejection with it — this is somebody's
+        // record of what they liked and turned down, and it has no reason to
+        // survive them.
+        modelBuilder.Entity<GlunoFeedbackEvent>()
+            .HasOne<User>()
+            .WithMany()
+            .HasForeignKey(e => e.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // Deleting an Adventure takes its trip-scoped feedback with it.
+        modelBuilder.Entity<GlunoFeedbackEvent>()
+            .HasOne<Trip>()
+            .WithMany()
+            .HasForeignKey(e => e.TripId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<GlunoFeedbackEvent>()
+            .HasIndex(e => new { e.UserId, e.EventType });
+
+        modelBuilder.Entity<GlunoFeedbackEvent>()
+            .HasIndex(e => new { e.MessageId, e.SupersededAt });
+
+        modelBuilder.Entity<GlunoPreferenceCandidate>()
+            .HasOne<User>()
+            .WithMany()
+            .HasForeignKey(c => c.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<GlunoPreferenceCandidate>()
+            .HasOne<Trip>()
+            .WithMany()
+            .HasForeignKey(c => c.TripId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // The observation lookup: one live candidate per user, key and trip.
+        modelBuilder.Entity<GlunoPreferenceCandidate>()
+            .HasIndex(c => new { c.UserId, c.Key, c.TripId, c.Status });
+
+        modelBuilder.Entity<GlunoRejection>()
+            .HasOne<User>()
+            .WithMany()
+            .HasForeignKey(r => r.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<GlunoRejection>()
+            .HasOne<Trip>()
+            .WithMany()
+            .HasForeignKey(r => r.TripId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<GlunoRejection>()
+            .HasIndex(r => new { r.UserId, r.TripId, r.ExpiresAt });
+
         modelBuilder.Entity<TripEvent>()
             .HasOne(e => e.Trip)
             .WithMany()
@@ -53,10 +334,13 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<ChatPresenceEntry>()
             .HasKey(cp => new { cp.TripId, cp.UserId });
 
-        // "Only one location per calendar day" enforced at the DB level,
-        // not just in application code.
+        // A day may hold SEVERAL ordered locations, so uniqueness moved from
+        // "one row per date" to "one row per position within a date". That is
+        // what keeps SortIndex contiguous and unambiguous at the DB level
+        // rather than only in application code — two rows can never both claim
+        // to be the day's main location.
         modelBuilder.Entity<TripDayLocation>()
-            .HasIndex(d => new { d.TripId, d.StartDate })
+            .HasIndex(d => new { d.TripId, d.StartDate, d.SortIndex })
             .IsUnique();
 
         // Without this, EF's convention-based FK discovery doesn't match

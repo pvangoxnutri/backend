@@ -17,11 +17,26 @@
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="9.*" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="9.0.*" />
     <PackageReference Include="HtmlAgilityPack" Version="1.*" />
+    <!-- Gluno's AI provider. The official Anthropic SDK — the key it reads
+         (Gluno:ApiKey / ANTHROPIC_API_KEY) is server-side only and never
+         reaches the mobile app. See Services/Gluno/. -->
+    <PackageReference Include="Anthropic" Version="12.*" />
   </ItemGroup>
 
   <ItemGroup>
     <Compile Remove="Tools\\**\\*.cs" />
     <None Include="Tools\\**\\*" />
+  </ItemGroup>
+
+  <!-- Gluno's eval suite is its own project (Gluno.Evals). It lives under
+       backend/ for proximity, but the Web SDK globs **/*.cs, so without this
+       the API project would try to compile the tests — and would then need a
+       test framework it must never ship with. -->
+  <ItemGroup>
+    <Compile Remove="Gluno.Evals\**" />
+    <Content Remove="Gluno.Evals\**" />
+    <None Remove="Gluno.Evals\**" />
+    <EmbeddedResource Remove="Gluno.Evals\**" />
   </ItemGroup>
 
 </Project>

@@ -18,7 +18,39 @@ public class TripWeatherDto
     public DateTime? UpdatedAt { get; set; }
     public bool Stale { get; set; }
     public string? Attribution { get; set; }
+    // The per-DAY forecast, one entry per trip day, from that day's MAIN
+    // location. Unchanged shape and meaning — an older client that only reads
+    // this keeps working exactly as before.
     public List<TripWeatherDayDto> Days { get; set; } = new();
+    // One forecast per STORED day-location row, including the additional stops
+    // a day may have. Empty for a trip whose days are all carried forward or
+    // fall back to the destination, which is precisely when there is nothing
+    // extra to say. Additive: nothing above depends on it.
+    public List<TripWeatherLocationDto> LocationForecasts { get; set; } = new();
+}
+
+// A forecast tied to one specific stored place, so a client can pick the right
+// weather when a single day holds several. Carries the coordinates and label
+// alongside the id, which is what lets a slide match by placeId, coordinates or
+// label when it has no id of its own yet.
+public class TripWeatherLocationDto
+{
+    public Guid DayLocationId { get; set; }
+    public DateOnly Date { get; set; }
+    public int SortIndex { get; set; }
+    public string LocationLabel { get; set; } = string.Empty;
+    public double Latitude { get; set; }
+    public double Longitude { get; set; }
+    public string? PlaceId { get; set; }
+    // Same availability contract as TripWeatherDayDto: false means the provider
+    // had no real forecast, and every value below is null rather than a
+    // fabricated zero.
+    public bool IsForecastAvailable { get; set; }
+    public string? Code { get; set; }
+    public double? TempMinC { get; set; }
+    public double? TempMaxC { get; set; }
+    public int? PrecipitationProbability { get; set; }
+    public double? UvIndexMax { get; set; }
 }
 
 public class TripWeatherDayDto

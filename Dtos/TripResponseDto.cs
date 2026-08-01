@@ -11,7 +11,9 @@ public class TripResponseDto
     public List<Guid> OwnerIds { get; set; } = new();
     public string? Teaser { get; set; }
     public DateOnly StartDate { get; set; }
-    public DateOnly EndDate { get; set; }
+    // Null = open-ended. Clients render this as "Ongoing" rather than a date
+    // range; they must never fill it in with a placeholder.
+    public DateOnly? EndDate { get; set; }
     public DateTime CreatedAt { get; set; }
     public Guid OwnerId { get; set; }
     public string? ImageUrl { get; set; }

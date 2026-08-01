@@ -33,7 +33,15 @@ public class TripDayLocationService
         double? tripDestinationLatitude,
         double? tripDestinationLongitude)
     {
-        var sorted = dayLocations.OrderBy(d => d.StartDate).ToList();
+        // ONLY the main location of each day (SortIndex 0) is an anchor. A day's
+        // additional stops apply to that day alone and must never roll forward,
+        // so they are filtered out before the scan rather than skipped inside
+        // it — that way "the most recent anchor" cannot accidentally land on an
+        // extra stop.
+        var sorted = dayLocations
+            .Where(d => d.SortIndex == 0)
+            .OrderBy(d => d.StartDate)
+            .ToList();
         var result = new List<ResolvedDayLocation?>();
         var pointer = -1;
 

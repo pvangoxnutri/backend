@@ -19,24 +19,30 @@ public class TripsController : ControllerBase
     private readonly AppDbContext _db;
     private readonly ISupabaseStorageService _storage;
     private readonly ITripDocumentStorageService _documentStorage;
+    private readonly IChatImageStorageService _chatImageStorage;
     private readonly ILogger<TripsController> _logger;
     private readonly INotificationDispatchService _notifications;
     private readonly IEmailSender _emailSender;
+    private readonly IWebHostEnvironment _env;
 
     public TripsController(
         AppDbContext db,
         ISupabaseStorageService storage,
         ITripDocumentStorageService documentStorage,
+        IChatImageStorageService chatImageStorage,
         ILogger<TripsController> logger,
         INotificationDispatchService notifications,
-        IEmailSender emailSender)
+        IEmailSender emailSender,
+        IWebHostEnvironment env)
     {
         _db = db;
         _storage = storage;
         _documentStorage = documentStorage;
+        _chatImageStorage = chatImageStorage;
         _logger = logger;
         _notifications = notifications;
         _emailSender = emailSender;
+        _env = env;
     }
 
     // ── Permission helpers ────────────────────────────────────────────────────
@@ -188,6 +194,7 @@ Not expecting this? You can safely ignore this email.";
             // spoil a hidden reveal.
             CustomCategoryLabel = canViewFull ? activity.CustomCategoryLabel : null,
             ImageUrl = activity.ImageUrl,
+            ExcludeFromSlideshow = activity.ExcludeFromSlideshow,
             SpotifyUrl = activity.SpotifyUrl,
             Visibility = activity.Visibility,
             RevealAt = activity.RevealAt,
@@ -211,18 +218,11 @@ Not expecting this? You can safely ignore this email.";
     // Hotel-stay (check-out) validation shared by create/update/move:
     // check-out strictly after check-in, whole stay inside the trip range,
     // and no check-out time without a check-out date.
+    // Forwarders. The rules themselves live in TripEditRules so that applying
+    // a Gluno proposal goes through exactly the same checks as these
+    // endpoints — see that file for why a second copy would be dangerous.
     private static string? ValidateStayRange(DateOnly date, DateOnly? endDate, string? endTime, Trip trip)
-    {
-        if (!endDate.HasValue)
-        {
-            return endTime != null ? "Check-out time requires a check-out date." : null;
-        }
-        if (endDate.Value <= date)
-            return "Check-out must be after check-in.";
-        if (endDate.Value > trip.EndDate)
-            return $"Check-out must be within the trip dates ({trip.StartDate:yyyy-MM-dd} – {trip.EndDate:yyyy-MM-dd}).";
-        return null;
-    }
+        => TripEditRules.ValidateStayRange(date, endDate, endTime, trip);
 
     private static string? ValidateActivityPayload(
         string visibility,
@@ -258,15 +258,10 @@ Not expecting this? You can safely ignore this email.";
         return null;
     }
 
+    // A null end date is valid on its own — it means "unknown yet", not
+    // "invalid". Only a present end date that precedes the start is rejected.
     private static string? ValidateTripDateRange(DateOnly? startDate, DateOnly? endDate)
-    {
-        if (startDate.HasValue && endDate.HasValue && endDate.Value < startDate.Value)
-        {
-            return "End date must be the same day or later than start date.";
-        }
-
-        return null;
-    }
+        => TripEditRules.ValidateTripDateRange(startDate, endDate);
 
     private static string NormalizeInviteCode(string? inviteCode)
     {
@@ -302,44 +297,8 @@ Not expecting this? You can safely ignore this email.";
     // moment a Time is set or changed, never on every load.
     // Shifts existing siblings' SortIndex itself (and saves that) — the
     // caller still needs to save the target activity's own new SortIndex.
-    private async Task<int> InsertChronologicallyAsync(Guid tripId, DateOnly date, string? time, Guid? excludeActivityId)
-    {
-        var siblingsQuery = _db.TripActivities
-            .Where(a => a.TripId == tripId && a.Date == date);
-        if (excludeActivityId.HasValue)
-        {
-            siblingsQuery = siblingsQuery.Where(a => a.Id != excludeActivityId.Value);
-        }
-
-        if (string.IsNullOrEmpty(time))
-        {
-            // No time to sort by — same as before, just append to the end.
-            return (await siblingsQuery.Select(a => (int?)a.SortIndex).MaxAsync() ?? -1) + 1;
-        }
-
-        var siblings = await siblingsQuery.OrderBy(a => a.SortIndex).ToListAsync();
-
-        var insertAt = siblings.Count;
-        for (var i = 0; i < siblings.Count; i++)
-        {
-            if (!string.IsNullOrEmpty(siblings[i].Time) && string.CompareOrdinal(siblings[i].Time, time) > 0)
-            {
-                insertAt = i;
-                break;
-            }
-        }
-
-        for (var i = insertAt; i < siblings.Count; i++)
-        {
-            siblings[i].SortIndex = i + 1;
-        }
-        if (siblings.Count > insertAt)
-        {
-            await _db.SaveChangesAsync();
-        }
-
-        return insertAt;
-    }
+    private Task<int> InsertChronologicallyAsync(Guid tripId, DateOnly date, string? time, Guid? excludeActivityId)
+        => TripEditRules.InsertChronologicallyAsync(_db, tripId, date, time, excludeActivityId);
 
     // A member may add new activities (or reorder existing ones, or edit/
     // delete an existing non-SideQuest activity) when the owner allows
@@ -347,15 +306,8 @@ Not expecting this? You can safely ignore this email.";
     // trip owner. SideQuests are the exception — editing/deleting THOSE is
     // always creator-only regardless of this; see IsSideQuest,
     // BuildActivityResponse, UpdateActivity and DeleteActivity.
-    private async Task<bool> CanEditActivitiesAsync(Guid tripId, Guid userId)
-    {
-        if (!await IsTripMember(tripId, userId)) return false;
-        var trip = await _db.Trips.FindAsync(tripId);
-        if (trip == null) return false;
-        if (trip.MembersCanEdit) return true;
-        var ownerIds = await GetOwnerIds(tripId);
-        return ownerIds.Contains(userId);
-    }
+    private Task<bool> CanEditActivitiesAsync(Guid tripId, Guid userId)
+        => TripEditRules.CanEditActivitiesAsync(_db, tripId, userId);
 
     // Both must be present and inside valid ranges — a half-set or bogus
     // pair is treated as "no coordinates" rather than rejected, since
@@ -667,14 +619,21 @@ Not expecting this? You can safely ignore this email.";
         if (!isOwner && !isAdmin) return Forbid();
 
         var nextStartDate = dto.StartDate ?? trip.StartDate;
-        var nextEndDate = dto.EndDate ?? trip.EndDate;
+        // ClearEndDate wins over EndDate: switching to open-ended is explicit,
+        // and a client that sends both meant the removal.
+        var nextEndDate = dto.ClearEndDate ? null : (dto.EndDate ?? trip.EndDate);
         var tripDateError = ValidateTripDateRange(nextStartDate, nextEndDate);
         if (tripDateError != null) return BadRequest(tripDateError);
 
+        // Removing the end date only ever WIDENS the range, so nothing can be
+        // stranded by it — the upper bound simply stops existing. Only the
+        // lower bound, and an end date that is actually set, can strand an
+        // activity.
         var outOfRangeActivities = await _db.TripActivities
             .Where(activity =>
                 activity.TripId == id
-                && (activity.Date < nextStartDate || activity.Date > nextEndDate))
+                && (activity.Date < nextStartDate
+                    || (nextEndDate != null && activity.Date > nextEndDate)))
             .Select(activity => new { activity.Title, activity.Date })
             .ToListAsync();
 
@@ -717,7 +676,8 @@ Not expecting this? You can safely ignore this email.";
             if (dto.Visibility != null) trip.Visibility = dto.Visibility;
             if (dto.Teaser != null) trip.Teaser = dto.Teaser;
             if (dto.StartDate.HasValue) trip.StartDate = dto.StartDate.Value;
-            if (dto.EndDate.HasValue) trip.EndDate = dto.EndDate.Value;
+            if (dto.ClearEndDate) trip.EndDate = null;
+            else if (dto.EndDate.HasValue) trip.EndDate = dto.EndDate.Value;
             if (dto.ClearRevealAt) trip.RevealAt = null;
             else if (dto.RevealAt.HasValue) trip.RevealAt = dto.RevealAt.Value;
             if (dto.MembersCanEdit.HasValue) trip.MembersCanEdit = dto.MembersCanEdit.Value;
@@ -727,7 +687,8 @@ Not expecting this? You can safely ignore this email.";
         {
             // Admins can always change dates and reveal_at (but not content fields)
             if (dto.StartDate.HasValue) trip.StartDate = dto.StartDate.Value;
-            if (dto.EndDate.HasValue) trip.EndDate = dto.EndDate.Value;
+            if (dto.ClearEndDate) trip.EndDate = null;
+            else if (dto.EndDate.HasValue) trip.EndDate = dto.EndDate.Value;
             if (dto.ClearRevealAt) trip.RevealAt = null;
             else if (dto.RevealAt.HasValue) trip.RevealAt = dto.RevealAt.Value;
             if (dto.Visibility != null) trip.Visibility = dto.Visibility;
@@ -788,15 +749,27 @@ Not expecting this? You can safely ignore this email.";
         if (!ownerIds.Contains(userId) && !isAdmin) return Forbid();
 
         // Collect image URLs that will become orphaned by this deletion.
+        // Cover and activity images are public-bucket URLs; chat images can be
+        // either, so they are split by reference type below.
         var images = new List<string?> { trip.ImageUrl };
         images.AddRange(await _db.TripActivities
             .Where(a => a.TripId == id)
             .Select(a => a.ImageUrl)
             .ToListAsync(cancellationToken));
-        images.AddRange(await _db.ChatMessages
-            .Where(m => m.TripId == id)
+
+        var chatImageRefs = await _db.ChatMessages
+            .Where(m => m.TripId == id && m.ImageUrl != null)
             .Select(m => m.ImageUrl)
-            .ToListAsync(cancellationToken));
+            .ToListAsync(cancellationToken);
+
+        var privateChatImagePaths = new List<string>();
+        foreach (var reference in chatImageRefs)
+        {
+            if (ChatImageReference.TryGetObjectPathForCleanup(reference, out var objectPath))
+                privateChatImagePaths.Add(objectPath);
+            else
+                images.Add(reference);
+        }
 
         var documentPaths = await _db.TripDocuments
             .Where(d => d.TripId == id)
@@ -820,6 +793,15 @@ Not expecting this? You can safely ignore this email.";
         // Best-effort: never block the user-facing delete on storage cleanup.
         await _storage.DeleteManyByUrlAsync(images, cancellationToken);
 
+        if (privateChatImagePaths.Count > 0
+            && !await _chatImageStorage.DeleteManyAsync(privateChatImagePaths, cancellationToken))
+        {
+            // Count only — never the paths.
+            _logger.LogWarning(
+                "Deleting trip {TripId} could not remove every private chat image ({Count} attempted).",
+                id, privateChatImagePaths.Count);
+        }
+
         return NoContent();
     }
 
@@ -835,12 +817,30 @@ Not expecting this? You can safely ignore this email.";
         var onlineCutoff = PresenceHelper.OnlineCutoff;
         var members = await _db.TripMembers
             .Where(tm => tm.TripId == id)
+            // Without this the order was whatever Postgres happened to produce,
+            // which is not stable: it changes with the chosen plan and with heap
+            // order after any row update. Clients poll this endpoint every few
+            // seconds for the online dots, so an unordered result meant the
+            // avatar row visibly reshuffled on its own — and again on every
+            // navigation back to Home or an adventure.
+            //
+            // Owner first, then by when they joined, then by user id as the
+            // final tie-breaker. Deliberately NOT by anything that changes on
+            // its own: sorting by IsOnline or LastSeenAt would reintroduce the
+            // exact shuffling this fixes.
+            .OrderByDescending(tm => tm.IsOwner)
+            .ThenBy(tm => tm.JoinedAt)
+            .ThenBy(tm => tm.UserId)
             .Select(tm => new TripMemberDto
             {
                 Id = tm.User.Id,
                 Name = tm.User.Name,
                 AvatarUrl = tm.User.AvatarUrl,
                 IsOwner = tm.IsOwner,
+                // Ordering data, not profile data: it lets the client reproduce
+                // this exact order defensively instead of trusting response
+                // order, so cached and freshly-fetched lists agree.
+                JoinedAt = tm.JoinedAt,
                 IsOnline = tm.User.LastSeenAt != null && tm.User.LastSeenAt > onlineCutoff
             })
             .ToListAsync();
@@ -1323,10 +1323,12 @@ Not expecting this? You can safely ignore this email.";
 
         // The activity date must sit inside the trip's range — otherwise it
         // shows up on the calendar before the trip starts / after it ends.
+        // An open-ended adventure accepts any date from the start onwards, so
+        // a traveller can plan ahead without first inventing an end date.
         var tripForRange = await _db.Trips.FindAsync(id);
         if (tripForRange == null) return NotFound();
-        if (dto.Date < tripForRange.StartDate || dto.Date > tripForRange.EndDate)
-            return BadRequest($"Activity date must be within the trip dates ({tripForRange.StartDate:yyyy-MM-dd} – {tripForRange.EndDate:yyyy-MM-dd}).");
+        if (!TripDateRange.Contains(tripForRange.StartDate, tripForRange.EndDate, dto.Date))
+            return BadRequest(TripDateRange.OutOfRangeMessage(tripForRange.StartDate, tripForRange.EndDate));
 
         var stayError = ValidateStayRange(dto.Date, dto.EndDate, NormalizeOptionalText(dto.EndTime), tripForRange);
         if (stayError != null) return BadRequest(stayError);
@@ -1357,6 +1359,10 @@ Not expecting this? You can safely ignore this email.";
             Category = NormalizeOptionalText(dto.Category),
             CustomCategoryLabel = NormalizeOptionalText(dto.CustomCategoryLabel),
             ImageUrl = NormalizeOptionalText(dto.ImageUrl),
+            // Only meaningful alongside an image. Storing it without one would
+            // leave a stale "excluded" flag that quietly hides the FIRST photo
+            // the user adds later.
+            ExcludeFromSlideshow = NormalizeOptionalText(dto.ImageUrl) != null && dto.ExcludeFromSlideshow,
             SpotifyUrl = NormalizeOptionalText(dto.SpotifyUrl),
             Visibility = finalVisibility,
             RevealAt = finalVisibility == "hidden" ? dto.RevealAt : null,
@@ -1450,8 +1456,8 @@ Not expecting this? You can safely ignore this email.";
         {
             var tripForRange = await _db.Trips.FindAsync(id);
             if (tripForRange == null) return NotFound();
-            if (dto.Date.Value < tripForRange.StartDate || dto.Date.Value > tripForRange.EndDate)
-                return BadRequest($"Activity date must be within the trip dates ({tripForRange.StartDate:yyyy-MM-dd} – {tripForRange.EndDate:yyyy-MM-dd}).");
+            if (!TripDateRange.Contains(tripForRange.StartDate, tripForRange.EndDate, dto.Date.Value))
+                return BadRequest(TripDateRange.OutOfRangeMessage(tripForRange.StartDate, tripForRange.EndDate));
         }
 
         // Resolve the stay (check-out) the update would result in, and
@@ -1497,6 +1503,11 @@ Not expecting this? You can safely ignore this email.";
         else if (dto.CustomCategoryLabel != null) activity.CustomCategoryLabel = NormalizeOptionalText(dto.CustomCategoryLabel);
         if (dto.ClearImage) activity.ImageUrl = null;
         else if (dto.ImageUrl != null) activity.ImageUrl = NormalizeOptionalText(dto.ImageUrl);
+        if (dto.ExcludeFromSlideshow.HasValue) activity.ExcludeFromSlideshow = dto.ExcludeFromSlideshow.Value;
+        // Removing the image removes the thing being excluded. Leaving the flag
+        // set would silently hide whatever photo is added next, which the user
+        // never asked for.
+        if (activity.ImageUrl == null) activity.ExcludeFromSlideshow = false;
         activity.SpotifyUrl = nextSpotifyUrl;
 
         activity.Visibility = nextVisibility;
@@ -1606,8 +1617,8 @@ Not expecting this? You can safely ignore this email.";
         if (trip == null) return NotFound();
 
         // Same range rule as editing an activity's date.
-        if (dto.Date < trip.StartDate || dto.Date > trip.EndDate)
-            return BadRequest($"Activity date must be within the trip dates ({trip.StartDate:yyyy-MM-dd} – {trip.EndDate:yyyy-MM-dd}).");
+        if (!TripDateRange.Contains(trip.StartDate, trip.EndDate, dto.Date))
+            return BadRequest(TripDateRange.OutOfRangeMessage(trip.StartDate, trip.EndDate));
 
         var activities = await _db.TripActivities
             .Where(a => a.TripId == id && dto.ActivityIds.Contains(a.Id))
@@ -1823,7 +1834,10 @@ Not expecting this? You can safely ignore this email.";
 
         var trips = await _db.Trips
             .Where(t => memberTripIds.Contains(t.Id) && t.Status == "completed")
-            .OrderByDescending(t => t.EndDate)
+            // An adventure completed without ever getting an end date sorts by
+            // when it started — never last behind everything, which is where a
+            // raw null would put it.
+            .OrderByDescending(t => t.EndDate ?? t.StartDate)
             .ToListAsync();
 
         var tripIds = trips.Select(t => t.Id).ToList();
@@ -2003,6 +2017,10 @@ Not expecting this? You can safely ignore this email.";
                 EndTime = activity.EndTime,
                 Description = activity.Description,
                 ImageUrl = activity.ImageUrl,
+                // The original author's choice to keep this photo out of the
+                // slideshow travels with the copy — it is a property of the
+                // image, not of the trip it happened to live in.
+                ExcludeFromSlideshow = activity.ExcludeFromSlideshow,
                 SpotifyUrl = activity.SpotifyUrl,
                 Visibility = "public",
                 CreatedAt = DateTime.UtcNow,
@@ -2016,12 +2034,27 @@ Not expecting this? You can safely ignore this email.";
         return Ok(BuildResponse(newTrip, ownerIds, canViewFull: true));
     }
 
+    // The three endpoints below are development fixtures. They were
+    // [AllowAnonymous] and identified their target user by a query-string email
+    // alone, which made them unauthenticated writes into any account whose
+    // address you could guess: seeding an adventure into a stranger's account,
+    // marking their trip completed, and — through the 404-vs-200 difference —
+    // confirming whether an email is registered at all.
+    //
+    // They are kept, because they are genuinely useful locally, but this guard
+    // makes them non-existent outside Development. A 404 rather than a 403, so
+    // production does not even admit the route is there.
+    private ActionResult? DevelopmentOnly()
+        => _env.IsDevelopment() ? null : NotFound();
+
     // ── POST /api/trips/seed ────────────────────────────────────────────────────
     // Development only: create test adventure with activities for user by email
     [HttpPost("seed")]
     [AllowAnonymous]
     public async Task<ActionResult<object>> SeedTestData([FromQuery] string email)
     {
+        if (DevelopmentOnly() is { } blocked) return blocked;
+
         var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == email);
         if (user == null)
             return NotFound($"User with email {email} not found");
@@ -2129,6 +2162,8 @@ Not expecting this? You can safely ignore this email.";
     [AllowAnonymous]
     public async Task<ActionResult> AddPastEvent([FromQuery] string email)
     {
+        if (DevelopmentOnly() is { } blocked) return blocked;
+
         var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == email);
         if (user == null)
             return NotFound($"User with email {email} not found");
@@ -2164,6 +2199,8 @@ Not expecting this? You can safely ignore this email.";
     [AllowAnonymous]
     public async Task<ActionResult> MarkCompleted([FromQuery] string email)
     {
+        if (DevelopmentOnly() is { } blocked) return blocked;
+
         var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == email);
         if (user == null)
             return NotFound($"User with email {email} not found");
@@ -2209,7 +2246,9 @@ public class SharedTripDto
     public string? Description { get; set; }
     public string Destination { get; set; } = "";
     public DateOnly StartDate { get; set; }
-    public DateOnly EndDate { get; set; }
+    // Null when the adventure was completed without a known end date. The
+    // share page renders "Ongoing" rather than inventing one.
+    public DateOnly? EndDate { get; set; }
     public string? ImageUrl { get; set; }
     public string? SpotifyUrl { get; set; }
     public string OwnerName { get; set; } = "";

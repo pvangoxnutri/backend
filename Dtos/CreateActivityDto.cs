@@ -29,6 +29,10 @@ public class CreateActivityDto
 
     public string? ImageUrl { get; set; }
 
+    // Defaults to false (included) — an older client that omits the field
+    // gets exactly the behaviour it has today.
+    public bool ExcludeFromSlideshow { get; set; }
+
     public string? SpotifyUrl { get; set; }
 
     public string Visibility { get; set; } = "public";

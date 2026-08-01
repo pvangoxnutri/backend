@@ -18,24 +18,42 @@ public class TripChatController : ControllerBase
     private readonly AppDbContext _db;
     private readonly LinkPreviewService _linkPreviewService;
     private readonly INotificationDispatchService _notifications;
+    private readonly ISupabaseStorageService _storage;
+    private readonly IChatImageStorageService _chatImages;
     private readonly ILogger<TripChatController> _logger;
 
     public TripChatController(
         AppDbContext db,
         LinkPreviewService linkPreviewService,
         INotificationDispatchService notifications,
+        ISupabaseStorageService storage,
+        IChatImageStorageService chatImages,
         ILogger<TripChatController> logger)
     {
         _db = db;
         _linkPreviewService = linkPreviewService;
         _notifications = notifications;
+        _storage = storage;
+        _chatImages = chatImages;
         _logger = logger;
     }
+
+    // Same ceiling as the public image endpoint — this change is about where
+    // chat photos live, not about what the app accepts.
+    private const long MaxImageBytes = 10L * 1024L * 1024L; // 10 MB
 
     private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
 
     private async Task<bool> IsMember(Guid tripId, Guid userId, CancellationToken ct = default)
         => await _db.TripMembers.AnyAsync(tm => tm.TripId == tripId && tm.UserId == userId, ct);
+
+    // The only place a stored ImageUrl is turned into something a client sees.
+    // Legacy rows still hold a public URL and keep rendering as before; private
+    // references are replaced by a flag, so no object path ever leaves the API.
+    private static (string? ImageUrl, bool HasPrivateImage) MapImage(string? stored)
+        => ChatImageReference.IsPrivate(stored)
+            ? (null, true)
+            : (stored, false);
 
     // Reactions accept any emoji the client's keyboard produces (the six
     // quick reactions PLUS the "+" keyboard picker). We don't whitelist a
@@ -135,13 +153,15 @@ public class TripChatController : ControllerBase
         foreach (var m in messages)
         {
             var linkPreview = await GetLinkPreviewAsync(m.Text, ct);
+            var (imageUrl, hasPrivateImage) = MapImage(m.ImageUrl);
             result.Add(new ChatMessageDto
             {
                 Id = m.Id,
                 UserId = m.UserId,
                 UserName = m.UserName,
                 Text = m.Text,
-                ImageUrl = m.ImageUrl,
+                ImageUrl = imageUrl,
+                HasPrivateImage = hasPrivateImage,
                 IsSystem = m.IsSystem,
                 SystemEventType = m.SystemEventType,
                 CreatedAt = m.CreatedAt,
@@ -169,6 +189,22 @@ public class TripChatController : ControllerBase
         var text = dto.Text?.Trim() ?? string.Empty;
         var imageUrl = dto.ImageUrl?.Trim();
         if (string.IsNullOrEmpty(imageUrl)) imageUrl = null;
+
+        // A private reference must never arrive in the request body. This
+        // endpoint stores ImageUrl verbatim, so without this check a member of
+        // trip A could post a message carrying trip B's object reference and
+        // then read it back through the access endpoint — which only verifies
+        // that the caller belongs to the message's trip. Private references are
+        // minted exclusively by SendImageMessage below, after a membership
+        // check, from a trip id the server itself supplied.
+        if (ChatImageReference.IsPrivate(imageUrl))
+            return BadRequest("Image references cannot be supplied directly.");
+
+        // Legacy public URLs are still accepted so app builds predating private
+        // chat storage keep working. Anything that is neither is rejected
+        // rather than stored as an unrenderable value.
+        if (imageUrl != null && !ChatImageReference.IsLegacyPublicUrl(imageUrl))
+            return BadRequest("Unsupported image reference.");
 
         if (string.IsNullOrEmpty(text) && imageUrl == null)
             return BadRequest("Message must include text or an image.");
@@ -201,17 +237,189 @@ public class TripChatController : ControllerBase
 
         var linkPreview = await GetLinkPreviewAsync(text, ct);
 
+        var (mappedImageUrl, hasPrivateImage) = MapImage(msg.ImageUrl);
+
         return Ok(new ChatMessageDto
         {
             Id = msg.Id,
             UserId = msg.UserId,
             UserName = msg.UserName,
             Text = msg.Text,
-            ImageUrl = msg.ImageUrl,
+            ImageUrl = mappedImageUrl,
+            HasPrivateImage = hasPrivateImage,
             IsSystem = msg.IsSystem,
             CreatedAt = msg.CreatedAt,
             LinkPreview = linkPreview,
         });
+    }
+
+    // ── POST /api/trips/{tripId}/chat/image ───────────────────────────────────
+    // Sends a message WITH a photo. Upload and message creation are one call on
+    // purpose: a separate "upload, get a reference, then post it" flow leaves a
+    // window where an uploaded object belongs to no message, and it would need
+    // the reference to travel through the client — which is exactly what the
+    // private scheme exists to avoid.
+    //
+    // Nothing here trusts the caller beyond their JWT: the user id comes from
+    // the token, the trip id from the route is checked against TripMembers
+    // before a single byte is stored, and the object path is composed
+    // server-side from that verified trip id.
+
+    [HttpPost("image")]
+    [RequestSizeLimit(MaxImageBytes + (1L * 1024L * 1024L))]
+    public async Task<ActionResult<ChatMessageDto>> SendImageMessage(
+        Guid tripId,
+        [FromForm] IFormFile file,
+        [FromForm] string? text,
+        CancellationToken ct)
+    {
+        var userId = GetUserId();
+        if (!await IsMember(tripId, userId, ct)) return Forbid();
+
+        if (file == null || file.Length == 0)
+            return BadRequest("No image uploaded.");
+        if (file.Length > MaxImageBytes)
+            return BadRequest("Image must be smaller than 10 MB.");
+
+        await using var stream = file.OpenReadStream();
+
+        // Content decides the type, not the client's Content-Type header or
+        // filename. The detected extension is what goes into the object path,
+        // so the stored name is entirely server-derived.
+        var detected = await ImageFileValidator.DetectAsync(stream, ct);
+        if (detected == null)
+            return BadRequest("Only JPEG, PNG, GIF and WebP images are allowed.");
+
+        if (!stream.CanSeek)
+            return BadRequest("The upload could not be processed. Please try again.");
+        stream.Position = 0;
+
+        var trimmedText = text?.Trim() ?? string.Empty;
+        var objectPath = ChatImageReference.BuildObjectPath(tripId, detected.Extension);
+
+        var uploaded = false;
+        var msg = new ChatMessage
+        {
+            TripId = tripId,
+            UserId = userId,
+            UserName = DisplayNameHelper.OrFallback((await _db.Users.FindAsync([userId], ct))?.Name),
+            Text = trimmedText,
+            ImageUrl = ChatImageReference.Scheme + objectPath,
+            IsSystem = false,
+            CreatedAt = DateTime.UtcNow,
+        };
+
+        try
+        {
+            await _chatImages.UploadAsync(stream, detected.ContentType, objectPath, ct);
+            uploaded = true;
+
+            _db.ChatMessages.Add(msg);
+            await _db.SaveChangesAsync(ct);
+        }
+        catch (ChatImageStorageException)
+        {
+            // Upload failed, so no message is created at all — a message row
+            // pointing at bytes that were never stored would render as a
+            // permanently broken image with no way to retry.
+            return StatusCode(StatusCodes.Status502BadGateway, "Image upload failed. Please try again.");
+        }
+        catch (OperationCanceledException)
+        {
+            await RollBackUploadedImageAsync(objectPath, uploaded);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // The bytes made it but the row did not. Remove the object so it
+            // does not become an orphan nothing in the database points at.
+            await RollBackUploadedImageAsync(objectPath, uploaded);
+            _logger.LogError(ex, "Chat image message could not be saved after upload.");
+            return StatusCode(StatusCodes.Status500InternalServerError, "Message could not be sent. Please try again.");
+        }
+
+        try
+        {
+            await _notifications.SendChatMessageAsync(msg, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to dispatch chat message push for message {MessageId}.", msg.Id);
+        }
+
+        return Ok(new ChatMessageDto
+        {
+            Id = msg.Id,
+            UserId = msg.UserId,
+            UserName = msg.UserName,
+            Text = msg.Text,
+            ImageUrl = null,
+            HasPrivateImage = true,
+            IsSystem = msg.IsSystem,
+            CreatedAt = msg.CreatedAt,
+            LinkPreview = await GetLinkPreviewAsync(msg.Text, ct),
+        });
+    }
+
+    private async Task RollBackUploadedImageAsync(string objectPath, bool uploaded)
+    {
+        if (!uploaded) return;
+        // CancellationToken.None: this runs on the failure path, often because
+        // the request was cancelled, and the cleanup still has to happen.
+        if (!await _chatImages.DeleteAsync(objectPath, CancellationToken.None))
+        {
+            // No path, no URL, no key — a failed rollback is worth knowing
+            // about, its target is not worth writing down.
+            _logger.LogError("Chat image upload rollback could not remove its object.");
+        }
+    }
+
+    // ── GET /api/trips/{tripId}/chat/{messageId}/image ────────────────────────
+    // Trades a message id for a short-lived signed URL. The message id is the
+    // access key precisely because it is already access-controlled: it is only
+    // useful to someone who can prove membership of the trip that owns it.
+    //
+    // Every failure — unknown message, wrong trip, no image, non-member —
+    // answers 404. A 403 on "wrong trip" would confirm the message exists.
+
+    [HttpGet("{messageId}/image")]
+    public async Task<ActionResult<ChatImageAccessDto>> GetImageAccess(
+        Guid tripId,
+        Guid messageId,
+        CancellationToken ct)
+    {
+        Response.Headers.CacheControl = "no-store";
+
+        var userId = GetUserId();
+        if (!await IsMember(tripId, userId, ct)) return NotFound();
+
+        var message = await _db.ChatMessages
+            .AsNoTracking()
+            .FirstOrDefaultAsync(m => m.Id == messageId && m.TripId == tripId, ct);
+        if (message == null) return NotFound();
+
+        // The trip id is passed in so the reference has to name the SAME trip
+        // the message belongs to. Membership alone is not enough: it would let
+        // any reference that ever reached a row in this trip be signed.
+        if (!ChatImageReference.TryGetObjectPath(message.ImageUrl, tripId, out var objectPath))
+            return NotFound();
+
+        try
+        {
+            var signed = await _chatImages.CreateSignedReadUrlAsync(objectPath, ct);
+            return Ok(new ChatImageAccessDto
+            {
+                Url = signed.Url,
+                ExpiresAt = signed.ExpiresAt,
+            });
+        }
+        catch (ChatImageStorageException)
+        {
+            // Status only — the signed URL and the object path stay out of
+            // logs and out of the response.
+            _logger.LogWarning("Chat image signing failed for a message in trip {TripId}.", tripId);
+            return StatusCode(StatusCodes.Status502BadGateway, "Image is temporarily unavailable.");
+        }
     }
 
     // ── POST /api/trips/{tripId}/chat/{messageId}/reactions ───────────────────
@@ -292,6 +500,13 @@ public class TripChatController : ControllerBase
         if (message == null) return NotFound();
         if (message.IsSystem || message.UserId != userId) return Forbid();
 
+        // Captured before the row is blanked. Clearing ImageUrl alone only hid
+        // the photo in-app: the bytes stayed in storage, and once the column
+        // was null nothing in the database pointed at the file any more, so no
+        // later cleanup could find it either. Deleting the message has to
+        // delete the bytes.
+        var imageRef = message.ImageUrl;
+
         message.Text = string.Empty;
         message.ImageUrl = null;
         message.IsSystem = true;
@@ -306,6 +521,25 @@ public class TripChatController : ControllerBase
         _db.ChatMessageReactions.RemoveRange(reactions);
 
         await _db.SaveChangesAsync(ct);
+
+        // After the commit, and best-effort. The tombstone is what the user
+        // asked for; a storage hiccup must not fail the delete or leave the
+        // message standing in anyone's UI. Which bucket to talk to is decided
+        // by the stored reference, not by when the message was sent.
+        if (ChatImageReference.TryGetObjectPathForCleanup(imageRef, out var privatePath))
+        {
+            if (!await _chatImages.DeleteAsync(privatePath, ct))
+            {
+                // Status only — never the path.
+                _logger.LogWarning("Private chat image could not be deleted for a message in trip {TripId}.", tripId);
+            }
+        }
+        else
+        {
+            // Legacy public object. Non-bucket URLs are ignored by the service.
+            await _storage.DeleteByUrlAsync(imageRef, ct);
+        }
+
         return NoContent();
     }
 

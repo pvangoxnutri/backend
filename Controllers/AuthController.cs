@@ -22,6 +22,7 @@ public class AuthController : ControllerBase
     private readonly ILogger<AuthController> _logger;
     private readonly ISupabaseStorageService _storage;
     private readonly ITripDocumentStorageService _documentStorage;
+    private readonly IChatImageStorageService _chatImageStorage;
 
     public AuthController(
         AppDbContext db,
@@ -29,7 +30,8 @@ public class AuthController : ControllerBase
         IConfiguration configuration,
         ILogger<AuthController> logger,
         ISupabaseStorageService storage,
-        ITripDocumentStorageService documentStorage)
+        ITripDocumentStorageService documentStorage,
+        IChatImageStorageService chatImageStorage)
     {
         _db = db;
         _httpClientFactory = httpClientFactory;
@@ -37,6 +39,7 @@ public class AuthController : ControllerBase
         _logger = logger;
         _storage = storage;
         _documentStorage = documentStorage;
+        _chatImageStorage = chatImageStorage;
     }
 
     [HttpPost("sync")]
@@ -231,7 +234,14 @@ public class AuthController : ControllerBase
         };
         imageUrls.AddRange(ownedTrips.Select(t => t.ImageUrl));
         imageUrls.AddRange(myActivities.Select(a => a.ImageUrl));
-        imageUrls.AddRange(myChat.Select(m => m.ImageUrl));
+        // Chat images stored privately are excluded: their reference is an
+        // internal storage key, not something the recipient of an export can
+        // open, and putting it in a downloadable file would scatter storage
+        // paths outside the system for no benefit. Legacy public chat URLs are
+        // still listed, exactly as before.
+        imageUrls.AddRange(myChat
+            .Select(m => m.ImageUrl)
+            .Where(url => !ChatImageReference.IsPrivate(url)));
 
         var memberMap = memberRows.ToDictionary(tm => tm.TripId, tm => tm);
 
@@ -497,9 +507,33 @@ public class AuthController : ControllerBase
 
         // Best-effort storage cleanup. Failures here are logged inside the service
         // and do not affect the success of the account deletion.
+        //
+        // The collected list mixes public-bucket URLs (avatars, covers,
+        // activity photos, pre-migration chat images) with private chat image
+        // references. Each goes to the service that owns its bucket — a private
+        // reference handed to the public service is silently ignored, which
+        // would leave the photo behind.
         phase.Restart();
-        await _storage.DeleteManyByUrlAsync(imagesToDelete, cancellationToken);
-        _logger.LogInformation("[TIMING] DELETE /api/auth/me phase=deleteStorage imageCount={Count} elapsedMs={Elapsed}", imagesToDelete.Count, phase.ElapsedMilliseconds);
+        var privateChatImagePaths = new List<string>();
+        var publicImageUrls = new List<string?>();
+        foreach (var reference in imagesToDelete)
+        {
+            if (ChatImageReference.TryGetObjectPathForCleanup(reference, out var objectPath))
+                privateChatImagePaths.Add(objectPath);
+            else
+                publicImageUrls.Add(reference);
+        }
+
+        await _storage.DeleteManyByUrlAsync(publicImageUrls, cancellationToken);
+        if (privateChatImagePaths.Count > 0
+            && !await _chatImageStorage.DeleteManyAsync(privateChatImagePaths, cancellationToken))
+        {
+            // Count only — never the paths.
+            _logger.LogWarning(
+                "[TIMING] DELETE /api/auth/me phase=deleteStorage could not remove every private chat image ({Count} attempted).",
+                privateChatImagePaths.Count);
+        }
+        _logger.LogInformation("[TIMING] DELETE /api/auth/me phase=deleteStorage publicCount={PublicCount} privateChatCount={PrivateCount} elapsedMs={Elapsed}", publicImageUrls.Count, privateChatImagePaths.Count, phase.ElapsedMilliseconds);
 
         _logger.LogInformation("[TIMING] DELETE /api/auth/me total elapsedMs={Elapsed}", total.ElapsedMilliseconds);
         return NoContent();

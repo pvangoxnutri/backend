@@ -28,8 +28,10 @@ public class CreateTripDto
     [Required]
     public DateOnly StartDate { get; set; }
 
-    [Required]
-    public DateOnly EndDate { get; set; }
+    // Optional: omitted or null means "I don't know yet". The adventure is
+    // created open-ended and stays active until an end date is set or it is
+    // marked completed. Start date remains required.
+    public DateOnly? EndDate { get; set; }
 
     // Hidden SideQuest fields
     public string Visibility { get; set; } = "public"; // "public" | "hidden"

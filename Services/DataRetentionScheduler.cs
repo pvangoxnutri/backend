@@ -65,6 +65,30 @@ public class DataRetentionScheduler : BackgroundService
                 DELETE FROM "TripEvents" WHERE "Id" IN (SELECT "Id" FROM ranked WHERE rn > {MaxEventsPerTrip})
                 """, ct);
 
+            // The images attached to the messages this pass removes have to go
+            // with them. Retention used to drop the rows only, which left every
+            // aged-out photo sitting in storage — and with the row gone,
+            // nothing in the database pointed at the file any more, so it could
+            // never be found and cleaned up later. Six-hourly, that is a slowly
+            // growing pile of user photos that outlive the conversation they
+            // belonged to.
+            //
+            // The references are read first rather than via RETURNING so the
+            // delete statement itself is untouched, and they are only used to
+            // call storage — they are never logged.
+            var orphanedImageRefs = await db.ChatMessages
+                .FromSqlInterpolated($"""
+                    WITH ranked AS (
+                        SELECT "Id", ROW_NUMBER() OVER (PARTITION BY "TripId" ORDER BY "CreatedAt" DESC) AS rn
+                        FROM "ChatMessages"
+                    )
+                    SELECT * FROM "ChatMessages" WHERE "Id" IN (SELECT "Id" FROM ranked WHERE rn > {MaxChatMessagesPerTrip})
+                    """)
+                .AsNoTracking()
+                .Where(m => m.ImageUrl != null)
+                .Select(m => m.ImageUrl)
+                .ToListAsync(ct);
+
             var deletedExcessChat = await db.Database.ExecuteSqlInterpolatedAsync(
                 $"""
                 WITH ranked AS (
@@ -74,9 +98,42 @@ public class DataRetentionScheduler : BackgroundService
                 DELETE FROM "ChatMessages" WHERE "Id" IN (SELECT "Id" FROM ranked WHERE rn > {MaxChatMessagesPerTrip})
                 """, ct);
 
+            // Which bucket an image lives in is decided per row, from the
+            // reference itself — a single trip's history can contain both
+            // pre-migration public URLs and private references.
+            var privatePaths = new List<string>();
+            var legacyPublicUrls = new List<string?>();
+            foreach (var reference in orphanedImageRefs)
+            {
+                if (ChatImageReference.TryGetObjectPathForCleanup(reference, out var objectPath))
+                    privatePaths.Add(objectPath);
+                else
+                    legacyPublicUrls.Add(reference);
+            }
+
+            if (privatePaths.Count > 0)
+            {
+                var chatImages = scope.ServiceProvider.GetRequiredService<IChatImageStorageService>();
+                if (!await chatImages.DeleteManyAsync(privatePaths, ct))
+                {
+                    // Count only. The next tick re-selects nothing (the rows are
+                    // gone), so this line is the sole record that some objects
+                    // may have survived — it still must not name them.
+                    _logger.LogWarning(
+                        "DataRetentionScheduler could not delete every private chat image in this pass ({Count} attempted).",
+                        privatePaths.Count);
+                }
+            }
+
+            if (legacyPublicUrls.Count > 0)
+            {
+                var storage = scope.ServiceProvider.GetRequiredService<ISupabaseStorageService>();
+                await storage.DeleteManyByUrlAsync(legacyPublicUrls, ct);
+            }
+
             _logger.LogInformation(
-                "DataRetentionScheduler tick complete. Deleted {OldEvents} event(s) older than {Days}d, {ExcessEvents} event(s) beyond top {MaxEvents}/trip, {ExcessChat} chat message(s) beyond top {MaxChat}/trip.",
-                deletedOldEvents, MaxEventAgeDays, deletedExcessEvents, MaxEventsPerTrip, deletedExcessChat, MaxChatMessagesPerTrip);
+                "DataRetentionScheduler tick complete. Deleted {OldEvents} event(s) older than {Days}d, {ExcessEvents} event(s) beyond top {MaxEvents}/trip, {ExcessChat} chat message(s) beyond top {MaxChat}/trip ({PrivateImages} private image(s), {LegacyImages} legacy image(s)).",
+                deletedOldEvents, MaxEventAgeDays, deletedExcessEvents, MaxEventsPerTrip, deletedExcessChat, MaxChatMessagesPerTrip, privatePaths.Count, legacyPublicUrls.Count);
         }
         catch (Exception ex)
         {

@@ -27,6 +27,14 @@ public class TripActivity
     // categories (which render their localized label from Category instead).
     public string? CustomCategoryLabel { get; set; }
     public string? ImageUrl { get; set; }
+    // Keeps this activity's photo out of the trip's slideshow while leaving it
+    // fully visible on the activity itself. False (the default, and what every
+    // pre-existing row migrates to) means "include", so nothing changes for
+    // anything that already exists. Meaningless without an ImageUrl — there is
+    // then nothing to exclude — and deliberately NOT stored as a description
+    // marker like blur/location are: this is a real property of the activity,
+    // not text the user wrote.
+    public bool ExcludeFromSlideshow { get; set; }
     public string? SpotifyUrl { get; set; }
     public string Visibility { get; set; } = "public";
     public DateTime? RevealAt { get; set; }

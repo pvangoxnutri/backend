@@ -16,6 +16,10 @@ public class ActivityResponseDto
     public string? Category { get; set; }
     public string? CustomCategoryLabel { get; set; }
     public string? ImageUrl { get; set; }
+    // True when this activity's photo must not appear as a slideshow slide.
+    // The image itself is still returned above and still renders on the
+    // activity — this only removes it from the trip's cover rotation.
+    public bool ExcludeFromSlideshow { get; set; }
     public string? SpotifyUrl { get; set; }
     public string Visibility { get; set; } = "public";
     public DateTime? RevealAt { get; set; }

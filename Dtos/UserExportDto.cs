@@ -46,7 +46,8 @@ public class ExportedTripDto
     public string? Description { get; set; }
     public string Destination { get; set; } = string.Empty;
     public DateOnly StartDate { get; set; }
-    public DateOnly EndDate { get; set; }
+    // Null for adventures created without a known end date.
+    public DateOnly? EndDate { get; set; }
     public string Visibility { get; set; } = "public";
     public DateTime? RevealAt { get; set; }
     public string? Teaser { get; set; }
