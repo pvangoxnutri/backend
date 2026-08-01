@@ -439,6 +439,49 @@ var buildSha = (Environment.GetEnvironmentVariable("RAILWAY_GIT_COMMIT_SHA")
         ? sha[..Math.Min(7, sha.Length)]
         : "unknown";
 
+// ── Process lifecycle diagnostics ────────────────────────────────────────
+//
+// THE ONE QUESTION THESE ANSWER. When a container disappears mid-request
+// there are two very different causes and they look identical from outside:
+// the platform asked the process to stop (deploy, failed healthcheck, manual
+// restart), or the process was killed outright (OOM). The first produces the
+// stopping/stopped pair below. The second produces NOTHING — and that silence
+// is the finding.
+//
+// Types and flags only. No messages, no stack traces: an exception message can
+// carry a connection string, a request URI with a key in it, or a row's
+// contents.
+{
+    var lifetimeLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Process");
+
+    lifetimeLogger.LogInformation("[PROCESS] started build={Build}", buildSha);
+
+    app.Lifetime.ApplicationStopping.Register(() => lifetimeLogger.LogInformation("[PROCESS] stopping"));
+    app.Lifetime.ApplicationStopped.Register(() => lifetimeLogger.LogInformation("[PROCESS] stopped"));
+
+    // A genuinely unhandled exception on any thread. The runtime is already on
+    // its way down by the time this runs, so this is a record, not a recovery.
+    AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+        lifetimeLogger.LogCritical(
+            "[PROCESS] unhandled type={Category} terminating={Terminating}",
+            args.ExceptionObject?.GetType().Name ?? "unknown",
+            args.IsTerminating);
+
+    // A Task that faulted with nobody awaiting it. Marked observed so it
+    // cannot escalate — but LOGGED, because a fire-and-forget failure is
+    // otherwise completely invisible and is exactly the shape that kills a
+    // process for reasons no request-level handler can see.
+    TaskScheduler.UnobservedTaskException += (_, args) =>
+    {
+        lifetimeLogger.LogError(
+            "[PROCESS] unobserved task exception type={Category}",
+            args.Exception?.InnerException?.GetType().Name
+                ?? args.Exception?.GetType().Name ?? "unknown");
+
+        args.SetObserved();
+    };
+}
+
 app.MapGet("/health", () => Results.Ok(new
 {
     status = "ok",

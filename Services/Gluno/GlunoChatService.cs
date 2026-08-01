@@ -180,6 +180,13 @@ public sealed class GlunoChatService : IGlunoChatService
     private readonly IGlunoIdempotencyStore _idempotency;
     private readonly ILogger<GlunoChatService> _logger;
 
+    /// <summary>
+    /// This turn's latency tracker, so the outer boundary can report HOW FAR
+    /// the turn got. Safe as a field because the service is scoped — one
+    /// instance per request, never shared between turns.
+    /// </summary>
+    private GlunoLatencyTracker? _latency;
+
     public GlunoChatService(
         AppDbContext db,
         GlunoAvailability availability,
@@ -258,7 +265,8 @@ public sealed class GlunoChatService : IGlunoChatService
             // Type name only — an exception message can carry a connection
             // string, a request URI, or a row's contents.
             _logger.LogError(
-                "[GLUNO] turn escaped its own handling: {Category}", ex.GetType().Name);
+                "[GLUNO] escaped type={Category} stage={Stage}",
+                ex.GetType().Name, _latency?.LastStage ?? "before_planning");
 
             // Best effort, and deliberately not allowed to mask the original
             // failure: the claim would otherwise sit in-flight until its
@@ -486,6 +494,7 @@ public sealed class GlunoChatService : IGlunoChatService
         telemetry.ModelPolicy = $"{plan.Model.Tier}:{plan.Model.Reason}";
 
         var latency = new GlunoLatencyTracker(plan.Latency);
+        _latency = latency;
         latency.Reached("turn_planned");
         var degradation = new GlunoDegradationTracker();
 

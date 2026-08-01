@@ -298,7 +298,8 @@ public class GlunoController : ControllerBase
             // covers the case where that boundary itself fails, so there is no
             // path at all by which this endpoint answers without the envelope
             // the app depends on.
-            _logger.LogError("[GLUNO] send escaped the service boundary: {Category}", ex.GetType().Name);
+            _logger.LogError(
+                "[GLUNO] escaped type={Category} stage=controller", ex.GetType().Name);
 
             return StatusCode(502, new { error = "unknown", retryable = true });
         }
