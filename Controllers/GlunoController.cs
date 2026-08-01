@@ -277,17 +277,33 @@ public class GlunoController : ControllerBase
 
         switch (result.Error)
         {
+            // Every branch below carries BOTH fields. The app decides what to
+            // say from `error` and whether to offer a retry from `retryable`,
+            // and a branch that omits either leaves it guessing — which in
+            // practice meant a generic "try again" on failures no retry could
+            // fix.
             case GlunoTurnError.Unavailable:
                 // 503, not 404: the endpoint exists, Gluno just isn't on here.
-                return StatusCode(503, new { error = "gluno_unavailable", reason = _availability.UnavailableReason });
+                return StatusCode(503, new
+                {
+                    error = "gluno_unavailable",
+                    reason = _availability.UnavailableReason,
+                    retryable = false,
+                });
             case GlunoTurnError.EmptyMessage:
-                return BadRequest(new { error = "empty_message" });
+                return BadRequest(new { error = "empty_message", retryable = false });
             case GlunoTurnError.ConversationNotFound:
-                return NotFound(new { error = "conversation_not_found" });
+                return NotFound(new { error = "conversation_not_found", retryable = false });
             case GlunoTurnError.ConversationArchived:
-                return BadRequest(new { error = "conversation_archived" });
+                return BadRequest(new { error = "conversation_archived", retryable = false });
             case GlunoTurnError.NotTripMember:
-                return Forbid();
+                // An explicit body rather than Forbid(): that returns 403 with
+                // NOTHING, so the app had only a status code to work from.
+                return StatusCode(403, new
+                {
+                    error = GlunoFailureCodes.AuthorizationChanged,
+                    retryable = false,
+                });
 
             // 499 is the client-closed convention. The app treats it as "the
             // user pressed stop" and shows nothing — a cancellation is not a
