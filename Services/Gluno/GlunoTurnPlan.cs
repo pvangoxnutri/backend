@@ -218,6 +218,22 @@ public sealed class GlunoLatencyTracker
 
     public IDisposable Stage(string name) => new StageTimer(this, name);
 
+    /// <summary>
+    /// Marks a point the turn reached, with no duration.
+    ///
+    /// The one thing a failed turn has to be able to say is HOW FAR it got.
+    /// Without it a provider error and a context-building error produce the
+    /// same log line, and the only way to tell them apart is to guess.
+    /// </summary>
+    public void Reached(string name)
+    {
+        LastStage = name;
+        _stageMs.TryAdd(name, _stopwatch.ElapsedMilliseconds);
+    }
+
+    /// The furthest point reached, or null before the turn starts doing work.
+    public string? LastStage { get; private set; }
+
     public IReadOnlyDictionary<string, long> StageMilliseconds => _stageMs;
 
     private void Record(string name, long milliseconds)

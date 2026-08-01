@@ -126,7 +126,16 @@ public sealed class GlunoTurnTelemetry
 
     private IReadOnlyDictionary<string, long> _stageMs = new Dictionary<string, long>();
 
-    public void RecordStages(GlunoLatencyTracker tracker) => _stageMs = tracker.StageMilliseconds;
+    public void RecordStages(GlunoLatencyTracker tracker)
+    {
+        _stageMs = tracker.StageMilliseconds;
+        // The furthest point the turn reached. On a FAILED turn this is the
+        // single most useful field in the line — it separates "the provider
+        // rejected us" from "we never got that far".
+        LastStage = tracker.LastStage;
+    }
+
+    public string? LastStage { get; private set; }
 
     public void RecordContextTokens(IReadOnlyDictionary<string, int> tokensByCategory)
         => _contextTokens = tokensByCategory;
@@ -188,7 +197,7 @@ public sealed class GlunoTurnTelemetry
             "modelPolicy={ModelPolicy} modelSkipped={ModelSkipped} direct={Direct} planType={PlanType} " +
             "contextTokens={ContextTokens} parallelism={Parallelism} stages={Stages} cancelled={Cancelled} " +
             "degradation={Degradation} usageLimit={UsageLimit} cost={CostBucket} cacheHits={CacheHits} " +
-            "idempotency={Idempotency} liveSearches={LiveSearches} liveFacts={LiveFacts} " +
+            "idempotency={Idempotency} lastStage={LastStage} liveSearches={LiveSearches} liveFacts={LiveFacts} " +
             "liveConflicts={LiveConflicts} totalMs={TotalMs}",
             ConversationId,
             Intent,
@@ -235,6 +244,7 @@ public sealed class GlunoTurnTelemetry
             CostBucket ?? "unpriced",
             CacheHits,
             IdempotencyReplay ?? "none",
+            LastStage ?? "none",
             LiveSearches,
             LiveFacts,
             LiveConflicts,

@@ -393,6 +393,7 @@ public sealed class GlunoChatService : IGlunoChatService
         telemetry.ModelPolicy = $"{plan.Model.Tier}:{plan.Model.Reason}";
 
         var latency = new GlunoLatencyTracker(plan.Latency);
+        latency.Reached("turn_planned");
         var degradation = new GlunoDegradationTracker();
 
         // ── Resolve what the message pointed at ───────────────────────────
@@ -400,6 +401,7 @@ public sealed class GlunoChatService : IGlunoChatService
         // "The second one" becomes a real id here, from memory this
         // conversation already holds — not from a fresh search that would cost
         // money and could come back in a different order.
+        latency.Reached("context_built");
         var reference = GlunoReferenceResolver.Resolve(text, workingState, context.Trip, context.User.Language);
 
         // ── Evidence ──────────────────────────────────────────────────────
@@ -407,6 +409,7 @@ public sealed class GlunoChatService : IGlunoChatService
         // Everything Gluno is allowed to state, enumerated BEFORE the model
         // runs. What is not in here cannot be asserted afterwards — see
         // GlunoGroundingValidator for why a prompt alone does not achieve this.
+        latency.Reached("reference_resolved");
         var ledger = new GlunoEvidenceLedger();
         SeedLedgerFromContext(ledger, context);
 
@@ -421,12 +424,14 @@ public sealed class GlunoChatService : IGlunoChatService
         context = await AddLiveInformationAsync(
             context, ledger, text, intent, latency, degradation, telemetry, ct);
 
+        latency.Reached("evidence_built");
         var contextJson = BuildContextJson(
             NarrowContext(context, intent, workflow),
             ledger,
             BuildTurnBrief(intent, workflow, reference, workingState, context),
             telemetry);
 
+        latency.Reached("prompt_assembled");
         var history = await _conversations.GetHistoryTurnsAsync(
             conversation.Id, GlunoContextLimits.MaxHistoryTurns, ct);
 
@@ -436,6 +441,7 @@ public sealed class GlunoChatService : IGlunoChatService
             Role = GlunoMessageRoles.User,
             Text = text,
         }, ct);
+        latency.Reached("user_turn_persisted");
 
         // ── Model turn ────────────────────────────────────────────────────
         var scope = new GlunoActionScope
@@ -488,6 +494,7 @@ public sealed class GlunoChatService : IGlunoChatService
                 await _idempotency.CompleteAsync(claim.Existing.Id, directMessage.Id, ct);
             }
 
+            telemetry.RecordStages(latency);
             telemetry.Write(_logger);
 
             return new GlunoTurnResult
@@ -499,6 +506,7 @@ public sealed class GlunoChatService : IGlunoChatService
             };
         }
 
+        latency.Reached("model_request_started");
         GlunoAiResult result;
         try
         {
@@ -579,6 +587,7 @@ public sealed class GlunoChatService : IGlunoChatService
             // about.
             telemetry.Cancelled = true;
             telemetry.FailureCategory = "cancelled";
+            telemetry.RecordStages(latency);
             telemetry.Write(_logger);
 
             if (claim.Existing != null) await _idempotency.CancelAsync(claim.Existing.Id, ct);
@@ -594,6 +603,7 @@ public sealed class GlunoChatService : IGlunoChatService
             // The provider's own timeout, not the user. This one IS a failure
             // and gets an intent-appropriate fallback.
             telemetry.FailureCategory = GlunoFailureCodes.AiTimeout;
+            telemetry.RecordStages(latency);
             telemetry.Write(_logger);
 
             if (claim.Existing != null)
@@ -615,6 +625,7 @@ public sealed class GlunoChatService : IGlunoChatService
             _logger.LogWarning("[GLUNO] provider turn failed: {Category}", ex.GetType().Name);
 
             telemetry.FailureCategory = code;
+            telemetry.RecordStages(latency);
             telemetry.Write(_logger);
 
             if (claim.Existing != null) await _idempotency.FailAsync(claim.Existing.Id, code, ct);
