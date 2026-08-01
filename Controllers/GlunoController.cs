@@ -274,6 +274,12 @@ public class GlunoController : ControllerBase
     [HttpPost("messages")]
     public async Task<ActionResult<GlunoTurnResponseDto>> SendMessage([FromBody] SendGlunoMessageDto dto)
     {
+        // The first thing this endpoint does. If a 502 appears in the log with
+        // no matching line here, the request never reached the controller —
+        // which makes it a container or proxy problem rather than a Gluno one.
+        // No ids, no message, nothing about the caller.
+        _logger.LogInformation("[GLUNO] message endpoint entered");
+
         GlunoTurnResult result;
 
         try
@@ -295,6 +301,16 @@ public class GlunoController : ControllerBase
             _logger.LogError("[GLUNO] send escaped the service boundary: {Category}", ex.GetType().Name);
 
             return StatusCode(502, new { error = "unknown", retryable = true });
+        }
+
+        // Every exit from here is logged once — the pair of lines is what
+        // proves the request completed inside the process rather than being
+        // cut off above it. Codes only.
+        if (result.Error != GlunoTurnError.None)
+        {
+            _logger.LogInformation(
+                "[GLUNO] message endpoint returning outcome={Outcome} error={Error}",
+                result.Error, result.FailureCode ?? "none");
         }
 
         switch (result.Error)
@@ -356,6 +372,8 @@ public class GlunoController : ControllerBase
                     retryable = result.IsRetryable,
                 });
         }
+
+        _logger.LogInformation("[GLUNO] message endpoint returning status=200 error=none");
 
         return Ok(new GlunoTurnResponseDto
         {

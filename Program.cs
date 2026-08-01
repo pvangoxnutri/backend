@@ -423,11 +423,28 @@ app.MapControllers();
 // Kestrel) is intact and any remaining failure is above it. It exposes only a
 // fixed status string, the service name, the environment name and the server
 // clock — no user data, and nothing that changes production behaviour.
+// Which BINARY is answering.
+//
+// Without this there is no way to tell a deployed fix from a stale image
+// except by guessing from behaviour — which is exactly how an afternoon gets
+// spent debugging code that is not running. Railway injects
+// RAILWAY_GIT_COMMIT_SHA into every deployment, so this needs no build
+// argument and no configuration.
+//
+// Short SHA only. Never the branch, the repository, a path, or anything about
+// how the environment is configured.
+var buildSha = (Environment.GetEnvironmentVariable("RAILWAY_GIT_COMMIT_SHA")
+        ?? Environment.GetEnvironmentVariable("GIT_COMMIT_SHA"))
+    is { Length: > 0 } sha
+        ? sha[..Math.Min(7, sha.Length)]
+        : "unknown";
+
 app.MapGet("/health", () => Results.Ok(new
 {
     status = "ok",
     service = "sidequest-backend",
     environment = app.Environment.EnvironmentName,
+    build = buildSha,
     timestamp = DateTime.UtcNow
 })).AllowAnonymous();
 
