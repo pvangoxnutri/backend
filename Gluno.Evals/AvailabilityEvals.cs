@@ -1,3 +1,5 @@
+using System.Net;
+using Anthropic.Exceptions;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -218,6 +220,72 @@ public class AvailabilityEvals
         // Two distinct outcomes, deliberately. Collapsing them would turn "you
         // are not in this Adventure any more" into "Gluno does not exist".
         Assert.NotEqual(GlunoTurnError.Unavailable, GlunoTurnError.NotTripMember);
+    }
+
+    // ── Provider failures are told apart ─────────────────────────────────
+
+    [Fact]
+    public void The_SDKs_own_exceptions_are_recognised()
+    {
+        // The SDK does not throw HttpRequestException. Matching only on that
+        // sent every provider failure — rejected key, missing model, rate
+        // limit — to the malformed-response catch-all, which the app rendered
+        // as "try again" for problems retrying cannot fix.
+        Assert.Equal(
+            GlunoFailureCodes.AiNotConfigured,
+            GlunoFailureCodes.FromException(new AnthropicUnauthorizedException { StatusCode = HttpStatusCode.Unauthorized, ResponseBody = "" }));
+
+        Assert.Equal(
+            GlunoFailureCodes.ModelNotConfigured,
+            GlunoFailureCodes.FromException(new AnthropicNotFoundException { StatusCode = HttpStatusCode.NotFound, ResponseBody = "" }));
+
+        Assert.Equal(
+            GlunoFailureCodes.AiRateLimited,
+            GlunoFailureCodes.FromException(new AnthropicRateLimitException { StatusCode = HttpStatusCode.TooManyRequests, ResponseBody = "" }));
+    }
+
+    [Fact]
+    public void A_configuration_failure_is_never_offered_as_retryable()
+    {
+        // The whole point of telling these apart. A retry button on a rejected
+        // key is a lie the user pays for by tapping it.
+        foreach (var code in new[]
+        {
+            GlunoFailureCodes.AiNotConfigured,
+            GlunoFailureCodes.ModelNotConfigured,
+        })
+        {
+            Assert.False(GlunoFailureCodes.IsRetryable(code));
+        }
+
+        // These genuinely might work next time.
+        Assert.True(GlunoFailureCodes.IsRetryable(GlunoFailureCodes.AiRateLimited));
+        Assert.True(GlunoFailureCodes.IsRetryable(GlunoFailureCodes.AiTimeout));
+    }
+
+    [Fact]
+    public void An_overloaded_provider_is_treated_as_temporary()
+    {
+        // 529 is Anthropic's "overloaded" and 5xx is any upstream fault. Both
+        // clear on their own; both keep the retry button.
+        Assert.Equal(
+            GlunoFailureCodes.AiTimeout,
+            GlunoFailureCodes.FromException(new AnthropicApiException("x", null) { StatusCode = (HttpStatusCode)529, ResponseBody = "" }));
+
+        Assert.Equal(
+            GlunoFailureCodes.AiTimeout,
+            GlunoFailureCodes.FromException(
+                new AnthropicApiException("x", null) { StatusCode = HttpStatusCode.ServiceUnavailable, ResponseBody = "" }));
+    }
+
+    [Fact]
+    public void An_unrecognised_exception_still_produces_a_safe_code()
+    {
+        // Never an unhandled throw, and never a code the app has no copy for.
+        var code = GlunoFailureCodes.FromException(new InvalidOperationException("boom"));
+
+        Assert.False(string.IsNullOrWhiteSpace(code));
+        Assert.Equal(GlunoFailureCodes.AiMalformedResponse, code);
     }
 
     private sealed class StubEnvironment : IWebHostEnvironment

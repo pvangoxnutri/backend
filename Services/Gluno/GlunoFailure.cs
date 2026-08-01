@@ -1,3 +1,6 @@
+using System.Net;
+using Anthropic.Exceptions;
+
 namespace sidequest.backend.Services.Gluno;
 
 /// <summary>
@@ -68,9 +71,54 @@ public static class GlunoFailureCodes
     public static string FromException(Exception exception) => exception switch
     {
         TaskCanceledException or OperationCanceledException => AiTimeout,
+
+        // The SDK's own exceptions. It does NOT throw HttpRequestException, so
+        // without these every provider failure — a rejected key, a model id
+        // that does not exist, a parameter the model does not support — landed
+        // on the catch-all below and was reported as a malformed RESPONSE.
+        //
+        // That was wrong twice over. It told the user to try again for
+        // problems no amount of retrying can fix, and it erased the one signal
+        // that says which piece of configuration is actually wrong.
+        AnthropicApiException api => FromStatus(api.StatusCode),
+
         HttpRequestException http when (int?)http.StatusCode == 429 => AiRateLimited,
         HttpRequestException http when (int?)http.StatusCode >= 500 => AiTimeout,
         System.Text.Json.JsonException => AiMalformedResponse,
+        _ => AiMalformedResponse,
+    };
+
+    /// <summary>
+    /// A provider status code as something the app can act on.
+    ///
+    /// The split that matters is retryable versus not. 401, 403, 404 and 400
+    /// are all somebody's configuration being wrong — they fail identically on
+    /// every attempt, and offering a retry button for them is a lie the user
+    /// pays for by tapping it repeatedly.
+    /// </summary>
+    private static string FromStatus(HttpStatusCode status) => (int)status switch
+    {
+        // The key was rejected. Not "no key" — but from the app's side both
+        // mean the same thing: this environment cannot reach a model, and no
+        // user action changes that.
+        401 or 403 => AiNotConfigured,
+
+        // The Messages API answers 404 when the model id does not exist.
+        // Configuration names a model that is retired, misspelled, or not
+        // enabled for this account.
+        404 => ModelNotConfigured,
+
+        // An invalid request. In practice this is the configured model
+        // refusing something the request carries — adaptive thinking and the
+        // effort setting are both model-dependent — so it is a model
+        // configuration mismatch rather than a transient fault.
+        400 or 422 => ModelNotConfigured,
+
+        429 => AiRateLimited,
+
+        // 529 is Anthropic's "overloaded". Genuinely temporary, like a 5xx.
+        >= 500 or 529 => AiTimeout,
+
         _ => AiMalformedResponse,
     };
 
