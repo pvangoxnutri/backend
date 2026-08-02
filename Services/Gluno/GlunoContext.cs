@@ -306,6 +306,23 @@ public sealed record GlunoContext
     public int AppCapabilityVersion { get; init; } = SideQuestCapabilities.Version;
     public GlunoUserContext User { get; init; } = new();
     public GlunoTripContext? Trip { get; init; }
+
+    /// <summary>
+    /// Where the scoped Adventure GOES, in order, with the journeys between.
+    ///
+    /// DELIBERATELY OUTSIDE <see cref="Trip"/>. That is loaded all-or-nothing
+    /// from the turn's intent, so on an app-help or preference turn it is null
+    /// — and the model was left with the Adventure summary: title,
+    /// `Trip.Destination` and the dates. That is exactly how Gluno came to say
+    /// "I only have España and the dates 5–16 August" about a trip SideQuest
+    /// knew six cities for.
+    ///
+    /// So this loads whenever the conversation is scoped to an Adventure,
+    /// whatever the intent asked for. It is small, and its absence makes Gluno
+    /// ask questions the Adventure already answers.
+    /// </summary>
+    public TripRouteContext? Route { get; init; }
+
     public IReadOnlyList<GlunoTripSummary> Trips { get; init; } = Array.Empty<GlunoTripSummary>();
     /// What the user has told Gluno about how they want to travel. Present so
     /// it never asks a question it already has the answer to.

@@ -182,6 +182,104 @@ public static class GlunoClarificationBuilder
         }).ToList();
     }
 
+    // ── The route ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Which part of the trip — "Málaga · 5–7 Aug".
+    ///
+    /// Built from the resolved route and nothing else. The model may decide a
+    /// question is too broad; it cannot decide what the trip's stops ARE, and
+    /// a free-text city button would be a city nothing verified.
+    ///
+    /// Main stops only. An extra stop is an afternoon somewhere, not a part of
+    /// the trip somebody plans separately.
+    /// </summary>
+    public static IReadOnlyList<GlunoOptionDraft> RouteStopOptions(
+        TripRouteContext route, string language)
+    {
+        var swedish = IsSwedish(language);
+
+        return route.Stops
+            .Where(stop => stop.IsMainStop)
+            .Take(MaxOptions)
+            .Select((stop, index) => new GlunoOptionDraft($"stop-{index}", stop.Label)
+            {
+                Description = DateSpan(stop.From, stop.To, swedish),
+                // A date, because that is what the continuation acts on: the
+                // stop is identified by when the trip is there. No stop id
+                // exists to point at — the chain is resolved per turn.
+                EntityType = GlunoClarificationEntityTypes.Date,
+                Value = stop.From,
+                Icon = "location-outline",
+            })
+            .ToList();
+    }
+
+    /// <summary>
+    /// Which journey — "Málaga → Ronda".
+    ///
+    /// The arrow is the whole point: a leg is not a place, and labelling it
+    /// with one end would make two legs from the same city indistinguishable.
+    /// </summary>
+    public static IReadOnlyList<GlunoOptionDraft> RouteLegOptions(
+        TripRouteContext route, string language)
+    {
+        var swedish = IsSwedish(language);
+
+        return route.Legs
+            .Take(MaxOptions)
+            .Select((leg, index) => new GlunoOptionDraft(
+                $"leg-{index}", $"{leg.FromLabel} → {leg.ToLabel}")
+            {
+                // The date, and the transport they have already planned when
+                // there is any. "8 aug · Ferry Tarifa–Tanger" tells somebody
+                // which stretch this is far faster than the date alone on a
+                // trip where two legs fall on consecutive days.
+                Description = LegDescription(leg, swedish),
+                EntityType = GlunoClarificationEntityTypes.Date,
+                // The departure day. What the continuation needs to know which
+                // leg was meant, and it is a date the backend produced.
+                Value = leg.DepartureDate,
+                Icon = "navigate-outline",
+            })
+            .ToList();
+    }
+
+    /// <summary>
+    /// A leg's second line: when, and how, when the plan says how.
+    ///
+    /// Their own transport titles, never a mode Gluno inferred. A leg with no
+    /// planned travel shows the date alone rather than a guess at driving.
+    /// </summary>
+    private static string LegDescription(TripRouteLeg leg, bool swedish)
+    {
+        var when = leg.DepartureDate == leg.ArrivalDate
+            ? LongDate(DateOnly.Parse(leg.DepartureDate, CultureInfo.InvariantCulture), swedish)
+            : DateSpan(leg.DepartureDate, leg.ArrivalDate, swedish);
+
+        var transport = leg.TransportOnDay.FirstOrDefault();
+
+        return string.IsNullOrWhiteSpace(transport) ? when : $"{when} · {transport}";
+    }
+
+    /// "5–7 aug" — one month name when both ends share it, two when they do not.
+    private static string DateSpan(string fromIso, string toIso, bool swedish)
+    {
+        if (!DateOnly.TryParse(fromIso, CultureInfo.InvariantCulture, out var from)
+            || !DateOnly.TryParse(toIso, CultureInfo.InvariantCulture, out var to))
+        {
+            return string.Empty;
+        }
+
+        if (from == to) return LongDate(from, swedish);
+
+        var culture = CultureInfo.GetCultureInfo(swedish ? "sv-SE" : "en-GB");
+
+        return from.Month == to.Month
+            ? $"{from.Day}–{to.ToString("d MMM", culture)}"
+            : $"{from.ToString("d MMM", culture)} – {to.ToString("d MMM", culture)}";
+    }
+
     // ── Activities ───────────────────────────────────────────────────────
 
     /// <summary>

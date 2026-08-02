@@ -27,6 +27,18 @@ public sealed class TripFinding
     /// The day this concerns, ISO. Null for whole-trip findings.
     public string? Date { get; init; }
     public IReadOnlyList<Guid> ActivityIds { get; init; } = Array.Empty<Guid>();
+
+    /// <summary>
+    /// The stops and legs this is about, by label — so a finding can be shown
+    /// against the right part of the route rather than as loose prose.
+    ///
+    /// Labels rather than ids because the route is resolved per turn and has
+    /// none: a stop IS its place and its dates.
+    /// </summary>
+    public IReadOnlyList<string> StopLabels { get; init; } = Array.Empty<string>();
+
+    /// "Málaga → Ronda". Empty on a finding about a single place.
+    public IReadOnlyList<string> LegLabels { get; init; } = Array.Empty<string>();
     /// One sentence of SideQuest's reading. An opinion, not a measurement.
     public required string Explanation { get; init; }
     /// Computed values behind the finding — safe to state as fact.
@@ -121,9 +133,36 @@ public static class TripAnalyzer
     /// it is never reported to the user as a fact.
     private const int AssumedStopMinutes = 90;
 
-    public static IReadOnlyList<TripFinding> Analyze(GlunoTripContext trip, TripPace pace, IReadOnlyList<GlunoWeatherContext> weather)
+    /// <summary>
+    /// A stay shorter than this is barely a stop.
+    ///
+    /// One night. Arrive in the afternoon, leave in the morning — which is a
+    /// legitimate choice on a road trip and a mistake on a city break, so this
+    /// is a suggestion rather than a warning.
+    /// </summary>
+    private const int ShortStayDays = 1;
+
+    /// More stops than one per this many days is a lot of packing.
+    private const double DaysPerStopFloor = 1.5;
+
+    /// <summary>
+    /// Straight-line kilometres past which a move is a travel day rather than
+    /// a hop. Well beyond a city and its suburbs.
+    /// </summary>
+    private const double LongLegKm = 150;
+
+    public static IReadOnlyList<TripFinding> Analyze(
+        GlunoTripContext trip,
+        TripPace pace,
+        IReadOnlyList<GlunoWeatherContext> weather,
+        TripRouteContext? route = null)
     {
         var findings = new List<TripFinding>();
+
+        // The route is optional so every existing caller keeps working. When it
+        // is present the whole shape of the trip becomes analysable rather than
+        // just its days.
+        if (route != null) AnalyzeRoute(trip, route, findings);
 
         var byDate = trip.Activities
             .GroupBy(a => a.Date)
@@ -151,6 +190,215 @@ public static class TripAnalyzer
     }
 
     // ── Trip level ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The shape of the journey, rather than the contents of its days.
+    ///
+    /// Everything here is measured from the resolved route: how long each stay
+    /// is, how far each move is, whether a change of city has any transport
+    /// against it. None of it is a rule about how somebody should travel — a
+    /// one-night stop is a normal road-trip choice — so these are suggestions,
+    /// and each carries the stops or legs it is about so the answer can point
+    /// at the right part of the trip.
+    ///
+    /// NOTHING HERE GUESSES A COUNTRY OR A BORDER. SideQuest does not store a
+    /// country per stop, so a border crossing is unknown rather than inferred
+    /// from a place name.
+    /// </summary>
+    private static void AnalyzeRoute(
+        GlunoTripContext trip, TripRouteContext route, List<TripFinding> findings)
+    {
+        var stops = route.Stops.Where(stop => stop.IsMainStop).ToList();
+        if (stops.Count < 2) return;
+
+        // ── Too many places for the time ──────────────────────────────────
+        var days = route.Stops
+            .Where(stop => stop.IsMainStop)
+            .SelectMany(stop => stop.Dates)
+            .Distinct(StringComparer.Ordinal)
+            .Count();
+
+        if (days > 0 && (double)days / stops.Count < DaysPerStopFloor)
+        {
+            findings.Add(new TripFinding
+            {
+                Type = "many_stops_few_days",
+                Severity = "suggestion",
+                StopLabels = stops.Select(stop => stop.Label).ToList(),
+                Explanation = "There are a lot of places for the number of days.",
+                Facts = new Dictionary<string, string>
+                {
+                    ["stops"] = stops.Count.ToString(CultureInfo.InvariantCulture),
+                    ["days"] = days.ToString(CultureInfo.InvariantCulture),
+                },
+                SuggestedAction = "Consider dropping a stop or extending the trip.",
+            });
+        }
+
+        // ── A stay barely long enough to unpack ───────────────────────────
+        foreach (var stop in stops.Where(stop => stop.Dates.Count <= ShortStayDays))
+        {
+            findings.Add(new TripFinding
+            {
+                Type = "very_short_stay",
+                Severity = "suggestion",
+                Date = stop.From,
+                StopLabels = [stop.Label],
+                Explanation = "That is a very short stay.",
+                Facts = new Dictionary<string, string>
+                {
+                    ["nights"] = stop.Dates.Count.ToString(CultureInfo.InvariantCulture),
+                },
+            });
+        }
+
+        // ── Legs ──────────────────────────────────────────────────────────
+        foreach (var leg in route.Legs)
+        {
+            var label = $"{leg.FromLabel} → {leg.ToLabel}";
+
+            // A change of city with nothing in the plan that moves anybody. Not
+            // an error — people drive — but it is the most common thing missing
+            // from a route, and the day has no time reserved for it.
+            if (leg.TransportOnDay.Count == 0)
+            {
+                findings.Add(new TripFinding
+                {
+                    Type = "leg_without_transport",
+                    Severity = "suggestion",
+                    Date = leg.DepartureDate,
+                    LegLabels = [label],
+                    StopLabels = [leg.FromLabel, leg.ToLabel],
+                    Explanation = "Nothing in the plan covers getting between these two.",
+                    SuggestedAction = "Add the travel so the day has time reserved for it.",
+                });
+            }
+
+            // A long move followed by a full day. The travel is real time, and
+            // a day planned as if it were free is a day that does not work.
+            if (leg.StraightLineKm is { } kilometres && kilometres > LongLegKm)
+            {
+                var onArrival = trip.Activities.Count(activity =>
+                    Iso(activity.Date) == leg.ArrivalDate
+                    && activity.Role is "activity" or "meal");
+
+                if (onArrival >= 3)
+                {
+                    findings.Add(new TripFinding
+                    {
+                        Type = "busy_day_after_long_leg",
+                        Severity = "warning",
+                        Date = leg.ArrivalDate,
+                        LegLabels = [label],
+                        StopLabels = [leg.ToLabel],
+                        Explanation = "That is a long move with a full day straight after it.",
+                        Facts = new Dictionary<string, string>
+                        {
+                            // Named for what it is. A straight line is not a
+                            // driving distance and must not read as one.
+                            ["straightLineKm"] = kilometres.ToString("0", CultureInfo.InvariantCulture),
+                            ["activitiesOnArrival"] = onArrival.ToString(CultureInfo.InvariantCulture),
+                        },
+                    });
+                }
+            }
+
+            // ── Going back the way they came ──────────────────────────────
+            //
+            // Only from coordinates, and only when the return is unmistakable:
+            // the stop after next is closer to where this leg started than
+            // this leg's destination is. Anything subtler is a judgement about
+            // somebody's holiday rather than a measurement.
+            var next = route.Legs.FirstOrDefault(candidate => candidate.Index == leg.Index + 1);
+
+            if (next != null
+                && GeoDistance.KilometresBetween(
+                    leg.FromLatitude, leg.FromLongitude, next.ToLatitude, next.ToLongitude) is { } back
+                && leg.StraightLineKm is { } out1
+                && next.StraightLineKm is { } out2
+                && out1 > LongLegKm && out2 > LongLegKm
+                && back < out1 * 0.5)
+            {
+                findings.Add(new TripFinding
+                {
+                    Type = "route_doubles_back",
+                    Severity = "suggestion",
+                    Date = leg.DepartureDate,
+                    LegLabels = [label, $"{next.FromLabel} → {next.ToLabel}"],
+                    Explanation = "The route goes out and comes back close to where it started.",
+                    Facts = new Dictionary<string, string>
+                    {
+                        ["straightLineKm"] = out1.ToString("0", CultureInfo.InvariantCulture),
+                        ["returnsWithinKm"] = back.ToString("0", CultureInfo.InvariantCulture),
+                    },
+                    SuggestedAction = "Reordering the stops may cut a long drive.",
+                });
+            }
+        }
+
+        // ── An activity in the wrong city for its day ─────────────────────
+        //
+        // Coordinates only, and only where the day's stop has them too. This
+        // is the same rule GlunoDestinationCheck applies to a suggestion,
+        // turned on the plan the user already has.
+        foreach (var stop in stops.Where(stop => stop.Latitude.HasValue))
+        {
+            foreach (var date in stop.Dates)
+            {
+                foreach (var activity in trip.Activities)
+                {
+                    if (Iso(activity.Date) != date) continue;
+                    if (activity.Latitude is null) continue;
+
+                    var away = GeoDistance.KilometresBetween(
+                        stop.Latitude, stop.Longitude, activity.Latitude, activity.Longitude);
+
+                    if (away is not { } kilometres || kilometres <= GlunoDestinationCheck.MismatchKilometres)
+                        continue;
+
+                    findings.Add(new TripFinding
+                    {
+                        Type = "activity_in_another_city",
+                        Severity = "warning",
+                        Date = date,
+                        ActivityIds = [activity.Id],
+                        StopLabels = [stop.Label],
+                        Explanation = "That is planned a long way from where the trip is that day.",
+                        Facts = new Dictionary<string, string>
+                        {
+                            ["straightLineKm"] = kilometres.ToString("0", CultureInfo.InvariantCulture),
+                        },
+                    });
+                }
+            }
+        }
+
+        // ── Days in a city with nothing planned ───────────────────────────
+        foreach (var stop in stops)
+        {
+            var empty = stop.Dates
+                .Where(date => !trip.Activities.Any(activity => Iso(activity.Date) == date))
+                .ToList();
+
+            // The whole stay, not one quiet day — a free afternoon is the
+            // point of a holiday, and flagging it would be nagging.
+            if (empty.Count == stop.Dates.Count && stop.Dates.Count >= 2)
+            {
+                findings.Add(new TripFinding
+                {
+                    Type = "stop_with_nothing_planned",
+                    Severity = "info",
+                    Date = stop.From,
+                    StopLabels = [stop.Label],
+                    Explanation = "Nothing is planned for that stop yet.",
+                    Facts = new Dictionary<string, string>
+                    {
+                        ["days"] = stop.Dates.Count.ToString(CultureInfo.InvariantCulture),
+                    },
+                });
+            }
+        }
+    }
 
     private static void AnalyzeTripLevel(GlunoTripContext trip, List<TripFinding> findings)
     {

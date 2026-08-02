@@ -37,10 +37,29 @@ public static class GlunoClarificationTypes
     /// </summary>
     public const string ActivityTime = "activity_time";
 
+    /// <summary>
+    /// Which part of the trip — a city and the days it covers.
+    ///
+    /// "What should we see?" on a six-city trip is six different questions.
+    /// Answering about all of them at once is a wall of text; guessing one is
+    /// planning the wrong city.
+    /// </summary>
+    public const string RouteStop = "route_stop";
+
+    /// <summary>
+    /// Which journey — "Málaga → Ronda".
+    ///
+    /// "Anything worth stopping at on the way?" is a question about the space
+    /// BETWEEN two stops, and on a multi-stop trip there is more than one such
+    /// space.
+    /// </summary>
+    public const string RouteLeg = "route_leg";
+
     public static readonly IReadOnlyList<string> All =
     [
         Adventure, Day, Activity, Place, TransportMode,
         Pace, Budget, PreferenceScope, ProposalConflict, ActivityTime,
+        RouteStop, RouteLeg,
     ];
 
     public static bool IsKnown(string? type) => type != null && All.Contains(type);

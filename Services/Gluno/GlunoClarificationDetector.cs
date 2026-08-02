@@ -101,6 +101,11 @@ public static class GlunoClarificationDetector
             // Before the day: "add the second one" is about a specific place,
             // and knowing WHICH changes what the rest of the turn is even for.
             DetectDiscussedPlace,
+            // Before the day too: on a multi-city trip "what should we see?"
+            // is a question about WHICH CITY, and answering it as a day
+            // question would ask about a date when the gap is a place.
+            DetectRouteLeg,
+            DetectRouteStop,
             DetectDay,
             DetectActivity,
             DetectPlace,
@@ -128,6 +133,107 @@ public static class GlunoClarificationDetector
         is not GlunoIntent.SideQuestHelp
         and not GlunoIntent.NavigationRequest
         and not GlunoIntent.ForgetPreference;
+
+    // ── Which part of the trip ───────────────────────────────────────────
+
+    /// <summary>
+    /// Intents whose answer is about a PLACE, so a multi-city trip has to know
+    /// which one before it can be answered at all.
+    ///
+    /// Deliberately narrow. "How much have we spent?" spans the whole trip and
+    /// putting a city chooser in front of it is friction; "find a restaurant"
+    /// genuinely cannot be answered without knowing where.
+    /// </summary>
+    private static bool NeedsAPlace(GlunoIntentResult intent) => intent.PrimaryIntent
+        is GlunoIntent.PlaceRecommendation
+        or GlunoIntent.PlanEmptyDay
+        or GlunoIntent.AddActivity;
+
+    /// <summary>
+    /// "What's worth stopping at on the way?" on a trip with five legs.
+    ///
+    /// Runs BEFORE the model, the providers and any routing, because the
+    /// chosen stretch decides what gets searched. Searching first and asking
+    /// afterwards would spend a provider call on the wrong road.
+    /// </summary>
+    public static GlunoDetection DetectRouteLeg(GlunoDetectionInput input)
+    {
+        if (input.Context.Route is not { } route) return GlunoDetection.NotApplicable;
+        if (route.Legs.Count == 0) return GlunoDetection.NotApplicable;
+
+        var resolution = GlunoRouteReferenceResolver.Resolve(
+            input.Message, route, input.Today);
+
+        // Resolved outright — "between Málaga and Ronda". Carry on silently;
+        // asking would be asking something the sentence already said.
+        if (resolution.Leg is { } leg)
+        {
+            return GlunoDetection.Resolved(
+                GlunoClarificationTypes.RouteLeg, leg.DepartureDate, resolution.Reason ?? "named_leg");
+        }
+
+        if (!resolution.NeedsClarification
+            || resolution.ClarificationType != GlunoClarificationTypes.RouteLeg)
+        {
+            return GlunoDetection.NotApplicable;
+        }
+
+        return GlunoDetection.Ask(
+            GlunoClarificationTypes.RouteLeg,
+            GlunoClarificationBuilder.RouteLegOptions(route, input.Language),
+            resolution.Reason ?? "ambiguous_leg");
+    }
+
+    /// <summary>
+    /// "What should we see?" on a six-city trip.
+    ///
+    /// Six different questions wearing one sentence. Answering about all of
+    /// them is a wall of text; guessing one plans the wrong city.
+    ///
+    /// Silent whenever the message already says where — a named city, a date,
+    /// "after Málaga", or a "there" carried from the last turn. Asking then
+    /// would read as not having listened.
+    /// </summary>
+    public static GlunoDetection DetectRouteStop(GlunoDetectionInput input)
+    {
+        if (input.Context.Route is not { } route) return GlunoDetection.NotApplicable;
+
+        var resolution = GlunoRouteReferenceResolver.Resolve(
+            input.Message, route, input.Today);
+
+        // The whole route IS the subject. "Analyse our route" must never
+        // become "which city?" — that answers a different question.
+        if (resolution.Reason == "whole_route") return GlunoDetection.NotApplicable;
+
+        if (resolution.Stop is { } stop)
+        {
+            return GlunoDetection.Resolved(
+                GlunoClarificationTypes.RouteStop, stop.From, resolution.Reason ?? "named_stop");
+        }
+
+        // A journey question is the leg detector's business, not this one's.
+        if (resolution.ClarificationType == GlunoClarificationTypes.RouteLeg)
+            return GlunoDetection.NotApplicable;
+
+        // Explicitly ambiguous: two cities named and no relation between them.
+        if (resolution.NeedsClarification && resolution.Candidates.Count > 1)
+        {
+            return GlunoDetection.Ask(
+                GlunoClarificationTypes.RouteStop,
+                GlunoClarificationBuilder.RouteStopOptions(route, input.Language),
+                resolution.Reason ?? "two_named_stops");
+        }
+
+        // Nothing named, and the question needs a place. One stop answers
+        // itself; several is a real choice.
+        if (!NeedsAPlace(input.Intent)) return GlunoDetection.NotApplicable;
+        if (!route.HasMultipleStops) return GlunoDetection.NotApplicable;
+
+        return GlunoDetection.Ask(
+            GlunoClarificationTypes.RouteStop,
+            GlunoClarificationBuilder.RouteStopOptions(route, input.Language),
+            "broad_question_multi_stop");
+    }
 
     // ── The places Gluno just showed ─────────────────────────────────────
 

@@ -158,10 +158,23 @@ public sealed class GlunoContextBuilder : IGlunoContextBuilder
         var pace = TripPaces.Parse(
             preferences.FirstOrDefault(p => p.Key == Models.GlunoPreferenceKeys.Pace)?.Value);
 
+        // ── The route, on EVERY trip-scoped turn ──────────────────────────
+        //
+        // Built before and independently of the trip context, because that one
+        // is loaded from the turn's intent and is absent on app-help,
+        // navigation and preference turns. The route being absent on those
+        // turns is what left the model with nothing but `Trip.Destination` and
+        // the dates — the "I only have España" answer.
+        //
+        // Cheap enough to always pay for: two small queries and a pure resolve.
+        var route = tripId.HasValue
+            ? await BuildRouteAsync(tripId.Value, ct)
+            : null;
+
         GlunoTripContext? tripContext = null;
         if (tripId.HasValue && options.IncludeTrip)
         {
-            var (built, wasTruncated) = await BuildTripContextAsync(userId, tripId.Value, today, pace, options, ct);
+            var (built, wasTruncated) = await BuildTripContextAsync(userId, tripId.Value, today, pace, options, route, ct);
             tripContext = built;
             truncated |= wasTruncated;
 
@@ -189,6 +202,7 @@ public sealed class GlunoContextBuilder : IGlunoContextBuilder
             Today = today,
             User = user,
             Trip = tripContext,
+            Route = route,
             Trips = summaries,
             Preferences = preferences
                 .Select(p => new GlunoPreferenceContext { Key = p.Key, Value = p.Value, Scope = p.Scope })
@@ -305,8 +319,80 @@ public sealed class GlunoContextBuilder : IGlunoContextBuilder
         return places;
     }
 
+    /// <summary>
+    /// The Adventure's route, built from the SAME resolver the weather uses.
+    ///
+    /// Loaded on every trip-scoped turn regardless of the intent's load plan.
+    /// The trip context above is expensive and intent-gated; this is two small
+    /// queries, and losing it is what made Gluno claim it only knew the
+    /// country of a trip it had six cities for.
+    ///
+    /// Membership is NOT re-checked here — the caller has already resolved the
+    /// scope, and the tripId reaching this method came from the conversation
+    /// row rather than from the request.
+    /// </summary>
+    private async Task<TripRouteContext?> BuildRouteAsync(Guid tripId, CancellationToken ct)
+    {
+        var trip = await _db.Trips.AsNoTracking().FirstOrDefaultAsync(t => t.Id == tripId, ct);
+        if (trip == null) return null;
+
+        var dayLocations = await _db.TripDayLocations
+            .AsNoTracking()
+            .Where(d => d.TripId == tripId)
+            .OrderBy(d => d.StartDate)
+            .ThenBy(d => d.SortIndex)
+            .Take(GlunoContextLimits.MaxDayLocations + 1)
+            .ToListAsync(ct);
+
+        // Only what a location can be read from. A day the timeline could not
+        // resolve is filled from a stay or an activity that carries a REAL
+        // place — never from description text.
+        var located = await _db.TripActivities
+            .AsNoTracking()
+            .Where(a => a.TripId == tripId)
+            .OrderBy(a => a.Date)
+            .ThenBy(a => a.SortIndex)
+            .Take(GlunoContextLimits.MaxActivities)
+            .Select(a => new { a.Date, a.Title, a.Description, a.Category, a.Time })
+            .ToListAsync(ct);
+
+        var activities = located
+            .Select(a =>
+            {
+                var location = ActivityLocationMarkers.Read(a.Description);
+
+                return new GlunoActivityContext
+                {
+                    Date = a.Date,
+                    Title = a.Title,
+                    Time = a.Time,
+                    Category = a.Category,
+                    Role = ActivityRoles.FromCategory(a.Category, null),
+                    LocationLabel = location.Label,
+                    Latitude = location.Latitude,
+                    Longitude = location.Longitude,
+                };
+            })
+            .ToList();
+
+        var route = TripRouteResolver.Build(trip, dayLocations, activities);
+
+        // Shape only. Never a place name, a date, a coordinate or the trip's
+        // title — the whole point of the route is that it describes where
+        // somebody is going.
+        _logger.LogInformation(
+            "[GLUNO] route resolved stops={Stops} extra={Extra} legs={Legs} unplaced={Unplaced}",
+            route.Stops.Count(stop => stop.IsMainStop),
+            route.Stops.Count(stop => !stop.IsMainStop),
+            route.Legs.Count,
+            route.DaysWithoutLocation.Count);
+
+        return route;
+    }
+
     private async Task<(GlunoTripContext? Context, bool Truncated)> BuildTripContextAsync(
-        Guid userId, Guid tripId, DateOnly today, TripPace pace, GlunoContextOptions options, CancellationToken ct)
+        Guid userId, Guid tripId, DateOnly today, TripPace pace, GlunoContextOptions options,
+        TripRouteContext? route, CancellationToken ct)
     {
         var membership = await _db.TripMembers
             .AsNoTracking()
@@ -527,7 +613,10 @@ public sealed class GlunoContextBuilder : IGlunoContextBuilder
         // activity that was truncated out of the context.
         return (
             options.IncludeAnalysis
-                ? tripContext with { Findings = TripAnalyzer.Analyze(tripContext, pace, weather) }
+                // The route goes in too, so the findings can be about the SHAPE of
+                // the journey — short stays, a change of city with no travel
+                // against it — and not only about the contents of its days.
+                ? tripContext with { Findings = TripAnalyzer.Analyze(tripContext, pace, weather, route) }
                 : tripContext,
             truncated);
     }

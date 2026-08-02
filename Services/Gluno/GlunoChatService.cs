@@ -2916,10 +2916,21 @@ public sealed class GlunoChatService : IGlunoChatService
                 GlunoContextPriority.CurrentRequest, "turn",
                 JsonSerializer.Serialize(turnBrief, GlunoJson.Options))
             { IsCritical = true },
+            // ── The route, and it is never a casualty of trimming ─────────
+            //
             // Where the trip GOES, as its own section above everything else
-            // about it. Small, and the one thing whose absence makes Gluno ask
-            // a question the Adventure already answers — so it is never a
-            // casualty of trimming, even when the rest of the trip is.
+            // about it. Small — a handful of stops and the legs between them —
+            // and the one thing whose absence makes Gluno ask a question the
+            // Adventure already answers.
+            //
+            // It comes from context.Route rather than context.Trip on purpose:
+            // the trip context is loaded from the turn's intent and is null on
+            // app-help, navigation and preference turns, which is exactly when
+            // Gluno used to fall back to "I only have España and the dates".
+            new GlunoContextSection(
+                GlunoContextPriority.RelevantTrip, "route",
+                JsonSerializer.Serialize(context.Route, GlunoJson.Options))
+            { IsCritical = true },
             new GlunoContextSection(
                 GlunoContextPriority.RelevantTrip, "destinations",
                 JsonSerializer.Serialize(context.Trip?.Destinations, GlunoJson.Options))
