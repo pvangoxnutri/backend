@@ -453,6 +453,7 @@ public class GlunoController : ControllerBase
                 liveText: result.LiveAssistantText, liveProposals: result.Proposals),
             Clarification = MapClarification(result.Clarification),
             Action = MapAction(result.Action),
+            ResponseOrigin = result.ResponseOrigin,
         });
     }
 
@@ -568,6 +569,7 @@ public class GlunoController : ControllerBase
                 liveText: result.LiveAssistantText, liveProposals: result.Proposals),
             Clarification = MapClarification(result.Clarification),
             Action = MapAction(result.Action),
+            ResponseOrigin = result.ResponseOrigin,
         });
     }
 
@@ -765,6 +767,7 @@ public class GlunoController : ControllerBase
                 result.AssistantMessage!, result.ProposalRecords, livePlaces: result.Places,
                 liveText: result.LiveAssistantText, liveProposals: result.Proposals),
             Action = MapAction(result.Action),
+            ResponseOrigin = result.ResponseOrigin,
         });
     }
 
@@ -821,6 +824,7 @@ public class GlunoController : ControllerBase
                 liveText: result.LiveAssistantText, liveProposals: result.Proposals),
             Clarification = MapClarification(result.Clarification),
             Action = MapAction(result.Action),
+            ResponseOrigin = result.ResponseOrigin,
         });
     }
 

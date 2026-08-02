@@ -128,6 +128,16 @@ public sealed class GlunoTurnResult
     public GlunoTurnAction? Action { get; init; }
 
     /// <summary>
+    /// Which internal path produced this turn — see GlunoResponseOrigins.
+    ///
+    /// DIAGNOSTIC ONLY. A fixed vocabulary value, never rendered, and never
+    /// carrying text, ids or provider data. It exists so the next report can
+    /// name the branch instead of guessing between the model, the history, the
+    /// cache and an idempotency replay.
+    /// </summary>
+    public string? ResponseOrigin { get; init; }
+
+    /// <summary>
     /// A stable code from <see cref="GlunoFailureCodes"/> when something went
     /// wrong. The app localises it — a raw provider or SDK message never
     /// crosses this boundary.
@@ -578,6 +588,7 @@ public sealed class GlunoChatService : IGlunoChatService
                     Conversation = conversation,
                     AssistantMessage = replayed,
                     ProposalRecords = replayedProposals,
+                    ResponseOrigin = GlunoResponseOrigins.IdempotencyReplay,
                 };
             }
         }
@@ -768,7 +779,7 @@ public sealed class GlunoChatService : IGlunoChatService
             //
             // Only when the turn is about a place. "Add a rest day" is an add
             // request too, and it belongs to the model.
-            if (LooksLikePlaceAdd(intent, text))
+            if (LooksLikePlaceAdd(text))
             {
                 return await AskWhichPlaceToAddAsync(conversation, userId, text, ct);
             }
@@ -1511,6 +1522,7 @@ public sealed class GlunoChatService : IGlunoChatService
             ProposalRecords = records,
             Places = visiblePlaces,
             Navigations = visibleNavigations,
+            ResponseOrigin = GlunoResponseOrigins.ModelTurn,
             // Null unless the two differ, so the ordinary turn is unchanged.
             LiveAssistantText = ReferenceEquals(persistedText, assistantText) ? null : assistantText,
         };
@@ -2001,19 +2013,25 @@ public sealed class GlunoChatService : IGlunoChatService
     /// "Add a rest day", "add an hour to lunch" are about the itinerary and
     /// belong to the model, which is why this is narrow: a false positive
     /// answers a planning question with "which place did you mean?".
+    ///
+    /// THE ROUTER IS DELIBERATELY NOT CONSULTED, and that is the fix for a
+    /// production failure. This used to require the intent to be
+    /// PlaceRecommendation or AddActivity as well. But the router scores on
+    /// CATEGORY WORDS — "restaurang", "museum", "sevärdhet" — and a place named
+    /// outright contains none of them; "Lägg till Casas de Pilatos" in a
+    /// conversation with no trip scope classifies as Unclear. So the gate
+    /// failed, the add branch fell through, and the model answered by asking
+    /// the user to type the same sentence again.
+    ///
+    /// A third condition that can fail independently is a third way to reach
+    /// the model. The two deterministic text signals — this one and
+    /// IsAddRequest — already establish the intent between them, and neither
+    /// depends on anything the router had to guess.
     /// </summary>
-    private static bool LooksLikePlaceAdd(GlunoIntentResult intent, string text)
-    {
-        if (intent.PrimaryIntent is GlunoIntent.PlaceRecommendation or GlunoIntent.AddActivity)
-        {
-            // A named or numbered thing rather than a described one. The
-            // matcher below is the same one the resolved path uses, so what
-            // counts as "pointing at a place" cannot drift between them.
-            return GlunoPlaceOptions.PointsAtSomethingShown(text);
-        }
-
-        return false;
-    }
+    private static bool LooksLikePlaceAdd(string text)
+        // The same matcher the resolved path uses, so what counts as pointing
+        // at a place cannot drift between deciding to ask and deciding which.
+        => GlunoPlaceOptions.PointsAtSomethingShown(text);
 
     /// <summary>
     /// "Which place?" — with the shortlist when there is one.
@@ -2267,6 +2285,7 @@ public sealed class GlunoChatService : IGlunoChatService
                     UserMessage = replayed,
                     AssistantMessage = replayed,
                     ProposalRecords = replayedProposals,
+                    ResponseOrigin = GlunoResponseOrigins.IdempotencyReplay,
                 };
             }
         }
@@ -2340,6 +2359,7 @@ public sealed class GlunoChatService : IGlunoChatService
                     Conversation = conversation,
                     UserMessage = replayed,
                     AssistantMessage = replayed,
+                    ResponseOrigin = GlunoResponseOrigins.IdempotencyReplay,
                 };
             }
         }
@@ -2471,6 +2491,7 @@ public sealed class GlunoChatService : IGlunoChatService
             AssistantMessage = assistantMessage,
             Places = places,
             LiveAssistantText = retention.Reduced ? liveText : null,
+            ResponseOrigin = GlunoResponseOrigins.PlaceRefresh,
         };
     }
 
@@ -2763,6 +2784,7 @@ public sealed class GlunoChatService : IGlunoChatService
             Proposals = [proposal],
             ProposalRecords = records,
             LiveAssistantText = identityOnly ? liveText : null,
+            ResponseOrigin = GlunoResponseOrigins.Proposal,
         };
     }
 
@@ -2951,6 +2973,7 @@ public sealed class GlunoChatService : IGlunoChatService
             // a reload simply does not offer it rather than offering a button
             // whose context has gone.
             Action = action,
+            ResponseOrigin = GlunoResponseOrigins.PlaceAdd,
         };
     }
 

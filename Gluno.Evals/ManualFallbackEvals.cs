@@ -140,7 +140,9 @@ public class ManualFallbackEvals
         Assert.True(start > 0);
         // THE BRANCH THAT WAS THE BUG. It used to end at `if (added != null)`
         // and fall through; now an unresolved place asks which one.
-        Assert.Contains("if (LooksLikePlaceAdd(intent, text))", body);
+        // The router is no longer consulted — it could not recognise a place
+        // named outright, and that gap was the way through to the model.
+        Assert.Contains("if (LooksLikePlaceAdd(text))", body);
         Assert.Contains("return await AskWhichPlaceToAddAsync(conversation, userId, text, ct);", body);
     }
 
@@ -154,6 +156,7 @@ public class ManualFallbackEvals
     [InlineData("Lägg till en vilodag", false)]
     [InlineData("lägg till en timme", false)]
     [InlineData("add a rest day", false)]
+    [InlineData("Add a note about the ferry", false)]
     public void Only_a_place_shaped_add_asks_which_place(string message, bool expected)
     {
         Assert.Equal(expected, GlunoPlaceOptions.PointsAtSomethingShown(message));

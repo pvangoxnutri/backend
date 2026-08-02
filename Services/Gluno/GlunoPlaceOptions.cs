@@ -222,28 +222,28 @@ public static class GlunoPlaceOptions
 
         if (Ordinals.Any(group => group.Any(word => ContainsWord(text, word)))) return true;
 
-        // A capitalised or otherwise substantial word beyond the add phrase
-        // itself. Place names are long; "day", "dag", "hour" are not.
-        return message
-            .Split([' ', ',', '.', '!', '?'], StringSplitOptions.RemoveEmptyEntries)
-            .Any(word => word.Length >= 5
-                && !AddWords.Any(add => Normalise(word).StartsWith(add.Trim(), StringComparison.Ordinal))
-                && !PlanWords.Contains(Normalise(word), StringComparer.Ordinal));
-    }
+        // ── A proper noun ─────────────────────────────────────────────────
+        //
+        // A capitalised word that is not the first of the sentence. Places have
+        // names; itinerary items are described.
+        //
+        // THIS REPLACED A LENGTH TEST, and the length test was wrong in the
+        // expensive direction: "Add a note about the ferry" and "Boka in middag
+        // på torsdag" both contain a long word, so both looked like somebody
+        // pointing at a recommendation. Deciding they were would answer a
+        // planning request with "which place did you mean?".
+        //
+        // The known miss is a name typed in lower case. That costs nothing
+        // here: a name only reaches this test when matching it against the
+        // shown places has ALREADY failed, and the alternative for a genuine
+        // itinerary request is worse.
+        var words = message.Split(
+            [' ', ',', '.', '!', '?', '\n'], StringSplitOptions.RemoveEmptyEntries);
 
-    /// <summary>
-    /// Words that make an add request about the ITINERARY rather than a place.
-    ///
-    /// Kept small on purpose: everything here is a false negative waiting to
-    /// happen if a real place is ever called it, and the cost of being wrong
-    /// the other way is only that the model answers instead.
-    /// </summary>
-    private static readonly string[] PlanWords =
-    [
-        "vilodag", "vilodagar", "ledig", "paus", "lunch", "middag", "frukost",
-        "timme", "timmar", "dagar", "aktivitet", "anteckning",
-        "restday", "break", "buffer", "hours", "notes", "activity", "reminder",
-    ];
+        return words
+            .Skip(1)
+            .Any(word => char.IsUpper(word[0]) && word.Length >= 2);
+    }
 
     private static readonly string[][] Ordinals =
     [

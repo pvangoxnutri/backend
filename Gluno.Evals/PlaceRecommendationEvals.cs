@@ -398,7 +398,7 @@ public class PlaceRecommendationEvals
         var screen = Mobile("app", "gluno.tsx");
 
         var start = screen.IndexOf("const runAddPlace = useCallback(", StringComparison.Ordinal);
-        var body = screen[start..(start + 1200)];
+        var body = screen[start..(start + 1900)];
 
         Assert.True(start > 0);
         // A proposal card, or a question about which Adventure or which day.

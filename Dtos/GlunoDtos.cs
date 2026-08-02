@@ -346,6 +346,15 @@ public class GlunoTurnResponseDto
     /// remembers.
     /// </summary>
     public GlunoTurnActionDto? Action { get; set; }
+
+    /// <summary>
+    /// Which internal path produced this turn.
+    ///
+    /// DIAGNOSTIC ONLY — a fixed vocabulary value, never rendered. The app may
+    /// log it in a development build; showing it to a user would be exactly the
+    /// debug text this contract exists to keep out of the chat.
+    /// </summary>
+    public string? ResponseOrigin { get; set; }
 }
 
 /// <summary>
