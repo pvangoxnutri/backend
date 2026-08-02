@@ -235,6 +235,16 @@ public class GlunoMessageDto
     /// Proposals produced by this turn, if any. Only ever set on an assistant
     /// turn.
     public List<GlunoProposalDto> Proposals { get; set; } = new();
+
+    /// <summary>
+    /// The tappable question this turn asked, if any.
+    ///
+    /// Carried on the MESSAGE so a reloaded conversation renders its cards
+    /// again. Without it the assistant turn saying "Which Adventure is this
+    /// about?" comes back with nothing under it, and a question the user could
+    /// have answered with one tap becomes one they have to retype.
+    /// </summary>
+    public GlunoClarificationDto? Clarification { get; set; }
     /// External places found for this turn, rendered as cards. Only ever set
     /// on an assistant turn.
     public List<GlunoPlaceDto> Places { get; set; } = new();

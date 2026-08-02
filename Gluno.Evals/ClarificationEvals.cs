@@ -238,16 +238,37 @@ public class ClarificationEvals
     // ── Localisation ─────────────────────────────────────────────────────
 
     [Theory]
-    [InlineData("sv", "Vilket av dina Adventures menar du?")]
-    [InlineData("en", "Which of your Adventures do you mean?")]
+    [InlineData("sv", "Vilket Adventure gäller det?")]
+    [InlineData("en", "Which Adventure is this about?")]
     public void The_question_is_short_and_localised(string language, string expected)
     {
         var question = GlunoClarificationBuilder.QuestionFor(
             GlunoClarificationTypes.Adventure, language);
 
         Assert.Equal(expected, question);
-        // The response contract: a question, not a preamble.
+        // The response contract: a question, not a preamble. The options ARE
+        // the explanation, and a sentence about scope in front of them is
+        // words nobody reads before tapping.
         Assert.True(question.Length < 60);
+        Assert.True(question.Split(' ').Length <= 10);
+    }
+
+    [Fact]
+    public void Every_clarification_question_stays_within_the_short_contract()
+    {
+        foreach (var type in GlunoClarificationTypes.All)
+        {
+            foreach (var language in new[] { "sv", "en" })
+            {
+                var question = GlunoClarificationBuilder.QuestionFor(type, language);
+
+                // Ten words. Past that it stops being a question and starts
+                // being an explanation of one.
+                Assert.True(
+                    question.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length <= 10,
+                    $"{type}/{language} asks too much: {question}");
+            }
+        }
     }
 
     [Fact]

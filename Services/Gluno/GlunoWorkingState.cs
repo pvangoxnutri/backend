@@ -121,6 +121,27 @@ public sealed class GlunoRecentMentions
     public const int MaxHotels = 3;
     public const int MaxNavigationTargets = 3;
 
+    /// <summary>
+    /// The Adventure this conversation last actually settled on.
+    ///
+    /// WHY IT IS HERE. A global conversation can be about a trip without being
+    /// scoped to one: somebody asks about Semester 2026, gets an answer, then
+    /// says "and now?". The second message names nothing, so without this the
+    /// turn has no trip and Gluno asks which Adventure — about the one it
+    /// answered ten seconds ago.
+    ///
+    /// WRITTEN ONLY FROM A VERIFIED RESOLUTION: an Adventure the user named
+    /// outright, one they tapped, or one the Adventure header supplied. Never
+    /// from a guess and never from the model, which has no way to produce a
+    /// trip id at all.
+    ///
+    /// A WEAK SIGNAL BY DESIGN. It is the last thing consulted, it never
+    /// overrides a trip the current message names, and it is re-verified
+    /// against membership every time it is used — a trip that was deleted or
+    /// left in the meantime is simply not a candidate.
+    /// </summary>
+    public Guid? LastAdventureId { get; set; }
+
     public List<MentionedActivity> Activities { get; set; } = [];
     public List<MentionedPlace> Places { get; set; } = [];
     public List<MentionedProposal> Proposals { get; set; } = [];

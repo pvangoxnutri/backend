@@ -181,7 +181,29 @@ public static class GlunoAdventureReferenceResolver
             }
         }
 
-        // ── Nothing named ─────────────────────────────────────────────────
+        // ── The conversation already settled this ─────────────────────────
+        //
+        // Checked BEFORE the "is this about a trip at all" gate, and that
+        // ordering is the whole fix for the reported bug. "Ser du nu?" names
+        // no trip, no city and no date, and contains none of the trip words —
+        // so the gate below rejected it and the turn ran with no Adventure,
+        // one message after answering about Semester 2026.
+        //
+        // Following what the conversation last settled on is not a guess. It
+        // was verified when it was stored, and it is verified again here by
+        // being in `trips` at all — a trip since deleted, or one the user has
+        // left, is not in that list.
+        if (lastDiscussed is { } previous && trips.Any(trip => trip.TripId == previous))
+        {
+            return new GlunoAdventureResolution
+            {
+                Outcome = GlunoAdventureMatch.Resolved,
+                TripId = previous,
+                Reason = "last_discussed",
+            };
+        }
+
+        // ── Nothing named, and nothing settled ────────────────────────────
         //
         // Is this even about a trip? "How do I change my password" is not, and
         // an Adventure chooser in front of it is pure friction.
@@ -198,19 +220,6 @@ public static class GlunoAdventureReferenceResolver
                 Outcome = GlunoAdventureMatch.Resolved,
                 TripId = active[0].TripId,
                 Reason = "only_active",
-            };
-        }
-
-        // The weakest signal, and only when it stands alone. Following what
-        // the conversation last settled on is reasonable; overriding a named
-        // trip with it would not be.
-        if (lastDiscussed is { } previous && trips.Any(trip => trip.TripId == previous))
-        {
-            return new GlunoAdventureResolution
-            {
-                Outcome = GlunoAdventureMatch.Resolved,
-                TripId = previous,
-                Reason = "last_discussed",
             };
         }
 

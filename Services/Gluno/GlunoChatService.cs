@@ -1038,6 +1038,29 @@ public sealed class GlunoChatService : IGlunoChatService
         // apologetic paragraph.
         assistantText = WithFreshnessNote(assistantText, ledger, workflow, context.User.Language);
 
+        // ── Nothing may point at a button that is not there ───────────────
+        //
+        // Every card in Gluno is built by the backend. This path produced
+        // none, so any sentence promising one — "pick Semester 2026 below" —
+        // is telling the user to tap something that does not exist. That
+        // happened in production, and the model had no way to know.
+        //
+        // The promise is removed rather than the answer failed: one bad clause
+        // must not cost an otherwise good reply. If the whole reply was the
+        // promise, a plain question replaces it.
+        if (GlunoUiPromise.PromisesAChoice(assistantText))
+        {
+            _logger.LogWarning("[GLUNO] answer promised a choice with no card attached");
+
+            var trimmed = GlunoUiPromise.WithoutPromises(assistantText);
+
+            assistantText = trimmed.Length > 0
+                ? trimmed
+                : string.Equals(context.User.Language, "sv", StringComparison.OrdinalIgnoreCase)
+                    ? "Vilket Adventure gäller det?"
+                    : "Which Adventure is this about?";
+        }
+
         // ── Quality gate ──────────────────────────────────────────────────
         //
         // The last deterministic check before anything reaches the user. A
@@ -1432,6 +1455,17 @@ public sealed class GlunoChatService : IGlunoChatService
         if (original == null)
             return new GlunoTurnResult { Error = GlunoTurnError.ConversationNotFound };
 
+        // ── "Not sure yet" ────────────────────────────────────────────────
+        //
+        // A real answer, not a dismissal. The turn continues with NO Adventure
+        // and nothing trip-shaped is loaded — the whole point is that the user
+        // said they do not have one in mind, and quietly picking the most
+        // likely would be the guess the card existed to avoid.
+        if (option.Value == GlunoClarificationBuilder.NoAdventureKey)
+        {
+            return await ContinueWithoutAdventureAsync(userId, clarification, ct);
+        }
+
         // Only the Adventure choice changes what the turn can see. Every other
         // type answers a question inside a scope that is already settled.
         Guid? scopeTripId = option.EntityType == GlunoClarificationEntityTypes.Trip
@@ -1465,6 +1499,50 @@ public sealed class GlunoChatService : IGlunoChatService
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// The user said they do not have an Adventure in mind. Says so, briefly,
+    /// and stops.
+    ///
+    /// No trip loaded, no route, no model round, no providers. The
+    /// conversation stays global and the next message can name a trip or not.
+    /// A one-line acknowledgement is the whole answer — anything longer would
+    /// be explaining a decision the user just made.
+    /// </summary>
+    private async Task<GlunoTurnResult> ContinueWithoutAdventureAsync(
+        Guid userId, GlunoClarification clarification, CancellationToken ct)
+    {
+        var conversation = await _conversations.GetOwnedAsync(clarification.ConversationId, userId, ct);
+        if (conversation == null)
+            return new GlunoTurnResult { Error = GlunoTurnError.ConversationNotFound };
+
+        var language = await _db.Users
+            .Where(user => user.Id == userId)
+            .Select(user => user.Language)
+            .FirstOrDefaultAsync(ct) ?? "en";
+
+        var text = string.Equals(language, "sv", StringComparison.OrdinalIgnoreCase)
+            ? "Okej — skriv vad du vill ha hjälp med ändå."
+            : "Fine — tell me what you'd like help with anyway.";
+
+        var assistantMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.Assistant,
+            Text = text,
+        }, ct);
+
+        await _clarifications.RecordContinuationAsync(clarification.Id, assistantMessage.Id, ct);
+
+        _logger.LogInformation("[GLUNO] adventure declined, staying global");
+
+        return new GlunoTurnResult
+        {
+            Conversation = conversation,
+            UserMessage = assistantMessage,
+            AssistantMessage = assistantMessage,
+        };
     }
 
     /// <summary>
@@ -1537,12 +1615,14 @@ public sealed class GlunoChatService : IGlunoChatService
             message,
             candidates,
             DateOnly.FromDateTime(DateTime.UtcNow),
-            // The working state tracks recent activities, places and dates but
-            // not a recent ADVENTURE, so this stays null rather than being
-            // guessed from one of those. The consequence is the safe one: a
-            // trip question that names nothing asks instead of assuming, which
-            // is what it should do anyway when several trips are plausible.
-            lastDiscussed: null);
+            // The Adventure this conversation last settled on. Re-verified by
+            // the candidate list above rather than trusted: a trip the user
+            // has since left or deleted is not in `candidates`, so the
+            // resolver drops it.
+            //
+            // The weakest signal there is — consulted only when the message
+            // named nothing at all.
+            lastDiscussed: workingState.Recent.LastAdventureId);
     }
 
     /// <summary>
@@ -2843,7 +2923,13 @@ public sealed class GlunoChatService : IGlunoChatService
         CancellationToken ct)
     {
         var ranked = GlunoClarificationBuilder.RankTrips(choices, text, context.Today);
-        var options = GlunoClarificationBuilder.TripOptions(ranked, context.Today, context.User.Language);
+
+        // The Adventures, plus a way past the question. Somebody asking
+        // something general does not have one in mind, and a chooser with no
+        // exit makes them pick at random to get on with the conversation.
+        var options = GlunoClarificationBuilder.WithNoAdventureOption(
+            GlunoClarificationBuilder.TripOptions(ranked, context.Today, context.User.Language),
+            context.User.Language);
 
         var userMessage = await _conversations.AppendAsync(new GlunoMessage
         {
@@ -3611,6 +3697,22 @@ public sealed class GlunoChatService : IGlunoChatService
                 subject.Kind.ToString(), subject.Id, subject.Label, null));
 
             if (state.RejectedOptions.Count > 8) state.RejectedOptions.RemoveRange(8, state.RejectedOptions.Count - 8);
+        }
+
+        // ── Which Adventure this turn was actually about ──────────────────
+        //
+        // Remembered on its own, BEFORE the significance gate. A turn that
+        // answered a question about Semester 2026 and produced no places and
+        // no proposals is not "significant" by the rule below — but it is
+        // exactly the turn whose Adventure the next message means when it says
+        // "and now?".
+        //
+        // Only ever a trip the context actually resolved and loaded, which
+        // means membership was already verified. The model has no part in it.
+        if (context.Trip is { } settled && state.Recent.LastAdventureId != settled.Id)
+        {
+            state.Recent.LastAdventureId = settled.Id;
+            await _workingState.SaveAsync(conversationId, state, ct);
         }
 
         if (!significant) return;

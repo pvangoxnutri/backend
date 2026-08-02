@@ -666,13 +666,25 @@ public class GlunoController : ControllerBase
 
         var byMessage = records.GroupBy(r => r.MessageId).ToDictionary(g => g.Key, g => (IReadOnlyList<Models.GlunoProposalRecord>)g.ToList());
 
+        // The tappable questions these turns asked. Without this a reloaded
+        // conversation shows "Which Adventure is this about?" with no options
+        // under it — a question the user could have answered with one tap
+        // becomes one they have to retype.
+        var clarifications = await _clarifications.ListForMessagesAsync(
+            assistantIds, GetUserId(), HttpContext.RequestAborted);
+
         return messages
-            .Select(m => MapMessage(m, byMessage.GetValueOrDefault(m.Id, Array.Empty<Models.GlunoProposalRecord>())))
+            .Select(m => MapMessage(
+                m,
+                byMessage.GetValueOrDefault(m.Id, Array.Empty<Models.GlunoProposalRecord>()),
+                clarifications.GetValueOrDefault(m.Id)))
             .ToList();
     }
 
     private static GlunoMessageDto MapMessage(
-        GlunoMessage m, IReadOnlyList<Models.GlunoProposalRecord> proposalRecords)
+        GlunoMessage m,
+        IReadOnlyList<Models.GlunoProposalRecord> proposalRecords,
+        Models.GlunoClarification? clarification = null)
     {
         var (legacyProposals, places, navigations, sources) = ReadPayload(m);
 
@@ -696,6 +708,9 @@ public class GlunoController : ControllerBase
             Places = places,
             Navigations = navigations,
             Sources = sources,
+            // So a reloaded conversation renders its cards again instead of
+            // showing a question with nothing under it.
+            Clarification = MapClarification(clarification),
             CreatedAt = m.CreatedAt,
         };
     }

@@ -53,6 +53,16 @@ public interface IGlunoClarificationService
 
     Task<GlunoClarification?> GetForConversationAsync(
         Guid conversationId, Guid userId, CancellationToken ct);
+
+    /// <summary>
+    /// The clarifications attached to a page of messages, by message id.
+    ///
+    /// Without this a card vanishes the moment the conversation is reloaded:
+    /// the assistant turn saying "Which Adventure is this about?" comes back
+    /// with no options under it, and the question reads as unanswerable.
+    /// </summary>
+    Task<IReadOnlyDictionary<Guid, GlunoClarification>> ListForMessagesAsync(
+        IReadOnlyList<Guid> messageIds, Guid userId, CancellationToken ct);
 }
 
 /// <summary>
@@ -294,6 +304,30 @@ public sealed class GlunoClarificationService : IGlunoClarificationService
             .Where(row => row.Id == clarificationId)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(row => row.ContinuationMessageId, messageId), ct);
+
+    public async Task<IReadOnlyDictionary<Guid, GlunoClarification>> ListForMessagesAsync(
+        IReadOnlyList<Guid> messageIds, Guid userId, CancellationToken ct)
+    {
+        if (messageIds.Count == 0)
+            return new Dictionary<Guid, GlunoClarification>();
+
+        // Scoped to the caller in the QUERY, like every other read here.
+        var rows = await _db.GlunoClarifications
+            .AsNoTracking()
+            .Include(row => row.Options)
+            .Where(row => row.UserId == userId
+                && row.MessageId != null
+                && messageIds.Contains(row.MessageId.Value))
+            .ToListAsync(ct);
+
+        // Newest per message. A message should only ever carry one, but a
+        // deterministic pick beats an exception if that ever stops being true.
+        return rows
+            .GroupBy(row => row.MessageId!.Value)
+            .ToDictionary(
+                group => group.Key,
+                group => group.OrderByDescending(row => row.CreatedAt).First());
+    }
 
     public Task<GlunoClarification?> GetForConversationAsync(
         Guid conversationId, Guid userId, CancellationToken ct)

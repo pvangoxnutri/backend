@@ -128,6 +128,37 @@ public static class GlunoClarificationBuilder
         }).ToList();
     }
 
+    /// <summary>
+    /// The option meaning "carry on without an Adventure".
+    ///
+    /// A fixed key rather than a trip id, so the continuation can tell it apart
+    /// from a real choice and refuse to load any trip context for it.
+    /// </summary>
+    public const string NoAdventureKey = "no-adventure";
+
+    /// <summary>
+    /// Appends the honest way out of an Adventure chooser.
+    ///
+    /// Somebody asking a general travel question does not have an Adventure in
+    /// mind, and a chooser with no way past it makes them pick one at random to
+    /// get on with the conversation.
+    ///
+    /// ONLY ON THE QUESTION, never on a search result. A search that found one
+    /// Adventure should show that one — adding an escape hatch to a list the
+    /// user just narrowed themselves reads as the search having failed.
+    /// </summary>
+    public static IReadOnlyList<GlunoOptionDraft> WithNoAdventureOption(
+        IReadOnlyList<GlunoOptionDraft> options, string language)
+        => options
+            .Append(new GlunoOptionDraft(
+                NoAdventureKey, IsSwedish(language) ? "Vet inte än" : "Not sure yet")
+            {
+                EntityType = GlunoClarificationEntityTypes.Enum,
+                Value = NoAdventureKey,
+                Icon = "help-circle-outline",
+            })
+            .ToList();
+
     private static string TripDescription(TripChoice trip, DateOnly today, bool swedish)
     {
         var dates = trip.EndDate is { } end
@@ -417,8 +448,11 @@ public static class GlunoClarificationBuilder
 
         return type switch
         {
+            // Short by contract. The options ARE the explanation; a sentence
+            // about scope in front of them is words nobody reads before
+            // tapping.
             GlunoClarificationTypes.Adventure => swedish
-                ? "Vilket av dina Adventures menar du?" : "Which of your Adventures do you mean?",
+                ? "Vilket Adventure gäller det?" : "Which Adventure is this about?",
             GlunoClarificationTypes.Day => swedish
                 ? "Vilken dag menar du?" : "Which day do you mean?",
             GlunoClarificationTypes.Activity => swedish
