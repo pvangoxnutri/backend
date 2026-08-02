@@ -729,6 +729,26 @@ public sealed class GlunoChatService : IGlunoChatService
         {
             var added = await AddNamedPlaceAsync(userId, conversation, text, ct);
             if (added != null) return added;
+
+            // ── When no place could be resolved ───────────────────────────
+            //
+            // THIS BRANCH IS THE PRODUCTION BUG. It used to fall through to the
+            // model, which — handed an add-shaped question it had no place for
+            // — reached into the capability catalogue and answered "open the
+            // Adventure and use the add button". Correct as documentation,
+            // useless as a reply to "add this one", and the user already had
+            // the Adventure open.
+            //
+            // Asking which place is the honest answer and keeps the
+            // deterministic path: the reply resolves against the same shortlist
+            // and goes straight to a proposal.
+            //
+            // Only when the turn is about a place. "Add a rest day" is an add
+            // request too, and it belongs to the model.
+            if (LooksLikePlaceAdd(intent, text))
+            {
+                return await AskWhichPlaceToAddAsync(conversation, userId, text, ct);
+            }
         }
 
         // ── "Give me something I can tap" ─────────────────────────────────
@@ -1088,6 +1108,32 @@ public sealed class GlunoChatService : IGlunoChatService
         }
 
         var assistantText = ResolveAssistantText(result, proposals, context.User.Language);
+
+        // ── Never "go and do it yourself" ─────────────────────────────────
+        //
+        // THE PRODUCTION FAILURE. Somebody with an Adventure already selected
+        // asked Gluno to add a place and was told to open the Adventure and add
+        // it manually. The model did not invent that: SideQuest's own
+        // capability catalogue answers "how do I add an Activity?" with exactly
+        // that sentence, and nothing stopped it being reused as the reply to
+        // "add this one".
+        //
+        // A LAST LINE OF DEFENCE, not the fix. The fix is that an add request
+        // is resolved deterministically above and never reaches the model —
+        // this catches the paths nobody has thought of yet.
+        var guarded = GlunoManualFallback.Clean(
+            assistantText, intent.PrimaryIntent, context.User.Language);
+
+        if (!ReferenceEquals(guarded, assistantText))
+        {
+            // Codes only. The text that triggered it is the model's, and
+            // logging it would put the answer in the log line.
+            _logger.LogWarning(
+                "[GLUNO] manual fallback replaced intent={Intent}", intent.PrimaryIntent);
+
+            telemetry.FailureCategory = "manual_fallback";
+            assistantText = guarded;
+        }
 
         var visiblePlaces = places.Take(MaxPlaceCardsPerTurn).ToList();
         var visibleNavigations = navigations.Take(MaxNavigationCardsPerTurn).ToList();
@@ -1820,6 +1866,78 @@ public sealed class GlunoChatService : IGlunoChatService
         }
 
         return ordered;
+    }
+
+    /// <summary>
+    /// Whether an add request is about a PLACE rather than about the plan.
+    ///
+    /// "Add Real Alcázar" and "add the first one" point at something external.
+    /// "Add a rest day", "add an hour to lunch" are about the itinerary and
+    /// belong to the model, which is why this is narrow: a false positive
+    /// answers a planning question with "which place did you mean?".
+    /// </summary>
+    private static bool LooksLikePlaceAdd(GlunoIntentResult intent, string text)
+    {
+        if (intent.PrimaryIntent is GlunoIntent.PlaceRecommendation or GlunoIntent.AddActivity)
+        {
+            // A named or numbered thing rather than a described one. The
+            // matcher below is the same one the resolved path uses, so what
+            // counts as "pointing at a place" cannot drift between them.
+            return GlunoPlaceOptions.PointsAtSomethingShown(text);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// "Which place?" — with the shortlist when there is one.
+    ///
+    /// NEVER a manual instruction. The user asked Gluno to add something; the
+    /// only honest reasons to come back empty are that nothing was shown or
+    /// that the sentence did not say which, and both are questions rather than
+    /// referrals to another screen.
+    /// </summary>
+    private async Task<GlunoTurnResult> AskWhichPlaceToAddAsync(
+        GlunoConversation conversation, Guid userId, string text, CancellationToken ct)
+    {
+        // The most recent turn that showed places, whether it kept the cards or
+        // only their ids.
+        var recent = await _db.GlunoMessages
+            .AsNoTracking()
+            .Where(message => message.ConversationId == conversation.Id
+                && message.Role == GlunoMessageRoles.Assistant
+                && message.PayloadJson != null)
+            .OrderByDescending(message => message.CreatedAt)
+            .Take(GlunoContextLimits.MaxDiscussedPlaceTurns)
+            .ToListAsync(ct);
+
+        foreach (var message in recent)
+        {
+            var places = ReadPlaces(message);
+
+            if (places.Count == 0)
+            {
+                var refetched = await RefetchShownPlacesAsync(message, userId, ct);
+                if (refetched == null) continue;
+
+                places = refetched;
+            }
+
+            // Verified options: every row is something this conversation
+            // actually offered, and tapping one goes straight to the add flow.
+            return await AskWhichPlaceAsync(conversation, userId, text, places, ct);
+        }
+
+        var language = await LanguageOfAsync(userId, ct);
+
+        // Nothing was ever shown. Short, and about what to do next here —
+        // never about doing it somewhere else.
+        return await PlaceAddStoppedAsync(
+            conversation,
+            string.Equals(language, "sv", StringComparison.OrdinalIgnoreCase)
+                ? "Vilken plats vill du lägga till? Be mig ta fram förslag först."
+                : "Which place would you like to add? Ask me for suggestions first.",
+            ct);
     }
 
     /// The places an assistant turn showed, or none when its payload cannot be

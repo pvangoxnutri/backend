@@ -191,6 +191,48 @@ public static class GlunoPlaceOptions
         return Array.Empty<int>();
     }
 
+    /// <summary>
+    /// Whether a sentence points at one of the things Gluno showed.
+    ///
+    /// "the first one", "Real Alcázar" — an ordinal, or a word long enough to
+    /// be a name. NOT "a rest day" or "an hour": those describe something to
+    /// create rather than pick.
+    ///
+    /// Shares its ordinal table with <see cref="Match"/>, so what counts as
+    /// pointing at a shown place cannot drift between deciding to ask and
+    /// deciding which one was meant.
+    /// </summary>
+    public static bool PointsAtSomethingShown(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message)) return false;
+
+        var text = Normalise(message);
+
+        if (Ordinals.Any(group => group.Any(word => ContainsWord(text, word)))) return true;
+
+        // A capitalised or otherwise substantial word beyond the add phrase
+        // itself. Place names are long; "day", "dag", "hour" are not.
+        return message
+            .Split([' ', ',', '.', '!', '?'], StringSplitOptions.RemoveEmptyEntries)
+            .Any(word => word.Length >= 5
+                && !AddWords.Any(add => Normalise(word).StartsWith(add.Trim(), StringComparison.Ordinal))
+                && !PlanWords.Contains(Normalise(word), StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// Words that make an add request about the ITINERARY rather than a place.
+    ///
+    /// Kept small on purpose: everything here is a false negative waiting to
+    /// happen if a real place is ever called it, and the cost of being wrong
+    /// the other way is only that the model answers instead.
+    /// </summary>
+    private static readonly string[] PlanWords =
+    [
+        "vilodag", "vilodagar", "ledig", "paus", "lunch", "middag", "frukost",
+        "timme", "timmar", "dagar", "aktivitet", "anteckning",
+        "restday", "break", "buffer", "hours", "notes", "activity", "reminder",
+    ];
+
     private static readonly string[][] Ordinals =
     [
         ["forsta", "first"],
