@@ -642,6 +642,26 @@ public sealed class GlunoChatService : IGlunoChatService
                 conversation, userId, text, intent, detection, context, ct);
         }
 
+        // ── "Give me something I can tap" ─────────────────────────────────
+        //
+        // An explicit request for an interface, answered with an interface.
+        //
+        // Handled HERE, before the model, because a model asked "can you give
+        // me buttons?" answers in the first person about its own abilities —
+        // which is how Gluno came to tell somebody it could not put out
+        // buttons, that SideQuest does that, and that the app was refusing to
+        // open an Adventure. Every clause of that was wrong to say, and the
+        // card it was explaining away could have been built on that same turn.
+        //
+        // The only reliable fix is for the model never to see the question.
+        if (GlunoChoiceRequest.IsAskingForChoices(text))
+        {
+            var requested = await BuildRequestedChoicesAsync(
+                conversation, userId, text, intent, context, answered, ct);
+
+            if (requested != null) return requested;
+        }
+
         // ── The turn plan ─────────────────────────────────────────────────
         //
         // Everything this turn may do, fixed before any of it happens: the
@@ -1048,9 +1068,10 @@ public sealed class GlunoChatService : IGlunoChatService
         // The promise is removed rather than the answer failed: one bad clause
         // must not cost an otherwise good reply. If the whole reply was the
         // promise, a plain question replaces it.
-        if (GlunoUiPromise.PromisesAChoice(assistantText))
+        if (GlunoUiPromise.PromisesAChoice(assistantText)
+            || GlunoUiPromise.ExplainsItsOwnPlumbing(assistantText))
         {
-            _logger.LogWarning("[GLUNO] answer promised a choice with no card attached");
+            _logger.LogWarning("[GLUNO] answer promised a choice or explained its own plumbing");
 
             var trimmed = GlunoUiPromise.WithoutPromises(assistantText);
 
@@ -1499,6 +1520,129 @@ public sealed class GlunoChatService : IGlunoChatService
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Answers "give me something to tap" with something to tap.
+    ///
+    /// PRIORITY, AND WHY IT IS THIS ORDER.
+    ///
+    /// A question already on screen comes first: somebody saying "give me the
+    /// buttons" right after a card was asked has almost certainly lost the
+    /// card, and the honest answer is that same question again — not a second,
+    /// slightly different one.
+    ///
+    /// Then whatever this turn genuinely needs to know, from the ordinary
+    /// detector, because that is the choice that actually changes the answer.
+    ///
+    /// Then the Adventure, when the conversation is about a trip and no scope
+    /// has been established. That is the case that broke in production.
+    ///
+    /// Returns null when nothing safe can be offered, and the caller falls
+    /// through to the ordinary turn. The one thing never done here is
+    /// inventing options — every one below is built from rows the user can
+    /// already see.
+    /// </summary>
+    private async Task<GlunoTurnResult?> BuildRequestedChoicesAsync(
+        GlunoConversation conversation,
+        Guid userId,
+        string text,
+        GlunoIntentResult intent,
+        GlunoContext context,
+        (string Type, string Value)? answered,
+        CancellationToken ct)
+    {
+        // ── 1. A card is already waiting ──────────────────────────────────
+        //
+        // Returned as it stands rather than rebuilt. A second card asking the
+        // same thing would leave two live questions and two ways to answer
+        // one of them.
+        var pending = await _clarifications.GetForConversationAsync(conversation.Id, userId, ct);
+
+        if (pending is { Options.Count: > 0 } && pending.IsAnswerable)
+        {
+            _logger.LogInformation(
+                "[GLUNO] re-showing pending clarification type={Type}", pending.Type);
+
+            var message = pending.MessageId is { } existing
+                ? await _conversations.GetMessageAsync(existing, userId, ct)
+                : null;
+
+            return new GlunoTurnResult
+            {
+                Conversation = conversation,
+                UserMessage = message,
+                AssistantMessage = message,
+                Clarification = pending,
+            };
+        }
+
+        // ── 2. Whichever choice this turn is actually missing ─────────────
+        //
+        // The ordinary detector already ran and found nothing decisive; run it
+        // again with the message stripped of the meta-request, because "give
+        // me the cities as options" is a question about cities wearing a
+        // request for an interface.
+        var scoped = GlunoClarificationDetector.Detect(new GlunoDetectionInput
+        {
+            Message = text,
+            Intent = intent,
+            Context = context,
+            Workflow = GlunoPlanningStrategy.For(intent, context.Trip != null, context.Trip?.CanEdit != false),
+            Today = context.Today,
+            Language = context.User.Language,
+        });
+
+        if (scoped.Outcome == GlunoDetectionOutcome.NeedsClarification
+            && scoped.Type != answered?.Type)
+        {
+            return await AskClarificationAsync(
+                conversation, userId, text, intent, scoped, context, ct);
+        }
+
+        // ── 3. Which Adventure ────────────────────────────────────────────
+        //
+        // A global conversation does not need to be attached to an Adventure
+        // to show its Adventures. Nothing has to be "opened" first — the rows
+        // are the user's own memberships, and the choice becomes this turn's
+        // scope without the conversation changing at all.
+        var choices = TripChoicesFrom(context);
+
+        if (choices.Count > 0)
+        {
+            return await AskWhichAdventureAsync(
+                conversation, userId, text, intent, choices, context, ct);
+        }
+
+        // ── Nothing to offer ──────────────────────────────────────────────
+        //
+        // One short line. Not an explanation of why — the user asked for a
+        // list and there is nothing to list, and the reason is not theirs to
+        // debug.
+        var swedish = string.Equals(context.User.Language, "sv", StringComparison.OrdinalIgnoreCase);
+
+        var userMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.User,
+            Text = text,
+        }, ct);
+
+        var assistantMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.Assistant,
+            Text = swedish
+                ? "Jag hittar inga tillgängliga Adventures just nu."
+                : "I can't find any Adventures available right now.",
+        }, ct);
+
+        return new GlunoTurnResult
+        {
+            Conversation = conversation,
+            UserMessage = userMessage,
+            AssistantMessage = assistantMessage,
+        };
     }
 
     /// <summary>

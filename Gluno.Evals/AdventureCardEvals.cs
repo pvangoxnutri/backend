@@ -89,7 +89,7 @@ public class AdventureCardEvals
         var chat = Source("Services", "Gluno", "GlunoChatService.cs");
 
         Assert.Contains("GlunoUiPromise.PromisesAChoice(assistantText)", chat);
-        Assert.Contains("answer promised a choice with no card attached", chat);
+        Assert.Contains("answer promised a choice or explained its own plumbing", chat);
         // Trimmed rather than failed.
         Assert.Contains("GlunoUiPromise.WithoutPromises(assistantText)", chat);
     }

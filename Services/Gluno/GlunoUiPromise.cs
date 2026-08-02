@@ -53,6 +53,54 @@ public static class GlunoUiPromise
     }
 
     /// <summary>
+    /// Ways of describing SideQuest's own plumbing to the person using it.
+    ///
+    /// Gluno is one feature of SideQuest, not a model commenting on an app it
+    /// happens to live in. Where the model ends and the backend begins is not
+    /// the user's problem, and telling them "the app refuses" or "I can only
+    /// write text" is both unhelpful and — in the case that produced this
+    /// list — untrue: the card it was explaining away could have been built on
+    /// that very turn.
+    /// </summary>
+    private static readonly string[] Disclaimers =
+    [
+        // English
+        "i can't put out buttons", "i cannot put out buttons",
+        "i can't create buttons", "i cannot create buttons",
+        "i can only write text", "i can only reply with text",
+        "the app does that", "sidequest does that", "the app refuses",
+        "the app won't", "not attached to", "isn't linked to",
+        "i can't open an adventure", "i cannot open an adventure",
+        "this conversation isn't", "this conversation is not",
+        // Swedish
+        "jag kan inte lagga ut knappar", "jag kan inte skapa knappar",
+        "det gor appen", "det gor sidequest",
+        // Both word orders. Swedish puts the verb second, so "just nu vägrar
+        // appen…" inverts the subject and a single form misses it — which is
+        // exactly how the reported sentence got through.
+        "appen vagrar", "vagrar appen", "appen later inte", "later appen inte",
+        "jag kan bara skriva text", "inte kopplat till", "inte kopplad till",
+        "samtalet maste kopplas", "jag kan inte oppna ett adventure",
+        "jag kan inte oppna nagot adventure", "samtalet ar inte",
+    ];
+
+    /// <summary>
+    /// True when the text explains SideQuest's internals rather than answering.
+    ///
+    /// Separate from <see cref="PromisesAChoice"/> because the fix differs: a
+    /// false promise is removed, whereas a disclaimer means the turn asked the
+    /// wrong question of itself and should have produced a card.
+    /// </summary>
+    public static bool ExplainsItsOwnPlumbing(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+
+        var normalised = Normalise(text);
+
+        return Disclaimers.Any(phrase => normalised.Contains(Normalise(phrase), StringComparison.Ordinal));
+    }
+
+    /// <summary>
     /// The text with any promise of a choice removed, sentence by sentence.
     ///
     /// Sentences rather than the whole answer: "Here's what I found. Tap one
@@ -68,7 +116,7 @@ public static class GlunoUiPromise
         var sentences = Regex.Split(text, @"(?<=[.!?])\s+");
 
         var kept = sentences
-            .Where(sentence => !PromisesAChoice(sentence))
+            .Where(sentence => !PromisesAChoice(sentence) && !ExplainsItsOwnPlumbing(sentence))
             .Select(sentence => sentence.Trim())
             .Where(sentence => sentence.Length > 0)
             .ToList();
