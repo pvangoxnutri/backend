@@ -505,16 +505,53 @@ public sealed class GlunoChatService : IGlunoChatService
         telemetry.IntentConfidence = intent.Confidence;
         telemetry.Scope = intent.Scope.ToString();
 
+        // ── Which Adventure is this about? ────────────────────────────────
+        //
+        // A GLOBAL conversation has no trip, so nothing used to load a route —
+        // and the model was left with the Adventure summary: title, the
+        // trip-level destination, the dates. That is how "which cities are we
+        // visiting?" came back as "I only have España and 5–16 August" about a
+        // trip SideQuest knew six cities for.
+        //
+        // So the question is read for a trip FIRST, deterministically, against
+        // the user's own memberships. Naming the trip, naming a city only one
+        // trip visits, or naming dates only one trip covers all resolve it —
+        // and the whole turn then loads exactly what the Adventure header would
+        // have loaded.
+        //
+        // TURN-SCOPED ONLY. The conversation stays global; nothing about it is
+        // rewritten. The next message resolves itself again from its own words.
+        var resolvedTripId = scopeTripId ?? conversation.TripId;
+        var adventureResolution = GlunoAdventureResolution.NotApplicable;
+
+        if (resolvedTripId == null)
+        {
+            adventureResolution = await ResolveAdventureAsync(userId, text, workingState, ct);
+
+            if (adventureResolution.Outcome == GlunoAdventureMatch.Resolved)
+            {
+                resolvedTripId = adventureResolution.TripId;
+            }
+        }
+
+        _logger.LogInformation(
+            "[GLUNO] adventure scope global={Global} resolution={Resolution} "
+            + "candidates={Candidates} resolved={Resolved}",
+            conversation.TripId == null,
+            adventureResolution.Outcome,
+            adventureResolution.Candidates.Count,
+            resolvedTripId != null);
+
         // ── Context, narrowed to what this intent needs ───────────────────
         //
         // canEdit is not known until the trip loads, so the workflow is
         // computed twice: once to decide what to LOAD, once with edit rights to
         // decide what to OFFER. Both are pure functions, so this costs nothing.
         var loadPlan = GlunoPlanningStrategy.For(
-            intent, (scopeTripId ?? conversation.TripId).HasValue, canEdit: true);
+            intent, resolvedTripId.HasValue, canEdit: true);
 
         var context = await _contextBuilder.BuildAsync(
-            userId, scopeTripId ?? conversation.TripId, conversation.Id,
+            userId, resolvedTripId, conversation.Id,
             new GlunoContextOptions
             {
                 IncludeTrip = loadPlan.NeedsTripContext,
@@ -534,6 +571,22 @@ public sealed class GlunoChatService : IGlunoChatService
         // Deterministic first: one Adventure, or one the question names, is
         // resolved silently. Asking when the answer is already knowable is the
         // fastest way to make this feature annoying.
+        // The resolver above already found several plausible Adventures for a
+        // question that named none clearly. Asking is the honest move —
+        // choosing the most recent when two fit is how somebody gets a
+        // confident answer about the wrong holiday.
+        if (context.Trip == null
+            && adventureResolution.Outcome == GlunoAdventureMatch.Ambiguous)
+        {
+            var choices = TripChoicesFrom(context);
+
+            if (choices.Count > 1)
+            {
+                return await AskWhichAdventureAsync(
+                    conversation, userId, text, intent, choices, context, ct);
+            }
+        }
+
         if (context.Trip == null && scopeTripId == null && NeedsAnAdventure(intent))
         {
             var choices = TripChoicesFrom(context);
@@ -1412,6 +1465,84 @@ public sealed class GlunoChatService : IGlunoChatService
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Which Adventure a global message is about, from the user's own trips.
+    ///
+    /// Read fresh from the database every turn. A renamed trip, a city added
+    /// yesterday, a trip deleted an hour ago and a membership that has since
+    /// been revoked all have to be reflected NOW — a cached candidate list
+    /// would let a question resolve to an Adventure the user can no longer see.
+    ///
+    /// The city labels are the interesting half: they are what makes "when are
+    /// we in Ronda?" answerable without naming the trip, and they come from the
+    /// same rows the weather screen reads.
+    /// </summary>
+    private async Task<GlunoAdventureResolution> ResolveAdventureAsync(
+        Guid userId, string message, GlunoWorkingState workingState, CancellationToken ct)
+    {
+        // Membership is the query, not a check afterwards. A trip the user has
+        // left is simply not a candidate.
+        var trips = await _db.TripMembers
+            .AsNoTracking()
+            .Where(member => member.UserId == userId)
+            .Join(_db.Trips, member => member.TripId, trip => trip.Id, (_, trip) => trip)
+            .OrderByDescending(trip => trip.StartDate)
+            .Take(GlunoContextLimits.MaxTrips)
+            .Select(trip => new
+            {
+                trip.Id,
+                trip.Title,
+                trip.Destination,
+                trip.StartDate,
+                trip.EndDate,
+            })
+            .ToListAsync(ct);
+
+        if (trips.Count == 0) return GlunoAdventureResolution.NotApplicable;
+
+        var tripIds = trips.Select(trip => trip.Id).ToList();
+
+        // One query for every candidate's cities rather than one per trip.
+        var stops = await _db.TripDayLocations
+            .AsNoTracking()
+            .Where(row => tripIds.Contains(row.TripId))
+            .Select(row => new { row.TripId, row.LocationLabel })
+            .ToListAsync(ct);
+
+        var stopsByTrip = stops
+            .GroupBy(row => row.TripId)
+            .ToDictionary(
+                group => group.Key,
+                group => (IReadOnlyList<string>)group
+                    .Select(row => row.LocationLabel)
+                    .Where(label => !string.IsNullOrWhiteSpace(label))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList());
+
+        var candidates = trips
+            .Select(trip => new GlunoAdventureCandidate
+            {
+                TripId = trip.Id,
+                Title = trip.Title,
+                Destination = trip.Destination,
+                StartDate = trip.StartDate,
+                EndDate = trip.EndDate,
+                StopLabels = stopsByTrip.GetValueOrDefault(trip.Id, Array.Empty<string>()),
+            })
+            .ToList();
+
+        return GlunoAdventureReferenceResolver.Resolve(
+            message,
+            candidates,
+            DateOnly.FromDateTime(DateTime.UtcNow),
+            // The working state tracks recent activities, places and dates but
+            // not a recent ADVENTURE, so this stays null rather than being
+            // guessed from one of those. The consequence is the safe one: a
+            // trip question that names nothing asks instead of assuming, which
+            // is what it should do anyway when several trips are plausible.
+            lastDiscussed: null);
     }
 
     /// <summary>
