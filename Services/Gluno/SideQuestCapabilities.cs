@@ -537,8 +537,12 @@ public static class SideQuestCapabilities
             NameEn = "Gluno", NameSv = "Gluno",
             DescriptionEn = "The travel expert built into SideQuest — planning help, recommendations and suggested changes you approve.",
             DescriptionSv = "Reseexperten i SideQuest — planeringshjälp, rekommendationer och föreslagna ändringar du godkänner.",
-            WhereEn = "The Gluno button in the header, and from an Adventure's functions.",
-            WhereSv = "Gluno-knappen i sidhuvudet, och från ett äventyrs funktioner.",
+            // Two real entry points, and the difference matters to what Gluno
+            // may say. From the app header it opens with no Adventure and has
+            // to ask which one; from an Adventure's own header it opens with
+            // that trip's plan already in front of it.
+            WhereEn = "The Gluno button in the app header, or the Gluno button in an Adventure's header — that one opens Gluno already knowing which Adventure you mean.",
+            WhereSv = "Gluno-knappen i appens sidhuvud, eller Gluno-knappen i ett äventyrs sidhuvud — den öppnar Gluno med det äventyret redan valt.",
             Audience = CapabilityAudiences.Anyone,
             Screens = [SideQuestScreens.Gluno],
             NavigationTarget = null,
