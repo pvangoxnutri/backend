@@ -424,10 +424,10 @@ public class LiveVersusPersistedEvals
         // 401, 403 and a timeout all arrive as one category from the provider
         // layer and none of them are the user's problem; only a rate limit is
         // worth a retry.
-        Assert.Contains("error = \"place_lookup_busy\", retryable = true", body);
-        Assert.Contains("error = \"place_not_available\", retryable = false", body);
-        Assert.Contains("error = \"place_lookup_failed\", retryable = true", body);
-        Assert.Contains("error = \"message_not_found\", retryable = false", body);
+        Assert.Contains("GlunoErrors.Body(\"place_lookup_busy\", true)", body);
+        Assert.Contains("GlunoErrors.Body(\"place_not_available\", false)", body);
+        Assert.Contains("GlunoErrors.Body(\"place_lookup_failed\", true)", body);
+        Assert.Contains("GlunoErrors.Body(\"message_not_found\", false)", body);
     }
 
     // ── 13-14. What may not be reached ───────────────────────────────────

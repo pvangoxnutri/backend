@@ -146,6 +146,27 @@ public sealed class TerraTravelProvider : ITravelDataProvider
 
     private int MaxResults => Math.Clamp(_config.GetValue("TripadvisorTerra:MaxResults", 6), 1, 10);
 
+    /// <summary>
+    /// The response envelope, per the published schema.
+    ///
+    /// A constant because getting it wrong is invisible: the call succeeds, the
+    /// status is 200, and the list is simply empty — which reads exactly like a
+    /// city with nothing in it.
+    /// </summary>
+    public const string ResultsProperty = "search_results";
+
+    // ── Optional request fields ───────────────────────────────────────────
+    //
+    // Both are in the schema. Both are off unless switched on, because an
+    // optional field the server rejects costs the entire answer, and neither
+    // adds anything the free-text query cannot say.
+
+    private bool SendCategoryFilter =>
+        _config.GetValue("TripadvisorTerra:SendCategoryFilter", false);
+
+    private bool SendResponsePreference =>
+        _config.GetValue("TripadvisorTerra:SendResponsePreference", false);
+
     // ── Capabilities, for the status endpoint ─────────────────────────────
 
     /// What this integration actually calls. Photos and reviews are separate
@@ -196,17 +217,39 @@ public sealed class TerraTravelProvider : ITravelDataProvider
             return Empty(TravelSearchStatus.Failed);
         }
 
-        var body = JsonSerializer.Serialize(new
+        // ── The smallest request that can answer the question ─────────────
+        //
+        // query + geo + limit, and nothing else by default. The two optional
+        // fields below are real — both are in the published schema — but an
+        // optional field with a value the server does not recognise is a 400,
+        // and a 400 costs the whole answer while the field only sharpens it.
+        //
+        // THIS IS NOT HYPOTHETICAL. The first build sent
+        // top_level_categories: ["ATTRACTION"]. The schema's values are
+        // "Attraction", "Accommodation", "Experience" and "Eat & Drink" — so
+        // every categorised search was rejected, and the free-text query was
+        // already carrying the same intent.
+        var request = new Dictionary<string, object?>
         {
-            query = BuildQueryText(query),
-            geo = new { name = geoName },
-            limit = Math.Min(Math.Max(query.Limit, 1), MaxResults),
-            // Full location objects rather than the fastest possible answer:
-            // the cards need hours and ratings, and a second call to fill them
-            // in would cost more than the extra latency here.
-            response_preference = "quality",
-            top_level_categories = ToTerraCategories(query.Category),
-        }, GlunoJson.Options);
+            ["query"] = BuildQueryText(query),
+            ["geo"] = new { name = geoName },
+            ["limit"] = Math.Min(Math.Max(query.Limit, 1), MaxResults),
+        };
+
+        // Documented as quality | speed. Quality returns whole location
+        // objects, which is what the cards need — a second call to fill in
+        // hours and ratings would cost more than the extra latency.
+        if (SendResponsePreference) request["response_preference"] = "quality";
+
+        // Off until a live call confirms the wire spelling. Switchable by
+        // configuration rather than by deploy, because the only way to be sure
+        // about an enum is to send one.
+        if (SendCategoryFilter && ToTerraCategories(query.Category) is { } categories)
+        {
+            request["top_level_categories"] = categories;
+        }
+
+        var body = JsonSerializer.Serialize(request, GlunoJson.Options);
 
         JsonDocument? document;
         TerraFailure failure;
@@ -231,7 +274,11 @@ public sealed class TerraTravelProvider : ITravelDataProvider
 
             try
             {
-                if (!document.RootElement.TryGetProperty("data", out var data)
+                // "search_results", per the published response schema. The
+                // first build read "data" — the usual envelope for this kind of
+                // API and not the one Terra uses — so a perfectly good 200 was
+                // reported as a contract change and mapped to nothing.
+                if (!document.RootElement.TryGetProperty(ResultsProperty, out var data)
                     || data.ValueKind != JsonValueKind.Array)
                 {
                     // The envelope is not what the contract says. Distinct from
@@ -316,13 +363,23 @@ public sealed class TerraTravelProvider : ITravelDataProvider
         return words.Length > 0 ? $"{words} {intent}" : intent;
     }
 
-    /// Terra's own category vocabulary. Null means no filter, which is right
-    /// for a general request.
+    /// <summary>
+    /// Terra's own category vocabulary, transcribed from the published schema.
+    ///
+    /// EXACT CASING AND SPACING MATTER. The documented values are "Attraction",
+    /// "Accommodation", "Experience" and "Eat &amp; Drink" — not the screaming
+    /// snake case an API of this shape usually uses, which is what the first
+    /// build guessed and what made every categorised search a 400.
+    ///
+    /// Null means no filter, which is right for a general request and is also
+    /// the safe default: the free-text query already says what kind of thing is
+    /// wanted.
+    /// </summary>
     public static string[]? ToTerraCategories(TravelPlaceCategory category) => category switch
     {
-        TravelPlaceCategory.Restaurant => ["RESTAURANT"],
-        TravelPlaceCategory.Attraction => ["ATTRACTION"],
-        TravelPlaceCategory.Hotel => ["HOTEL"],
+        TravelPlaceCategory.Restaurant => ["Eat & Drink"],
+        TravelPlaceCategory.Attraction => ["Attraction"],
+        TravelPlaceCategory.Hotel => ["Accommodation"],
         _ => null,
     };
 
@@ -624,7 +681,11 @@ public sealed class TerraTravelProvider : ITravelDataProvider
             using var response = await httpClient.SendAsync(
                 request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
 
-            if (!response.IsSuccessStatusCode) return (null, Classify(response.StatusCode));
+            if (!response.IsSuccessStatusCode)
+            {
+                await LogProblemAsync(response, timeout.Token);
+                return (null, Classify(response.StatusCode));
+            }
 
             await using var stream = await response.Content.ReadAsStreamAsync(timeout.Token);
 
@@ -647,6 +708,57 @@ public sealed class TerraTravelProvider : ITravelDataProvider
         {
             return (null, TerraFailure.Network);
         }
+    }
+
+    /// <summary>
+    /// The shape of a rejection, without its contents.
+    ///
+    /// WHY THIS EXISTS. A 400 from Terra says which field it disliked, in
+    /// `field_errors`. Without reading it, "the request was invalid" is all
+    /// anyone gets — which is what turned a one-line enum mistake into a
+    /// production investigation. With it, the log says
+    /// `field=top_level_categories` and the fix is obvious.
+    ///
+    /// WHAT IS READ: `type` and `status`, which are a fixed vocabulary and a
+    /// number, and the NAMES in `field_errors`. What is NOT read is `message`,
+    /// which can quote the request back — and the request contains the search
+    /// text. Never the body, never a header.
+    /// </summary>
+    private async Task LogProblemAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        string? type = null;
+        var fields = new List<string>();
+
+        try
+        {
+            await using var stream = await response.Content.ReadAsStreamAsync(ct);
+            using var problem = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+
+            type = Text(problem.RootElement, "type");
+
+            if (problem.RootElement.TryGetProperty("field_errors", out var errors)
+                && errors.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var entry in errors.EnumerateArray())
+                {
+                    // The name only. The value it objected to came from us, but
+                    // the message describing it can quote the query.
+                    var field = Text(entry, "field") ?? Text(entry, "name");
+                    if (field != null) fields.Add(field);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException or IOException)
+        {
+            // A rejection that is not a ProblemDetail is still a rejection. The
+            // status below is the part that matters.
+        }
+
+        _logger.LogWarning(
+            "[GLUNO] terra rejected request status={Status} type={Type} fields={Fields}",
+            (int)response.StatusCode,
+            type ?? "-",
+            fields.Count > 0 ? string.Join(',', fields) : "-");
     }
 
     /// <summary>

@@ -932,6 +932,12 @@ public sealed class GlunoChatService : IGlunoChatService
                 {
                     telemetry.RecordTool(call.Name);
 
+                    // Tool time is accumulated separately from model time. They
+                    // interleave — the model waits for the tool and then thinks
+                    // again — so a single "model" figure hides which of the two
+                    // a slow turn was actually spent on.
+                    using var toolStage = latency.Stage($"tool_{call.Name}");
+
                     var outcome = await _actions.ExecuteAsync(
                         new GlunoActionInvocation { ToolCallId = call.Id, Name = call.Name, Input = call.Input },
                         scope,
@@ -1051,6 +1057,11 @@ public sealed class GlunoChatService : IGlunoChatService
 
             return new GlunoTurnResult { Error = GlunoTurnError.ProviderFailed, FailureCode = code };
         }
+
+        // Model AND tools together, which is what the user actually waited for.
+        // The per-tool stages above split it; the difference between this and
+        // their sum is time the model itself spent thinking.
+        latency.Reached("model_finished");
 
         telemetry.ModelRounds = result.ExecutedCalls.Count + 1;
         telemetry.InputTokens = result.InputTokens;
@@ -1376,7 +1387,11 @@ public sealed class GlunoChatService : IGlunoChatService
         // belongs to. The snapshot of the Adventure is taken here too — that
         // is what a later apply compares against to detect that someone else
         // changed the plan in between.
+        latency.Reached("answer_persisted");
+
         var records = await CreateProposalsAsync(conversation, assistantMessage.Id, proposals, ct);
+
+        latency.Reached("proposals_persisted");
 
         // ── Working memory ────────────────────────────────────────────────
         //

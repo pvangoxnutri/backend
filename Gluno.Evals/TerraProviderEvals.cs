@@ -101,7 +101,7 @@ public class TerraProviderEvals
 
     /// A recommendations response in Terra's documented shape.
     private const string TwoResults = """
-        { "data": [
+        { "search_results": [
           {
             "type": "location",
             "location": {
@@ -293,8 +293,15 @@ public class TerraProviderEvals
     [Fact]
     public void The_category_filter_uses_Terras_own_vocabulary()
     {
-        Assert.Equal(["ATTRACTION"], TerraTravelProvider.ToTerraCategories(TravelPlaceCategory.Attraction));
-        Assert.Equal(["RESTAURANT"], TerraTravelProvider.ToTerraCategories(TravelPlaceCategory.Restaurant));
+        // TRANSCRIBED FROM THE SCHEMA, not inferred from the shape of the API.
+        // The first version of this eval asserted ["ATTRACTION"] — screaming
+        // snake case, which is what an endpoint like this usually uses — and it
+        // passed against a provider that sent the same guess, while every real
+        // categorised search came back 400. A fixture that encodes the same
+        // assumption as the code tests nothing.
+        Assert.Equal(["Attraction"], TerraTravelProvider.ToTerraCategories(TravelPlaceCategory.Attraction));
+        Assert.Equal(["Eat & Drink"], TerraTravelProvider.ToTerraCategories(TravelPlaceCategory.Restaurant));
+        Assert.Equal(["Accommodation"], TerraTravelProvider.ToTerraCategories(TravelPlaceCategory.Hotel));
         // A general request gets no filter rather than a guessed one.
         Assert.Null(TerraTravelProvider.ToTerraCategories(TravelPlaceCategory.General));
     }
@@ -350,7 +357,7 @@ public class TerraProviderEvals
     public async Task A_result_with_no_id_or_no_name_is_discarded()
     {
         var handler = new StubHandler(() => Json("""
-            { "data": [
+            { "search_results": [
               { "type": "location", "location": { "names": [ { "language": "sv", "value": "No id" } ] } },
               { "type": "location", "location": { "id": 5 } },
               { "type": "experience", "experience": { "id": 9 } },
@@ -418,7 +425,7 @@ public class TerraProviderEvals
     public async Task Half_a_coordinate_pair_is_treated_as_none()
     {
         var handler = new StubHandler(() => Json("""
-            { "data": [ { "type": "location", "location": {
+            { "search_results": [ { "type": "location", "location": {
               "id": 1, "names": [ { "language": "sv", "value": "Half" } ],
               "coordinates": { "latitude": 37.38 } } } ] }
             """));
@@ -460,7 +467,7 @@ public class TerraProviderEvals
     public async Task Only_an_https_provider_link_is_kept()
     {
         var handler = new StubHandler(() => Json("""
-            { "data": [ { "type": "location", "location": {
+            { "search_results": [ { "type": "location", "location": {
               "id": 1, "names": [ { "language": "sv", "value": "X" } ],
               "urls": { "location": "javascript:alert(1)" } } } ] }
             """));
@@ -521,7 +528,7 @@ public class TerraProviderEvals
     [Fact]
     public async Task A_genuinely_empty_result_is_attempted_and_empty()
     {
-        var handler = new StubHandler(() => Json("""{ "data": [] }"""));
+        var handler = new StubHandler(() => Json("""{ "search_results": [] }"""));
 
         Assert.Empty(await Provider(handler).SearchPlacesAsync(SevillaQuery(), CancellationToken.None));
         Assert.True(handler.Calls > 0);

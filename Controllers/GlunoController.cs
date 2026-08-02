@@ -72,6 +72,25 @@ public class GlunoController : ControllerBase
     private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
 
     /// <summary>
+    /// A failed turn, as the one envelope every Gluno failure uses.
+    ///
+    /// The status comes from the CODE rather than from the call site, so the
+    /// same failure cannot arrive as 502 from one endpoint and 409 from
+    /// another — and so a code added later gets a sensible status without
+    /// anyone remembering to map it.
+    /// </summary>
+    private ObjectResult TurnFailure(GlunoTurnResult result)
+    {
+        var code = result.FailureCode ?? GlunoFailureCodes.AiMalformedResponse;
+
+        // The service's own verdict wins when it has one: it knows things the
+        // status cannot say, like whether a provider is rate limiting us.
+        var retryable = result.FailureCode != null ? result.IsRetryable : GlunoErrors.IsRetryable(code);
+
+        return StatusCode(GlunoErrors.StatusFor(code), GlunoErrors.Body(code, retryable));
+    }
+
+    /// <summary>
     /// Whether Gluno can answer at all. The app calls this before showing its
     /// entry point, so a build with the feature flag on never opens a chat
     /// panel against an environment that has Gluno switched off.
@@ -340,7 +359,7 @@ public class GlunoController : ControllerBase
         }
         catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
         {
-            return StatusCode(499, new { error = GlunoFailureCodes.Cancelled, retryable = false });
+            return StatusCode(499, GlunoErrors.Body(GlunoFailureCodes.Cancelled, false));
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
@@ -351,7 +370,7 @@ public class GlunoController : ControllerBase
             _logger.LogError(
                 "[GLUNO] escaped type={Category} stage=controller", ex.GetType().Name);
 
-            return StatusCode(502, new { error = "unknown", retryable = true });
+            return StatusCode(502, GlunoErrors.Body("unknown", true));
         }
 
         // Every exit from here is logged once — the pair of lines is what
@@ -373,55 +392,38 @@ public class GlunoController : ControllerBase
             // fix.
             case GlunoTurnError.Unavailable:
                 // 503, not 404: the endpoint exists, Gluno just isn't on here.
-                return StatusCode(503, new
-                {
-                    error = "gluno_unavailable",
-                    reason = _availability.UnavailableReason,
-                    retryable = false,
-                });
+                return StatusCode(503, GlunoErrors.Body("gluno_unavailable", false));
             case GlunoTurnError.EmptyMessage:
-                return BadRequest(new { error = "empty_message", retryable = false });
+                return BadRequest(GlunoErrors.Body("empty_message", false));
             case GlunoTurnError.ConversationNotFound:
-                return NotFound(new { error = "conversation_not_found", retryable = false });
+                return NotFound(GlunoErrors.Body("conversation_not_found", false));
             case GlunoTurnError.ConversationArchived:
-                return BadRequest(new { error = "conversation_archived", retryable = false });
+                return BadRequest(GlunoErrors.Body("conversation_archived", false));
             case GlunoTurnError.NotTripMember:
                 // An explicit body rather than Forbid(): that returns 403 with
                 // NOTHING, so the app had only a status code to work from.
-                return StatusCode(403, new
-                {
-                    error = GlunoFailureCodes.AuthorizationChanged,
-                    retryable = false,
-                });
+                return StatusCode(403, GlunoErrors.Body(GlunoFailureCodes.AuthorizationChanged, false));
 
             // 499 is the client-closed convention. The app treats it as "the
             // user pressed stop" and shows nothing — a cancellation is not a
             // failure and must never render as a red bubble.
             case GlunoTurnError.Cancelled:
-                return StatusCode(499, new { error = GlunoFailureCodes.Cancelled, retryable = false });
+                return StatusCode(499, GlunoErrors.Body(GlunoFailureCodes.Cancelled, false));
 
             // 409: an identical send is already running. The app waits for the
             // first one rather than starting a second.
             case GlunoTurnError.DuplicateInFlight:
-                return Conflict(new { error = "duplicate_in_flight", retryable = false });
+                return Conflict(GlunoErrors.Body("duplicate_in_flight", false));
 
             // 429 with a code the app localises. Existing conversations still
             // open and scroll; only new turns are refused.
             case GlunoTurnError.UsageLimitReached:
-                return StatusCode(429, new
-                {
-                    error = result.FailureCode ?? GlunoFailureCodes.UserUsageLimit,
-                    retryable = false,
-                });
+                return StatusCode(429, GlunoErrors.Body(result.FailureCode ?? GlunoFailureCodes.UserUsageLimit, false));
 
             case GlunoTurnError.ProviderFailed:
-                return StatusCode(502, new
-                {
-                    error = result.FailureCode ?? GlunoFailureCodes.AiMalformedResponse,
-                    // Whether "try again" is honest. A missing key fails
-                    // identically on every tap; a timeout might not.
-                    retryable = result.IsRetryable,
-                });
+                // Whether "try again" is honest. A missing key fails identically
+                // on every tap; a timeout might not.
+                return TurnFailure(result);
 
             // ── Anything a send cannot normally produce ───────────────────
             //
@@ -436,11 +438,7 @@ public class GlunoController : ControllerBase
                 break;
 
             default:
-                return StatusCode(502, new
-                {
-                    error = result.FailureCode ?? GlunoFailureCodes.AiMalformedResponse,
-                    retryable = false,
-                });
+                return TurnFailure(result);
         }
 
         _logger.LogInformation("[GLUNO] message endpoint returning status=200 error=none");
@@ -472,31 +470,31 @@ public class GlunoController : ControllerBase
         var userId = GetUserId();
 
         if (string.IsNullOrWhiteSpace(dto.OptionKey))
-            return BadRequest(new { error = "missing_option", retryable = false });
+            return BadRequest(GlunoErrors.Body("missing_option", false));
 
         var resolved = await _clarifications.ResolveAsync(clarificationId, userId, dto.OptionKey!, ct);
 
         switch (resolved.Error)
         {
             case GlunoClarificationError.NotFound:
-                return NotFound(new { error = "clarification_not_found", retryable = false });
+                return NotFound(GlunoErrors.Body("clarification_not_found", false));
             case GlunoClarificationError.Forbidden:
-                return StatusCode(403, new { error = GlunoFailureCodes.AuthorizationChanged, retryable = false });
+                return StatusCode(403, GlunoErrors.Body(GlunoFailureCodes.AuthorizationChanged, false));
             case GlunoClarificationError.NotAnswerable:
-                return Conflict(new { error = "clarification_closed", retryable = false });
+                return Conflict(GlunoErrors.Body("clarification_closed", false));
             case GlunoClarificationError.OptionStale:
                 // The Adventure went, or they left the group. Answerable again
                 // only by asking afresh — never by honouring a stale button.
-                return Conflict(new { error = "clarification_stale", retryable = false });
+                return Conflict(GlunoErrors.Body("clarification_stale", false));
             case GlunoClarificationError.UnknownOption:
-                return BadRequest(new { error = "unknown_option", retryable = false });
+                return BadRequest(GlunoErrors.Body("unknown_option", false));
         }
 
         var clarification = resolved.Clarification!;
         var option = resolved.Selected;
 
         if (option == null)
-            return Conflict(new { error = "clarification_closed", retryable = false });
+            return Conflict(GlunoErrors.Body("clarification_closed", false));
 
         // A repeat tap returns the FIRST answer rather than running the turn
         // again — the user sees the same reply appear, which is what tapping
@@ -550,18 +548,14 @@ public class GlunoController : ControllerBase
         };
 
         if (result.Error == GlunoTurnError.PlaceNotRetained)
-            return Conflict(new { error = "place_not_retained", retryable = false });
+            return Conflict(GlunoErrors.Body("place_not_retained", false));
 
         if (result.Error == GlunoTurnError.DuplicateInFlight)
-            return Conflict(new { error = "duplicate_in_flight", retryable = true });
+            return Conflict(GlunoErrors.Body("duplicate_in_flight", true));
 
         if (result.Error != GlunoTurnError.None)
         {
-            return StatusCode(502, new
-            {
-                error = result.FailureCode ?? GlunoFailureCodes.AiMalformedResponse,
-                retryable = result.IsRetryable,
-            });
+            return TurnFailure(result);
         }
 
         return Ok(new GlunoTurnResponseDto
@@ -669,7 +663,7 @@ public class GlunoController : ControllerBase
         // is simply not found — and so is its place, which is what stops a key
         // from one conversation reaching another's results.
         var message = await _conversations.GetMessageAsync(messageId, GetUserId(), ct);
-        if (message == null) return NotFound(new { error = "message_not_found", retryable = false });
+        if (message == null) return NotFound(GlunoErrors.Body("message_not_found", false));
 
         var place = GlunoPlaceOptions.Resolve(message, optionKey);
         if (place != null) return Ok(MapPlace(place, index));
@@ -679,7 +673,7 @@ public class GlunoController : ControllerBase
         var search = GlunoPlaceOptions.SearchContext(message);
 
         if (reference == null || search == null)
-            return NotFound(new { error = "place_not_found", retryable = false });
+            return NotFound(GlunoErrors.Body("place_not_found", false));
 
         var rehydrated = await _rehydrator.RehydrateAsync(
             GlunoPlaceOptions.References(message), search, optionKey, ct);
@@ -703,10 +697,10 @@ public class GlunoController : ControllerBase
             // timeout and a changed contract all look the same from here and
             // none of them are the user's problem.
             GlunoRehydrationStatus.Busy
-                => StatusCode(503, new { error = "place_lookup_busy", retryable = true }),
+                => StatusCode(503, GlunoErrors.Body("place_lookup_busy", true)),
             GlunoRehydrationStatus.NotFound
-                => NotFound(new { error = "place_not_available", retryable = false }),
-            _ => StatusCode(502, new { error = "place_lookup_failed", retryable = true }),
+                => NotFound(GlunoErrors.Body("place_not_available", false)),
+            _ => StatusCode(502, GlunoErrors.Body("place_lookup_failed", true)),
         };
     }
 
@@ -729,7 +723,7 @@ public class GlunoController : ControllerBase
         var userId = GetUserId();
 
         var message = await _conversations.GetMessageAsync(messageId, userId, ct);
-        if (message == null) return NotFound(new { error = "message_not_found", retryable = false });
+        if (message == null) return NotFound(GlunoErrors.Body("message_not_found", false));
 
         // ── The place, however it has to be obtained ──────────────────────
         //
@@ -750,23 +744,19 @@ public class GlunoController : ControllerBase
             // Distinct from an unknown key: this conversation did show places,
             // it just kept nothing that answers to this one. Older clients see
             // a code they can render rather than a bare "not found".
-            return Conflict(new { error = "place_not_retained", retryable = false });
+            return Conflict(GlunoErrors.Body("place_not_retained", false));
         }
 
         if (result.Error == GlunoTurnError.DuplicateInFlight)
         {
             // The first tap is still working. A second proposal is exactly what
             // the idempotency key exists to prevent.
-            return Conflict(new { error = "duplicate_in_flight", retryable = true });
+            return Conflict(GlunoErrors.Body("duplicate_in_flight", true));
         }
 
         if (result.Error != GlunoTurnError.None)
         {
-            return StatusCode(502, new
-            {
-                error = result.FailureCode ?? GlunoFailureCodes.AiMalformedResponse,
-                retryable = result.IsRetryable,
-            });
+            return TurnFailure(result);
         }
 
         return Ok(new GlunoTurnResponseDto
@@ -788,13 +778,13 @@ public class GlunoController : ControllerBase
         var userId = GetUserId();
 
         if (!GlunoClarificationSearch.IsUsable(dto.Query))
-            return BadRequest(new { error = "query_too_short", retryable = false });
+            return BadRequest(GlunoErrors.Body("query_too_short", false));
 
         var clarification = await _clarifications.GetOwnedAsync(clarificationId, userId, ct);
-        if (clarification == null) return NotFound(new { error = "clarification_not_found", retryable = false });
+        if (clarification == null) return NotFound(GlunoErrors.Body("clarification_not_found", false));
 
         if (!clarification.IsAnswerable)
-            return Conflict(new { error = "clarification_closed", retryable = false });
+            return Conflict(GlunoErrors.Body("clarification_closed", false));
 
         // The context is rebuilt under the caller's own membership, which is
         // what bounds the search. A clarification cannot widen its own scope by

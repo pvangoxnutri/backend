@@ -167,7 +167,7 @@ public class TurnFailureContractEvals
     public async Task No_failure_body_carries_anything_but_the_envelope()
     {
         // A failure body is read by a client that shows it to somebody. It may
-        // name the problem and nothing else — no message text, no provider
+        // name the problem and nothing else — no conversation text, no provider
         // detail, no configuration.
         foreach (var error in Enum.GetValues<GlunoTurnError>().Where(e => e != GlunoTurnError.None))
         {
@@ -175,9 +175,74 @@ public class TurnFailureContractEvals
 
             foreach (var property in body.EnumerateObject())
             {
-                Assert.Contains(property.Name, new[] { CodeField, RetryField, "reason" });
+                Assert.Contains(property.Name, new[] { "code", CodeField, "message", RetryField });
             }
         }
+    }
+
+    [Fact]
+    public async Task Every_failure_carries_a_code_a_message_and_a_retry_flag()
+    {
+        // THE BUG THIS CLOSES. A production failure rendered as "code: missing,
+        // retry: missing" — so the app had a status and nothing else to say.
+        // Every field, on every branch, always.
+        foreach (var error in Enum.GetValues<GlunoTurnError>().Where(e => e != GlunoTurnError.None))
+        {
+            var (status, body) = await SendAsync(Failure(error, GlunoFailureCodes.AiMalformedResponse));
+
+            Assert.InRange(status, 400, 599);
+
+            foreach (var field in new[] { "code", "message", RetryField })
+            {
+                Assert.True(body.TryGetProperty(field, out _), $"{error} returned no '{field}'");
+            }
+
+            Assert.False(string.IsNullOrWhiteSpace(body.GetProperty("code").GetString()));
+            Assert.False(string.IsNullOrWhiteSpace(body.GetProperty("message").GetString()));
+            Assert.True(body.GetProperty(RetryField).ValueKind is JsonValueKind.True or JsonValueKind.False);
+
+            // Same value under the older field name, so a client built against
+            // either contract reads the same thing.
+            Assert.Equal(body.GetProperty("code").GetString(), body.GetProperty(CodeField).GetString());
+        }
+    }
+
+    [Fact]
+    public void The_fallback_message_is_a_fixed_sentence_per_code()
+    {
+        // Never assembled from an exception, a status or a provider reply — the
+        // app shows it to a person, and it is only reached when the app has no
+        // copy of its own for the code.
+        foreach (var code in new[]
+        {
+            "empty_message", "place_lookup_busy", "duplicate_in_flight", "something_new",
+        })
+        {
+            var message = GlunoErrors.Fallback(code);
+
+            Assert.False(string.IsNullOrWhiteSpace(message));
+            Assert.DoesNotContain("Exception", message);
+            Assert.DoesNotContain("HTTP", message);
+            Assert.DoesNotContain(code, message);
+        }
+    }
+
+    [Fact]
+    public void A_status_is_decided_by_the_code_not_by_the_call_site()
+    {
+        // So the same failure cannot arrive as 502 from one endpoint and 409
+        // from another, and a code added later still gets a sensible status.
+        Assert.Equal(409, GlunoErrors.StatusFor("place_not_retained"));
+        Assert.Equal(404, GlunoErrors.StatusFor("message_not_found"));
+        Assert.Equal(503, GlunoErrors.StatusFor("place_lookup_busy"));
+        Assert.Equal(429, GlunoErrors.StatusFor(GlunoFailureCodes.UserUsageLimit));
+
+        // A model provider rate-limiting us is not the user hitting a limit.
+        Assert.Equal(502, GlunoErrors.StatusFor(GlunoFailureCodes.AiRateLimited));
+
+        // Unknown means unknown: a retryable 502 rather than a confident 400.
+        Assert.Equal(502, GlunoErrors.StatusFor("a_code_from_a_later_build"));
+        Assert.True(GlunoErrors.IsRetryable("place_lookup_failed"));
     }
 
     /// Configured enough to answer; the turn fails for its own reasons.

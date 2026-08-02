@@ -427,7 +427,7 @@ public class PersistencePolicyEvals
         // Not "not found". The key is real and the user is looking at the card;
         // what is missing is anything stored to verify it against.
         Assert.Contains("GlunoTurnError.PlaceNotRetained", chat);
-        Assert.Contains("error = \"place_not_retained\"", controller);
+        Assert.Contains("GlunoErrors.Body(\"place_not_retained\", false)", controller);
         Assert.Contains("place_not_retained: 'gluno.error.placeNotRetained'",
             Mobile("components", "gluno", "GlunoMessageRow.tsx"));
     }
