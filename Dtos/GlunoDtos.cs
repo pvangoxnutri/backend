@@ -151,6 +151,17 @@ public class UpdateGlunoProposalDto
 /// </summary>
 public class GlunoPlaceDto
 {
+    /// <summary>
+    /// The handle the app sends back when somebody taps this place.
+    ///
+    /// SERVER-GENERATED AND POSITIONAL — "place-0", "place-1" — scoped to the
+    /// message that produced it. The app never sends a provider id, a name or
+    /// a coordinate back, so a tap cannot reach a place this conversation
+    /// never showed, and a hand-edited request resolves to nothing rather than
+    /// to somebody else's search result.
+    /// </summary>
+    public string OptionKey { get; set; } = string.Empty;
+
     /// Provider id, e.g. "tripadvisor". Stays on each individual result so two
     /// providers' data can never be presented under one attribution.
     public string Provider { get; set; } = string.Empty;
@@ -747,6 +758,26 @@ public class GlunoConflictDto
 /// No userId and no entity id: the caller is the authenticated principal, and
 /// the option key resolves to a row the backend wrote.
 /// </summary>
+/// <summary>
+/// Adding a recommended place to the plan.
+///
+/// The place itself is identified by the route — a message id and a positional
+/// key the backend issued. Nothing about the place travels in the body: no
+/// name, no provider id, no coordinates, because all three are things the
+/// server already knows and a client could otherwise change.
+/// </summary>
+public class GlunoAddPlaceDto
+{
+    /// <summary>
+    /// The day to add it to, when the user has already chosen one. Null means
+    /// the backend decides, or asks.
+    /// </summary>
+    public DateOnly? Date { get; set; }
+
+    /// Reused across retries so a dropped connection cannot add twice.
+    public string? IdempotencyKey { get; set; }
+}
+
 public class GlunoClarificationResolveDto
 {
     public string? OptionKey { get; set; }

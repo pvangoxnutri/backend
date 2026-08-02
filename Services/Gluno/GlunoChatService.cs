@@ -155,6 +155,21 @@ public interface IGlunoChatService
         Guid userId, GlunoClarification clarification, GlunoClarificationOption option,
         CancellationToken ct);
 
+    /// <summary>
+    /// Turns a place Gluno recommended into a proposal awaiting approval.
+    ///
+    /// No model round: which place the user meant is already settled by the
+    /// key they tapped, and the place's own data came from a provider, not
+    /// from a sentence. What is left is choosing a day and building a card,
+    /// both of which are arithmetic over the Adventure.
+    ///
+    /// NOTHING IS WRITTEN. The proposal goes through the same review and the
+    /// same explicit Apply as any other.
+    /// </summary>
+    Task<GlunoTurnResult> AddRecommendedPlaceAsync(
+        Guid userId, GlunoMessage message, GlunoPlaceCard place,
+        DateOnly? date, string? idempotencyKey, CancellationToken ct);
+
     Task<GlunoTurnResult> SendAsync(
         Guid userId, Guid? conversationId, Guid? tripId, string message, string? screen,
         string? idempotencyKey, CancellationToken ct);
@@ -1539,6 +1554,286 @@ public sealed class GlunoChatService : IGlunoChatService
         }
 
         return result;
+    }
+
+    public async Task<GlunoTurnResult> AddRecommendedPlaceAsync(
+        Guid userId,
+        GlunoMessage message,
+        GlunoPlaceCard place,
+        DateOnly? date,
+        string? idempotencyKey,
+        CancellationToken ct)
+    {
+        var conversation = await _conversations.GetOwnedAsync(message.ConversationId, userId, ct);
+        if (conversation == null)
+            return new GlunoTurnResult { Error = GlunoTurnError.ConversationNotFound };
+
+        // ── Which Adventure ───────────────────────────────────────────────
+        //
+        // The conversation's own scope first. In a global conversation the
+        // Adventure the chat last settled on is the honest fallback — the
+        // recommendation came out of that conversation, so it is about that
+        // trip.
+        var workingState = await _workingState.LoadAsync(conversation.Id, ct);
+        var tripId = conversation.TripId ?? workingState.Recent.LastAdventureId;
+
+        var language = await _db.Users
+            .Where(user => user.Id == userId)
+            .Select(user => user.Language)
+            .FirstOrDefaultAsync(ct) ?? "en";
+
+        var swedish = string.Equals(language, "sv", StringComparison.OrdinalIgnoreCase);
+
+        // No Adventure at all: ask, with the same card every other path uses.
+        // Adding a place to a trip nobody named would be a guess with a write
+        // at the end of it.
+        if (tripId == null)
+        {
+            var globalContext = await _contextBuilder.BuildAsync(
+                userId, null, conversation.Id, new GlunoContextOptions { IncludeTrip = false }, ct);
+
+            var choices = TripChoicesFrom(globalContext);
+
+            if (choices.Count == 0)
+            {
+                return await PlaceAddStoppedAsync(
+                    conversation, swedish
+                        ? "Jag hittar inga tillgängliga Adventures just nu."
+                        : "I can't find any Adventures available right now.",
+                    ct);
+            }
+
+            return await AskWhichAdventureAsync(
+                conversation, userId, place.Name, AddActivityIntent(), choices, globalContext, ct);
+        }
+
+        // Membership NOW. A recommendation can be tapped long after it was
+        // shown, and a stale card must not be an access path.
+        if (!await _db.TripMembers.AnyAsync(
+            member => member.TripId == tripId && member.UserId == userId, ct))
+        {
+            return await PlaceAddStoppedAsync(
+                conversation, swedish
+                    ? "Du har inte längre tillgång till den resan."
+                    : "You no longer have access to that Adventure.",
+                ct);
+        }
+
+        var context = await _contextBuilder.BuildAsync(
+            userId, tripId, conversation.Id,
+            new GlunoContextOptions { IncludeTrip = true, IncludeDiscussedPlaces = true }, ct);
+
+        if (context.Trip is not { } trip)
+        {
+            return await PlaceAddStoppedAsync(
+                conversation, swedish
+                    ? "Jag kan inte läsa den resan just nu."
+                    : "I can't read that Adventure right now.",
+                ct);
+        }
+
+        // ── Which day ─────────────────────────────────────────────────────
+        //
+        // The day the user picked, or the only sensible one. When several fit,
+        // the existing day card asks — built from the route, so each row shows
+        // the city as well as the date.
+        var chosen = date ?? OnlySensibleDay(trip, context.Route);
+
+        if (chosen == null)
+        {
+            var options = GlunoClarificationBuilder.DayOptions(
+                trip.Destinations ?? EmptyDestinations(trip),
+                CandidateDays(trip),
+                language);
+
+            if (options.Count == 0)
+            {
+                return await PlaceAddStoppedAsync(
+                    conversation, swedish
+                        ? "Jag hittar ingen dag på resan där den passar."
+                        : "I can't find a day on the trip where that fits.",
+                    ct);
+            }
+
+            var question = swedish
+                ? $"Vilken dag vill du lägga till {place.Name}?"
+                : $"Which day should {place.Name} go on?";
+
+            return await AskPlaceDayAsync(conversation, userId, place, question, options, ct);
+        }
+
+        if (!TripDateRange.Contains(trip.StartDate, trip.EndDate, chosen.Value))
+        {
+            return await PlaceAddStoppedAsync(
+                conversation, swedish
+                    ? "Den dagen ligger utanför resan."
+                    : "That day is outside the Adventure.",
+                ct);
+        }
+
+        // ── The proposal ──────────────────────────────────────────────────
+        //
+        // Built from the provider's own data. Nothing here is written by a
+        // model, and no number is invented: the rating, the hours and the
+        // coordinates are whatever the lookup returned, and absent fields stay
+        // absent.
+        var payload = JsonSerializer.SerializeToElement(new
+        {
+            date = chosen.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            title = place.Name,
+            description = place.ReviewSummary,
+            category = place.Category,
+            locationLabel = place.Address ?? place.Name,
+            latitude = place.Latitude,
+            longitude = place.Longitude,
+            placeId = place.ExternalId,
+            durationMinutes = (int?)null,
+        }, GlunoJson.Options);
+
+        var proposal = new GlunoProposal
+        {
+            ActionName = GlunoActions.ProposeActivity,
+            Kind = "activity",
+            TripId = trip.Id,
+            Summary = place.Name,
+            Payload = payload,
+        };
+
+        var assistantMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.Assistant,
+            Text = swedish
+                ? $"Här är {place.Name} som förslag."
+                : $"Here's {place.Name} as a suggestion.",
+        }, ct);
+
+        var records = await CreateProposalsAsync(conversation, assistantMessage.Id, [proposal], ct);
+
+        _logger.LogInformation("[GLUNO] recommended place added as proposal");
+
+        return new GlunoTurnResult
+        {
+            Conversation = conversation,
+            UserMessage = assistantMessage,
+            AssistantMessage = assistantMessage,
+            ProposalRecords = records,
+        };
+    }
+
+    /// <summary>
+    /// The intent an "add this place" tap represents.
+    ///
+    /// Stated rather than classified: the user pressed a button that means one
+    /// thing, and running a router over it could only get it wrong.
+    /// </summary>
+    private static GlunoIntentResult AddActivityIntent() => new()
+    {
+        PrimaryIntent = GlunoIntent.AddActivity,
+        Confidence = 1.0,
+        Scope = GlunoIntentScope.Trip,
+        RequiresCurrentData = false,
+        RequiresExternalSearch = false,
+        ExpectsProposal = true,
+        RequiresClarification = false,
+    };
+
+    /// <summary>
+    /// The one day this place obviously belongs on, or null when it is a real
+    /// choice.
+    ///
+    /// A single-day trip answers itself. Otherwise the user picks — guessing a
+    /// day on a two-week holiday is guessing at the shape of somebody's
+    /// itinerary, and the cost of being wrong is an Activity in the wrong
+    /// place.
+    /// </summary>
+    private static DateOnly? OnlySensibleDay(GlunoTripContext trip, TripRouteContext? route)
+    {
+        var days = CandidateDays(trip).ToList();
+
+        return days.Count == 1 ? days[0] : null;
+    }
+
+    /// Days the trip actually covers, capped so a long trip does not produce a
+    /// list nobody scrolls.
+    private static IEnumerable<DateOnly> CandidateDays(GlunoTripContext trip)
+    {
+        var end = trip.EndDate ?? trip.EffectiveEndDate;
+
+        for (var date = trip.StartDate; date <= end; date = date.AddDays(1))
+        {
+            yield return date;
+        }
+    }
+
+    /// <summary>
+    /// Asks which day, carrying the place through so the answer knows what it
+    /// is placing.
+    /// </summary>
+    private async Task<GlunoTurnResult> AskPlaceDayAsync(
+        GlunoConversation conversation,
+        Guid userId,
+        GlunoPlaceCard place,
+        string question,
+        IReadOnlyList<GlunoOptionDraft> options,
+        CancellationToken ct)
+    {
+        var userMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.User,
+            Text = place.Name,
+        }, ct);
+
+        var assistantMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.Assistant,
+            Text = question,
+        }, ct);
+
+        var clarification = await _clarifications.CreateAsync(
+            new GlunoClarification
+            {
+                ConversationId = conversation.Id,
+                UserId = userId,
+                TripId = conversation.TripId,
+                OriginalUserMessageId = userMessage.Id,
+                MessageId = assistantMessage.Id,
+                Type = GlunoClarificationTypes.Day,
+                Question = question,
+                OriginalIntent = GlunoIntent.AddActivity.ToString(),
+                AllowFreeText = false,
+            },
+            options,
+            ct);
+
+        return new GlunoTurnResult
+        {
+            Conversation = conversation,
+            UserMessage = userMessage,
+            AssistantMessage = assistantMessage,
+            Clarification = clarification,
+        };
+    }
+
+    /// One short line, no card, no proposal.
+    private async Task<GlunoTurnResult> PlaceAddStoppedAsync(
+        GlunoConversation conversation, string text, CancellationToken ct)
+    {
+        var assistantMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.Assistant,
+            Text = text,
+        }, ct);
+
+        return new GlunoTurnResult
+        {
+            Conversation = conversation,
+            UserMessage = assistantMessage,
+            AssistantMessage = assistantMessage,
+        };
     }
 
     /// <summary>

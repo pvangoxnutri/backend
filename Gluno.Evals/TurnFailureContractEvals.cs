@@ -221,6 +221,11 @@ public class TurnFailureContractEvals
             sidequest.backend.Models.GlunoClarificationOption option, CancellationToken ct)
             => throw new NotSupportedException();
 
+        public Task<GlunoTurnResult> AddRecommendedPlaceAsync(
+            Guid userId, sidequest.backend.Models.GlunoMessage message, GlunoPlaceCard place,
+            DateOnly? date, string? idempotencyKey, CancellationToken ct)
+            => throw new NotSupportedException();
+
 
         public Task<GlunoTurnResult> SendAsync(
             Guid userId, Guid? conversationId, Guid? tripId, string message,

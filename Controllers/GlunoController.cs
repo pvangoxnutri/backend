@@ -502,6 +502,84 @@ public class GlunoController : ControllerBase
     /// the client sends a string and gets back things it may tap, and no id
     /// travels in either direction.
     /// </summary>
+    // ── Recommended places ────────────────────────────────────────────────
+
+    /// <summary>
+    /// One recommended place, in full, for the detail card.
+    ///
+    /// The turn that produced it already persisted everything the provider
+    /// returned — name, rating, hours, image, coordinates — in its own message
+    /// payload. So this reads that back rather than searching again: a second
+    /// lookup could return different data, and the card would then show
+    /// something the user was never recommended.
+    ///
+    /// <paramref name="optionKey"/> is positional and scoped to the message.
+    /// A key from another conversation, or one nobody rendered, resolves to
+    /// nothing.
+    /// </summary>
+    [HttpGet("messages/{messageId:guid}/places/{optionKey}")]
+    public async Task<ActionResult<GlunoPlaceDto>> GetRecommendedPlace(Guid messageId, string optionKey)
+    {
+        var ct = HttpContext.RequestAborted;
+
+        // Ownership is the lookup. A message from somebody else's conversation
+        // is simply not found.
+        var message = await _conversations.GetMessageAsync(messageId, GetUserId(), ct);
+        if (message == null) return NotFound(new { error = "message_not_found", retryable = false });
+
+        var place = GlunoPlaceOptions.Resolve(message, optionKey);
+        if (place == null) return NotFound(new { error = "place_not_found", retryable = false });
+
+        var index = GlunoPlaceOptions.IndexOf(optionKey);
+
+        return Ok(MapPlace(place, index));
+    }
+
+    /// <summary>
+    /// Turns a recommended place into a proposal the user can approve.
+    ///
+    /// NOTHING IS WRITTEN HERE. This creates the same kind of proposal a chat
+    /// turn would, so it goes through the same review, the same conflict
+    /// checks and the same explicit Apply. Tapping "Add" on a recommendation
+    /// must not be a shortcut past the one place where a change gets agreed.
+    ///
+    /// No model runs: the place is already known, and which one the user meant
+    /// is a lookup rather than a judgement.
+    /// </summary>
+    [HttpPost("messages/{messageId:guid}/places/{optionKey}/add")]
+    public async Task<ActionResult<GlunoTurnResponseDto>> AddRecommendedPlace(
+        Guid messageId, string optionKey, [FromBody] GlunoAddPlaceDto? dto)
+    {
+        var ct = HttpContext.RequestAborted;
+        var userId = GetUserId();
+
+        var message = await _conversations.GetMessageAsync(messageId, userId, ct);
+        if (message == null) return NotFound(new { error = "message_not_found", retryable = false });
+
+        var place = GlunoPlaceOptions.Resolve(message, optionKey);
+        if (place == null) return NotFound(new { error = "place_not_found", retryable = false });
+
+        var result = await _chat.AddRecommendedPlaceAsync(
+            userId, message, place, dto?.Date, dto?.IdempotencyKey, ct);
+
+        if (result.Error != GlunoTurnError.None)
+        {
+            return StatusCode(502, new
+            {
+                error = result.FailureCode ?? GlunoFailureCodes.AiMalformedResponse,
+                retryable = result.IsRetryable,
+            });
+        }
+
+        return Ok(new GlunoTurnResponseDto
+        {
+            Conversation = MapConversation(result.Conversation!),
+            UserMessage = MapMessage(result.UserMessage!, Array.Empty<Models.GlunoProposalRecord>()),
+            AssistantMessage = MapMessage(result.AssistantMessage!, result.ProposalRecords),
+            Clarification = MapClarification(result.Clarification),
+        });
+    }
+
     [HttpPost("clarifications/{clarificationId:guid}/search")]
     public async Task<ActionResult<GlunoClarificationDto>> SearchClarification(
         Guid clarificationId, [FromBody] GlunoClarificationSearchDto dto)
@@ -811,7 +889,9 @@ public class GlunoController : ControllerBase
 
             return (
                 payload.Proposals.Select(MapProposal).ToList(),
-                payload.Places.Select(MapPlace).ToList(),
+                // Indexed, so each place carries a stable server-generated key
+                // and the app never has to send a provider id back.
+                payload.Places.Select((place, index) => MapPlace(place, index)).ToList(),
                 // A target this build no longer knows is dropped rather than
                 // sent on — an unopenable button is worse than no button.
                 payload.Navigations
@@ -863,8 +943,12 @@ public class GlunoController : ControllerBase
         Status = Models.GlunoProposalStatuses.Stale,
     };
 
-    private static GlunoPlaceDto MapPlace(GlunoPlaceCard place) => new()
+    private static GlunoPlaceDto MapPlace(GlunoPlaceCard place, int index) => new()
     {
+        // Positional and scoped to this message. A tap sends this back, never
+        // a provider id or a name, so it cannot reach a place the conversation
+        // never showed.
+        OptionKey = GlunoPlaceOptions.KeyFor(index),
         Provider = place.Provider,
         ExternalId = place.ExternalId,
         Name = place.Name,
