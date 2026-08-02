@@ -250,6 +250,39 @@ public sealed class GlunoProposalApplyService : IGlunoProposalApplyService
         if (GlunoActions.Find(proposal.ActionType) == null)
             return await MarkFailedAsync(proposal.Id,"unknown_action", "This suggestion cannot be applied.", ct);
 
+        // ── The draft behind the proposal ─────────────────────────────────
+        //
+        // A proposal that came out of a conflict negotiation carries the draft
+        // it was built from and that draft's content version. Both are checked
+        // here, at the write, because either can have moved since the card was
+        // rendered: another tab can have answered a second conflict, a later
+        // continuation can have rebuilt the plan, or the same draft can already
+        // have been applied.
+        //
+        // Applying then would write an answer to a superseded question — a plan
+        // the user never actually saw.
+        //
+        // A NULL DraftId IS LEGACY, NOT AN ESCAPE HATCH. Proposals created
+        // before this flow existed have no draft to check and are guarded by
+        // the snapshot comparison alone. Everything a conflict produces carries
+        // both fields, and the check below is unconditional for those.
+        if (proposal.DraftId is { } draftId)
+        {
+            var draft = await _db.GlunoProposalDrafts
+                .FirstOrDefaultAsync(row => row.Id == draftId && row.UserId == userId, ct);
+
+            if (draft == null)
+                return await MarkStaleAsync(proposal, "draft_missing", ct);
+
+            // Terminal already. An apply arriving after the draft was applied,
+            // cancelled or failed must not produce a second write.
+            if (draft.Status != GlunoProposalDraftStatuses.ReadyForApproval)
+                return await MarkStaleAsync(proposal, "draft_not_ready", ct);
+
+            if (draft.DraftVersion != proposal.DraftVersion)
+                return await MarkStaleAsync(proposal, "draft_changed", ct);
+        }
+
         JsonElement payload;
         try
         {
@@ -317,6 +350,20 @@ public sealed class GlunoProposalApplyService : IGlunoProposalApplyService
             proposal.UpdatedAt = DateTime.UtcNow;
             proposal.FailureCode = null;
             proposal.ResultJson = JsonSerializer.Serialize(changes, GlunoJson.Options);
+
+            // The draft is done. `applied` is terminal, so a later continuation
+            // cannot offer to rebuild something already written to the plan —
+            // and a second proposal cannot be created from it.
+            if (proposal.DraftId is { } appliedDraftId)
+            {
+                await _db.GlunoProposalDrafts
+                    .Where(row => row.Id == appliedDraftId && row.UserId == userId)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(row => row.Status, GlunoProposalDraftStatuses.Applied)
+                        .SetProperty(row => row.ProposalId, proposal.Id)
+                        .SetProperty(row => row.UpdatedAt, DateTime.UtcNow), ct);
+            }
+
             await _db.SaveChangesAsync(ct);
 
             // Outside the transaction and after the commit. The change is
@@ -448,6 +495,16 @@ public sealed class GlunoProposalApplyService : IGlunoProposalApplyService
             }
         }
 
+        // ── Intended changes to Activities that already exist ─────────────
+        //
+        // "Move the existing one" and "replace the existing one" were recorded
+        // on the draft when the user answered a conflict; nothing was written
+        // then, because the suggestion had not been approved. This is where
+        // they happen — inside the same transaction as the new rows, so the
+        // whole answer lands together or not at all.
+        var operationError = await ApplyOperationsAsync(tripId, userId, payload, changes, ct);
+        if (operationError != null) return operationError;
+
         var drafts = new List<GlunoActivityDraft>();
         foreach (var entry in activities.EnumerateArray())
         {
@@ -489,6 +546,171 @@ public sealed class GlunoProposalApplyService : IGlunoProposalApplyService
             await CreateActivityAsync(trip, userId, draft, changes, ct, explicitSortIndex: nextSortIndex++);
         }
 
+        return null;
+    }
+
+    /// <summary>
+    /// Carries out the moves and replacements the draft recorded.
+    ///
+    /// EVERY ONE IS RE-CHECKED AGAINST THE LIVE ROW. The operation carries what
+    /// the Activity looked like when the user answered; if it has been moved,
+    /// renamed or deleted since, the whole proposal is refused rather than
+    /// overwriting a change somebody else made. That is the difference between
+    /// honouring the user's answer and acting on a plan they never saw.
+    ///
+    /// Runs inside the caller's transaction, before the new rows are added, so
+    /// a replacement's slot is free by the time its replacement is written.
+    /// </summary>
+    private async Task<(string, string)?> ApplyOperationsAsync(
+        Guid tripId, Guid userId, JsonElement payload, GlunoApplyChanges changes, CancellationToken ct)
+    {
+        var operations = GlunoDraftPlan.Operations(payload);
+        if (operations.Count == 0) return null;
+
+        foreach (var operation in operations)
+        {
+            if (!GlunoDraftOperationTypes.IsKnown(operation.Type))
+                return ("unknown_operation", "This suggestion cannot be applied.");
+
+            var activity = await _db.TripActivities
+                .FirstOrDefaultAsync(row => row.Id == operation.ActivityId && row.TripId == tripId, ct);
+
+            // Gone since the user answered. Their answer was about a plan that
+            // no longer exists.
+            if (activity == null)
+            {
+                return ("activity_missing",
+                    "Part of this plan was removed since Gluno suggested it. Ask for an updated one.");
+            }
+
+            // Somebody else's unrevealed SideQuest is not this user's to touch.
+            if (activity.IsHidden && activity.OwnerId != userId)
+                return ("activity_missing", "That activity is no longer part of this Adventure.");
+
+            // ── The snapshot ──────────────────────────────────────────────
+            //
+            // Moved or renamed in the meantime. Refused rather than overwritten:
+            // the user chose to move a 19:00 dinner, and a 20:30 dinner is a
+            // different decision.
+            if (!MatchesSnapshot(activity, operation))
+            {
+                return ("activity_changed",
+                    "Part of this plan changed since Gluno suggested it. Ask for an updated one.");
+            }
+
+            var error = operation.Type == GlunoDraftOperationTypes.MoveExisting
+                ? await MoveExistingAsync(tripId, activity, operation, changes, ct)
+                : await ReplaceExistingAsync(userId, activity, changes, ct);
+
+            if (error != null) return error;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Whether the Activity is still as it was when the user answered.
+    ///
+    /// Date, time and title. A null on the operation means it was not recorded,
+    /// which is treated as "do not check that field" rather than "must be null"
+    /// — an over-strict comparison would fail legitimate applies.
+    /// </summary>
+    private static bool MatchesSnapshot(TripActivity activity, GlunoDraftOperation operation)
+    {
+        if (operation.FromDate is { } fromDate
+            && !string.Equals(
+                activity.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), fromDate, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (operation.FromTime is { } fromTime
+            && !string.Equals(activity.Time ?? string.Empty, fromTime, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return operation.FromTitle is not { } fromTitle
+            || string.Equals(activity.Title, fromTitle, StringComparison.Ordinal);
+    }
+
+    private async Task<(string, string)?> MoveExistingAsync(
+        Guid tripId, TripActivity activity, GlunoDraftOperation operation,
+        GlunoApplyChanges changes, CancellationToken ct)
+    {
+        var trip = await _db.Trips.FindAsync([tripId], ct);
+        if (trip == null) return ("trip_missing", "That Adventure no longer exists.");
+
+        if (operation.ToDate == null
+            || !DateOnly.TryParseExact(
+                operation.ToDate, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var toDate))
+        {
+            return ("invalid_payload", "This suggestion has no valid date.");
+        }
+
+        if (!TripDateRange.Contains(trip.StartDate, trip.EndDate, toDate))
+            return ("date_out_of_range", TripDateRange.OutOfRangeMessage(trip.StartDate, trip.EndDate));
+
+        var fromDate = activity.Date;
+
+        // A stay moves as a whole and is re-validated, exactly as the ordinary
+        // move endpoint does it. Gluno gets no wider permission than a person.
+        if (activity.EndDate.HasValue)
+        {
+            var shiftedEnd = DateOnly.FromDayNumber(
+                activity.EndDate.Value.DayNumber + (toDate.DayNumber - activity.Date.DayNumber));
+
+            var stayError = TripEditRules.ValidateStayRange(toDate, shiftedEnd, activity.EndTime, trip);
+            if (stayError != null) return ("invalid_stay", stayError);
+
+            activity.EndDate = shiftedEnd;
+        }
+
+        if (operation.ToTime is { } toTime
+            && System.Text.RegularExpressions.Regex.IsMatch(toTime, @"^([01]\d|2[0-3]):[0-5]\d$"))
+        {
+            activity.Time = toTime;
+        }
+
+        activity.Date = toDate;
+        activity.SortIndex = await TripEditRules.InsertChronologicallyAsync(
+            _db, tripId, toDate, activity.Time, activity.Id, ct);
+
+        changes.UpdatedActivityIds.Add(activity.Id);
+        AddAffectedDate(changes, fromDate);
+        AddAffectedDate(changes, toDate);
+        return null;
+    }
+
+    /// <summary>
+    /// Removes the Activity the suggestion replaces.
+    ///
+    /// The new row is created by the ordinary day-plan path immediately after,
+    /// inside the same transaction — so there is no moment where the day has
+    /// neither.
+    ///
+    /// A feed entry is written for the removal, the same one a person deleting
+    /// it would produce. A change that appears in somebody's Adventure without
+    /// appearing in its history is a change they cannot account for.
+    /// </summary>
+    private async Task<(string, string)?> ReplaceExistingAsync(
+        Guid userId, TripActivity activity, GlunoApplyChanges changes, CancellationToken ct)
+    {
+        var actor = await _db.Users.FindAsync([userId], ct);
+
+        _db.TripEvents.Add(new TripEvent
+        {
+            TripId = activity.TripId,
+            ActorId = userId,
+            ActorName = DisplayNameHelper.OrFallback(actor?.Name),
+            Type = "activity_removed",
+            IsHidden = false,
+            CreatedAt = DateTime.UtcNow,
+        });
+
+        _db.TripActivities.Remove(activity);
+
+        AddAffectedDate(changes, activity.Date);
         return null;
     }
 
@@ -748,6 +970,33 @@ public sealed class GlunoProposalApplyService : IGlunoProposalApplyService
             Proposal = proposal,
             FailureCode = code,
             Message = message,
+        };
+    }
+
+    /// <summary>
+    /// Marks a proposal stale and writes nothing.
+    ///
+    /// Reached only BEFORE the claim, so there is no transaction to unwind and
+    /// no half-applied plan to worry about — the point of checking here is that
+    /// the write never starts.
+    /// </summary>
+    private async Task<GlunoApplyResult> MarkStaleAsync(
+        GlunoProposalRecord proposal, string code, CancellationToken ct)
+    {
+        proposal.Status = GlunoProposalStatuses.Stale;
+        proposal.FailureCode = code;
+        proposal.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync(ct);
+
+        // The code, never the versions. A version number in a log is a detail
+        // about somebody's plan.
+        _logger.LogInformation("[GLUNO] apply refused reason={Reason}", code);
+
+        return new GlunoApplyResult
+        {
+            Error = GlunoApplyError.Stale,
+            Proposal = proposal,
+            FailureCode = code,
         };
     }
 

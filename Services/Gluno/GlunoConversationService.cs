@@ -23,6 +23,10 @@ public interface IGlunoConversationService
     Task<GlunoMessagePage> GetMessagePageAsync(Guid conversationId, DateTime? before, int limit, CancellationToken ct);
     Task<List<GlunoTurn>> GetHistoryTurnsAsync(Guid conversationId, int maxTurns, CancellationToken ct);
     Task<GlunoMessage> AppendAsync(GlunoMessage message, CancellationToken ct);
+
+    /// One message, scoped to its owner through the conversation. Used to
+    /// replay the question a clarification was asking about.
+    Task<GlunoMessage?> GetMessageAsync(Guid messageId, Guid userId, CancellationToken ct);
     Task ArchiveAsync(GlunoConversation conversation, CancellationToken ct);
 }
 
@@ -179,6 +183,13 @@ public sealed class GlunoConversationService : IGlunoConversationService
         rows.Reverse();
         return rows.Select(r => new GlunoTurn { Role = r.Role, Text = r.Text }).ToList();
     }
+
+    public Task<GlunoMessage?> GetMessageAsync(Guid messageId, Guid userId, CancellationToken ct)
+        => _db.GlunoMessages
+            .AsNoTracking()
+            .Join(_db.GlunoConversations.Where(c => c.UserId == userId),
+                m => m.ConversationId, c => c.Id, (m, _) => m)
+            .FirstOrDefaultAsync(m => m.Id == messageId, ct);
 
     public async Task<GlunoMessage> AppendAsync(GlunoMessage message, CancellationToken ct)
     {

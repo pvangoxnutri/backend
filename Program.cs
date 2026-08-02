@@ -137,6 +137,10 @@ builder.Services.AddHostedService<GlunoDocumentTempSweeper>();
 builder.Services.AddSingleton<GlunoGroundingValidator>();
 builder.Services.AddScoped<IGlunoWorkingStateStore, GlunoWorkingStateStore>();
 builder.Services.AddScoped<IGlunoConversationService, GlunoConversationService>();
+builder.Services.AddScoped<IGlunoClarificationService, GlunoClarificationService>();
+// Suggestions mid-negotiation. Nothing here writes to an Adventure — a draft
+// is a conversation about a change, not the change.
+builder.Services.AddScoped<IGlunoProposalDraftService, GlunoProposalDraftService>();
 builder.Services.AddScoped<IGlunoChatService, GlunoChatService>();
 // The proposal half: the store records what Gluno suggested, and the apply
 // service is the ONLY thing that turns one into a real change — always behind

@@ -302,6 +302,9 @@ public class GlunoTurnResponseDto
     public GlunoConversationDto Conversation { get; set; } = new();
     public GlunoMessageDto UserMessage { get; set; } = new();
     public GlunoMessageDto AssistantMessage { get; set; } = new();
+    /// A question with tappable answers, when the turn stopped to ask one.
+    /// Null on an ordinary turn.
+    public GlunoClarificationDto? Clarification { get; set; }
 }
 
 /// <summary>
@@ -639,4 +642,118 @@ public class GlunoPreferenceUpdateDto
     /// and the app confirms it separately. The server does not infer it.
     /// </summary>
     public string? Scope { get; set; }
+}
+
+// ── Clarifications ────────────────────────────────────────────────────────
+
+/// <summary>
+/// One tappable answer.
+///
+/// Deliberately carries no entity id and no route. The client sends back
+/// `optionKey` and nothing else — every id stays server-side, so a tampered
+/// request cannot point the choice at something the user may not touch.
+/// </summary>
+public class GlunoClarificationOptionDto
+{
+    public string Key { get; set; } = string.Empty;
+    public string Label { get; set; } = string.Empty;
+    public string? Description { get; set; }
+    /// A stable icon name from the app's own set. Never a URL.
+    public string? Icon { get; set; }
+    public bool Disabled { get; set; }
+    /// A localised sentence, never a raw status code.
+    public string? DisabledReason { get; set; }
+}
+
+/// <summary>
+/// A question Gluno needs answered before it can carry on.
+///
+/// An app that does not recognise `type` must still render the question and
+/// the options — the type only tunes presentation, it is never required to
+/// make the card work.
+/// </summary>
+public class GlunoClarificationDto
+{
+    public Guid Id { get; set; }
+    /// adventure | day | activity | place | transport_mode | pace | budget |
+    /// preference_scope | proposal_conflict
+    public string Type { get; set; } = string.Empty;
+    public string Question { get; set; } = string.Empty;
+    public List<GlunoClarificationOptionDto> Options { get; set; } = new();
+    /// True when the answer might genuinely not be in the list.
+    public bool AllowFreeText { get; set; }
+    public bool MultiSelect { get; set; }
+    /// pending | resolved | expired | cancelled | stale
+    public string Status { get; set; } = string.Empty;
+    /// Which option was chosen, once it has been.
+    public string? SelectedKey { get; set; }
+    public DateTime ExpiresAt { get; set; }
+
+    /// Present only on a proposal_conflict. Null on every other type.
+    public GlunoConflictDto? Conflict { get; set; }
+}
+
+/// <summary>
+/// What a conflict card shows above its options.
+///
+/// DELIBERATELY WITHOUT IDS AND VERSIONS. The app renders a sentence, a day and
+/// a time; it never sends any of this back. Draft ids, draft versions and
+/// conflict versions stay on the server, where they cannot be edited — putting
+/// them in a response would make them look like something a client is expected
+/// to return, and the moment one is trusted the staleness check is decorative.
+/// </summary>
+public class GlunoConflictDto
+{
+    /// time_overlap | locked_booking | outside_trip_dates | …
+    public string Type { get; set; } = string.Empty;
+
+    /// ISO date the clash is on, when it is about one day.
+    public string? Date { get; set; }
+    public string? StartTime { get; set; }
+    public string? EndTime { get; set; }
+
+    /// <summary>
+    /// True when what it clashes with cannot be moved — a booking, a check-in.
+    /// The card says so plainly, because the missing options are otherwise
+    /// unexplained: three choices instead of five reads as arbitrary.
+    /// </summary>
+    public bool ExistingIsLocked { get; set; }
+
+    /// <summary>
+    /// How many minutes short the gap is, on a travel-time conflict. Zero on
+    /// every other type.
+    ///
+    /// A number, not a sentence, so the app writes it in the user's language.
+    /// </summary>
+    public int MissingTravelMinutes { get; set; }
+
+    /// Titles of the Activities involved, as the app already shows them.
+    public List<string> AffectedTitles { get; set; } = new();
+}
+
+/// <summary>
+/// Answering a clarification.
+///
+/// No userId and no entity id: the caller is the authenticated principal, and
+/// the option key resolves to a row the backend wrote.
+/// </summary>
+public class GlunoClarificationResolveDto
+{
+    public string? OptionKey { get; set; }
+    /// Reused across retries so a dropped connection cannot answer twice.
+    public string? IdempotencyKey { get; set; }
+}
+
+/// <summary>
+/// "Something else" — a free-text search within the clarification's own scope.
+///
+/// A string and nothing else. No entity id, no type, no scope: the
+/// clarification already knows what it is asking about, and letting the client
+/// name a search target would be the one way this becomes a lookup endpoint.
+/// </summary>
+public class GlunoClarificationSearchDto
+{
+    public string? Query { get; set; }
+    /// Reused across retries, so a double Enter cannot search twice.
+    public string? IdempotencyKey { get; set; }
 }

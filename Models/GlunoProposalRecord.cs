@@ -92,6 +92,23 @@ public class GlunoProposalRecord
     /// </summary>
     public string? SnapshotJson { get; set; }
 
+    /// <summary>
+    /// The draft this proposal was built from, and the draft's content version
+    /// at that moment.
+    ///
+    /// Apply re-checks both. A draft rebuilt after this proposal was created —
+    /// a second conflict answered in another tab, a later continuation — means
+    /// the card in front of the user describes a plan that no longer exists,
+    /// and writing it would apply an answer to a superseded question.
+    ///
+    /// NULL IS LEGACY, NOT AN ESCAPE HATCH. Proposals created before the draft
+    /// flow existed carry no reference and are applied on the snapshot check
+    /// alone. Every proposal a conflict produces carries both.
+    /// </summary>
+    public Guid? DraftId { get; set; }
+
+    public int? DraftVersion { get; set; }
+
     public string Status { get; set; } = GlunoProposalStatuses.Pending;
 
     /// Machine-readable reason for a failed or stale proposal, e.g.

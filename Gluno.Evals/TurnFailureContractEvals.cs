@@ -45,6 +45,8 @@ public class TurnFailureContractEvals
             routing: null!,
             dayPlanner: null!,
             liveTravel: null!,
+            clarifications: null!,
+            contextBuilder: null!,
             logger: Microsoft.Extensions.Logging.Abstractions.NullLogger<GlunoController>.Instance);
 
         // The endpoint reads the caller from the principal, never from the
@@ -207,6 +209,18 @@ public class TurnFailureContractEvals
         private readonly GlunoTurnResult _result;
 
         public StubChatService(GlunoTurnResult result) => _result = result;
+
+        public Task<GlunoTurnResult> ContinueFromClarificationAsync(
+            Guid userId, sidequest.backend.Models.GlunoClarification clarification,
+            sidequest.backend.Models.GlunoClarificationOption option,
+            string? idempotencyKey, CancellationToken ct)
+            => throw new NotSupportedException();
+
+        public Task<GlunoTurnResult> ContinueFromDraftAsync(
+            Guid userId, sidequest.backend.Models.GlunoClarification clarification,
+            sidequest.backend.Models.GlunoClarificationOption option, CancellationToken ct)
+            => throw new NotSupportedException();
+
 
         public Task<GlunoTurnResult> SendAsync(
             Guid userId, Guid? conversationId, Guid? tripId, string message,

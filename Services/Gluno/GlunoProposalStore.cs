@@ -37,8 +37,17 @@ public sealed class GlunoProposalSnapshot
 
 public interface IGlunoProposalStore
 {
+    /// <summary>
+    /// The only way a proposal comes into existence.
+    ///
+    /// <paramref name="draftId"/> and <paramref name="draftVersion"/> bind it to
+    /// the negotiation it came out of, so apply can refuse a proposal whose
+    /// draft has moved on since. Both null only for the ordinary path, where no
+    /// conflict was ever raised.
+    /// </summary>
     Task<GlunoProposalRecord> CreateAsync(
-        GlunoConversation conversation, Guid messageId, GlunoProposal proposal, CancellationToken ct);
+        GlunoConversation conversation, Guid messageId, GlunoProposal proposal, CancellationToken ct,
+        Guid? draftId = null, int? draftVersion = null);
 
     Task<GlunoProposalRecord?> GetOwnedAsync(Guid proposalId, Guid userId, CancellationToken ct);
 
@@ -62,7 +71,8 @@ public sealed class GlunoProposalStore : IGlunoProposalStore
     }
 
     public async Task<GlunoProposalRecord> CreateAsync(
-        GlunoConversation conversation, Guid messageId, GlunoProposal proposal, CancellationToken ct)
+        GlunoConversation conversation, Guid messageId, GlunoProposal proposal, CancellationToken ct,
+        Guid? draftId = null, int? draftVersion = null)
     {
         var snapshot = await BuildSnapshotAsync(proposal.TripId, proposal.Kind, proposal.Payload, ct);
 
@@ -78,6 +88,8 @@ public sealed class GlunoProposalStore : IGlunoProposalStore
             PayloadVersion = GlunoProposalPayloadVersions.Current,
             PayloadJson = proposal.Payload.GetRawText(),
             SnapshotJson = JsonSerializer.Serialize(snapshot, GlunoJson.Options),
+            DraftId = draftId,
+            DraftVersion = draftVersion,
             Status = GlunoProposalStatuses.Pending,
         };
 

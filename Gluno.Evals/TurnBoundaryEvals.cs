@@ -45,6 +45,8 @@ public class TurnBoundaryEvals
             routing: null!,
             dayPlanner: null!,
             liveTravel: null!,
+            clarifications: null!,
+            contextBuilder: null!,
             logger: NullLogger<GlunoController>.Instance);
 
         controller.ControllerContext = new ControllerContext
@@ -184,6 +186,18 @@ public class TurnBoundaryEvals
         private readonly Exception _thrown;
 
         public ThrowingChatService(Exception thrown) => _thrown = thrown;
+
+        public Task<GlunoTurnResult> ContinueFromClarificationAsync(
+            Guid userId, sidequest.backend.Models.GlunoClarification clarification,
+            sidequest.backend.Models.GlunoClarificationOption option,
+            string? idempotencyKey, CancellationToken ct)
+            => throw new NotSupportedException();
+
+        public Task<GlunoTurnResult> ContinueFromDraftAsync(
+            Guid userId, sidequest.backend.Models.GlunoClarification clarification,
+            sidequest.backend.Models.GlunoClarificationOption option, CancellationToken ct)
+            => throw new NotSupportedException();
+
 
         public Task<GlunoTurnResult> SendAsync(
             Guid userId, Guid? conversationId, Guid? tripId, string message,

@@ -33,6 +33,8 @@ public class GlunoController : ControllerBase
     private readonly IRoutingService _routing;
     private readonly IDayPlanPlanner _dayPlanner;
     private readonly ILiveTravelRegistry _liveTravel;
+    private readonly IGlunoClarificationService _clarifications;
+    private readonly IGlunoContextBuilder _contextBuilder;
     private readonly ILogger<GlunoController> _logger;
 
     public GlunoController(
@@ -44,9 +46,13 @@ public class GlunoController : ControllerBase
         IRoutingService routing,
         IDayPlanPlanner dayPlanner,
         ILiveTravelRegistry liveTravel,
+        IGlunoClarificationService clarifications,
+        IGlunoContextBuilder contextBuilder,
         ILogger<GlunoController> logger)
     {
         _liveTravel = liveTravel;
+        _clarifications = clarifications;
+        _contextBuilder = contextBuilder;
         _logger = logger;
         _availability = availability;
         _chat = chat;
@@ -382,7 +388,243 @@ public class GlunoController : ControllerBase
             UserMessage = MapMessage(result.UserMessage!, Array.Empty<Models.GlunoProposalRecord>()),
             // The records just written carry the ids the app applies against.
             AssistantMessage = MapMessage(result.AssistantMessage!, result.ProposalRecords),
+            Clarification = MapClarification(result.Clarification),
         });
+    }
+
+    /// <summary>
+    /// Answers a clarification and carries on with the original question.
+    ///
+    /// The user does not resend anything. The clarification remembers which
+    /// turn it was asking about, so this endpoint resumes THAT question with
+    /// the choice applied — which is the whole point of the feature.
+    /// </summary>
+    [HttpPost("clarifications/{clarificationId:guid}/resolve")]
+    public async Task<ActionResult<GlunoTurnResponseDto>> ResolveClarification(
+        Guid clarificationId, [FromBody] GlunoClarificationResolveDto dto)
+    {
+        var ct = HttpContext.RequestAborted;
+        var userId = GetUserId();
+
+        if (string.IsNullOrWhiteSpace(dto.OptionKey))
+            return BadRequest(new { error = "missing_option", retryable = false });
+
+        var resolved = await _clarifications.ResolveAsync(clarificationId, userId, dto.OptionKey!, ct);
+
+        switch (resolved.Error)
+        {
+            case GlunoClarificationError.NotFound:
+                return NotFound(new { error = "clarification_not_found", retryable = false });
+            case GlunoClarificationError.Forbidden:
+                return StatusCode(403, new { error = GlunoFailureCodes.AuthorizationChanged, retryable = false });
+            case GlunoClarificationError.NotAnswerable:
+                return Conflict(new { error = "clarification_closed", retryable = false });
+            case GlunoClarificationError.OptionStale:
+                // The Adventure went, or they left the group. Answerable again
+                // only by asking afresh — never by honouring a stale button.
+                return Conflict(new { error = "clarification_stale", retryable = false });
+            case GlunoClarificationError.UnknownOption:
+                return BadRequest(new { error = "unknown_option", retryable = false });
+        }
+
+        var clarification = resolved.Clarification!;
+        var option = resolved.Selected;
+
+        if (option == null)
+            return Conflict(new { error = "clarification_closed", retryable = false });
+
+        // A repeat tap returns the FIRST answer rather than running the turn
+        // again — the user sees the same reply appear, which is what tapping
+        // twice should look like.
+        if (resolved.WasAlreadyResolved && clarification.ContinuationMessageId is { } existing)
+        {
+            var replay = await _conversations.GetMessageAsync(existing, userId, ct);
+            if (replay != null)
+            {
+                return Ok(new GlunoTurnResponseDto
+                {
+                    Conversation = MapConversation(clarification.Conversation),
+                    UserMessage = MapMessage(replay, Array.Empty<Models.GlunoProposalRecord>()),
+                    AssistantMessage = MapMessage(replay, Array.Empty<Models.GlunoProposalRecord>()),
+                    Clarification = MapClarification(clarification),
+                });
+            }
+        }
+
+        // ── Two continuations, and they are not interchangeable ───────────
+        //
+        // An ordinary clarification answers a question the turn could not
+        // answer alone, so the turn is REPLAYED with the answer supplied.
+        //
+        // A proposal conflict has already produced a plan. Replaying it would
+        // spend a model round re-deriving something the draft already holds,
+        // and could come back with a different plan than the one the user was
+        // looking at when they tapped. It takes its own path: a deterministic
+        // fix applied to the draft, then the same quality gate again.
+        //
+        // Routed on the DRAFT BINDING, not on the type. A conflict can produce
+        // a day or a time chooser, and those are ordinary `day` and
+        // `activity_time` cards — but they answer about a draft, so they belong
+        // on the draft path too. Routing on the type alone would send them
+        // through the model and lose the plan they were fixing.
+        var result = clarification.DraftId.HasValue
+            ? await _chat.ContinueFromDraftAsync(userId, clarification, option, ct)
+            : await _chat.ContinueFromClarificationAsync(
+                userId, clarification, option, dto.IdempotencyKey, ct);
+
+        if (result.Error != GlunoTurnError.None)
+        {
+            return StatusCode(502, new
+            {
+                error = result.FailureCode ?? GlunoFailureCodes.AiMalformedResponse,
+                retryable = result.IsRetryable,
+            });
+        }
+
+        return Ok(new GlunoTurnResponseDto
+        {
+            Conversation = MapConversation(result.Conversation!),
+            UserMessage = MapMessage(result.UserMessage!, Array.Empty<Models.GlunoProposalRecord>()),
+            AssistantMessage = MapMessage(result.AssistantMessage!, result.ProposalRecords),
+            Clarification = MapClarification(result.Clarification),
+        });
+    }
+
+    /// <summary>
+    /// "Something else" — searches for an option that was not on the list.
+    ///
+    /// Scoped to what the caller can already see, per clarification type: their
+    /// own Adventures, this trip's days, its Activities, its stops, or the
+    /// provider results already shown in this conversation. Never a general
+    /// query, never an external provider, never a model.
+    ///
+    /// The options it returns are new rows with new keys, built server-side —
+    /// the client sends a string and gets back things it may tap, and no id
+    /// travels in either direction.
+    /// </summary>
+    [HttpPost("clarifications/{clarificationId:guid}/search")]
+    public async Task<ActionResult<GlunoClarificationDto>> SearchClarification(
+        Guid clarificationId, [FromBody] GlunoClarificationSearchDto dto)
+    {
+        var ct = HttpContext.RequestAborted;
+        var userId = GetUserId();
+
+        if (!GlunoClarificationSearch.IsUsable(dto.Query))
+            return BadRequest(new { error = "query_too_short", retryable = false });
+
+        var clarification = await _clarifications.GetOwnedAsync(clarificationId, userId, ct);
+        if (clarification == null) return NotFound(new { error = "clarification_not_found", retryable = false });
+
+        if (!clarification.IsAnswerable)
+            return Conflict(new { error = "clarification_closed", retryable = false });
+
+        // The context is rebuilt under the caller's own membership, which is
+        // what bounds the search. A clarification cannot widen its own scope by
+        // being searched.
+        var context = await _contextBuilder.BuildAsync(
+            userId, clarification.TripId, clarification.ConversationId, ct);
+
+        var options = clarification.Type switch
+        {
+            GlunoClarificationTypes.Adventure => GlunoClarificationSearch.Adventures(
+                context.Trips
+                    .Select(trip => new TripChoice(trip.Id, trip.Title, trip.StartDate, trip.EndDate))
+                    .ToList(),
+                dto.Query!, context.Today, context.User.Language),
+
+            GlunoClarificationTypes.Day when context.Trip is { } dayTrip
+                => GlunoClarificationSearch.Days(
+                    dayTrip.Destinations ?? EmptyDestinations(dayTrip),
+                    dayTrip.StartDate, dayTrip.EffectiveEndDate,
+                    dto.Query!, context.User.Language),
+
+            GlunoClarificationTypes.Activity when context.Trip is { } activityTrip
+                => GlunoClarificationSearch.Activities(
+                    activityTrip.Activities, dto.Query!, context.User.Language),
+
+            GlunoClarificationTypes.Place when context.Trip?.Destinations is { } destinations
+                => GlunoClarificationSearch.Destinations(destinations, dto.Query!),
+
+            // A place clarification with no trip is about the provider results
+            // already shown — the snapshot, never a fresh search.
+            GlunoClarificationTypes.Place
+                => GlunoClarificationSearch.DiscussedPlaces(context.DiscussedPlaces, dto.Query!),
+
+            _ => Array.Empty<GlunoOptionDraft>(),
+        };
+
+        var updated = await _clarifications.ReplaceOptionsAsync(clarification.Id, userId, options, ct);
+
+        // An empty result is a valid answer, not an error: the card says so and
+        // the user can search again or go back to the original options.
+        return Ok(MapClarification(updated ?? clarification));
+    }
+
+    private static TripDestinationSummary EmptyDestinations(GlunoTripContext trip) => new()
+    {
+        Title = trip.Title,
+        StartDate = trip.StartDate.ToString("yyyy-MM-dd"),
+    };
+
+    [HttpPost("clarifications/{clarificationId:guid}/cancel")]
+    public async Task<IActionResult> CancelClarification(Guid clarificationId)
+    {
+        var error = await _clarifications.CancelAsync(
+            clarificationId, GetUserId(), HttpContext.RequestAborted);
+
+        return error == GlunoClarificationError.NotFound ? NotFound() : NoContent();
+    }
+
+    /// Null on anything unreadable. A card that renders without its subtitle is
+    /// better than a turn that fails over one.
+    private static GlunoConflictDto? ReadConflictMeta(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+
+        try
+        {
+            return System.Text.Json.JsonSerializer.Deserialize<GlunoConflictDto>(
+                json, Services.Gluno.GlunoJson.Options);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static GlunoClarificationDto? MapClarification(Models.GlunoClarification? clarification)
+    {
+        if (clarification == null) return null;
+
+        return new GlunoClarificationDto
+        {
+            Id = clarification.Id,
+            Type = clarification.Type,
+            Question = clarification.Question,
+            AllowFreeText = clarification.AllowFreeText,
+            MultiSelect = clarification.MultiSelect,
+            Status = clarification.Status,
+            ExpiresAt = clarification.ExpiresAt,
+            SelectedKey = clarification.Options
+                .FirstOrDefault(option => option.Id == clarification.SelectedOptionId)?.OptionKey,
+            // The day, the times and the titles — never the draft id or either
+            // version. Those are what the resolve is checked against, and a
+            // number the client can see is a number the client can send back.
+            Conflict = ReadConflictMeta(clarification.ConflictMetaJson),
+            // Keys and labels only. Every entity id stays server-side.
+            Options = clarification.Options
+                .OrderBy(option => option.SortIndex)
+                .Select(option => new GlunoClarificationOptionDto
+                {
+                    Key = option.OptionKey,
+                    Label = option.Label,
+                    Description = option.Description,
+                    Icon = option.Icon,
+                    Disabled = option.Disabled,
+                    DisabledReason = option.DisabledReason,
+                })
+                .ToList(),
+        };
     }
 
     [HttpPost("conversations/{conversationId:guid}/archive")]

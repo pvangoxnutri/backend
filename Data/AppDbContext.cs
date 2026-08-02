@@ -52,6 +52,11 @@ public class AppDbContext : DbContext
     public DbSet<GlunoFeedbackEvent> GlunoFeedbackEvents => Set<GlunoFeedbackEvent>();
     public DbSet<GlunoPreferenceCandidate> GlunoPreferenceCandidates => Set<GlunoPreferenceCandidate>();
     public DbSet<GlunoRejection> GlunoRejections => Set<GlunoRejection>();
+    /// Clickable follow-up questions — see GlunoClarificationService.
+    public DbSet<GlunoClarification> GlunoClarifications => Set<GlunoClarification>();
+    public DbSet<GlunoClarificationOption> GlunoClarificationOptions => Set<GlunoClarificationOption>();
+    /// Suggestions mid-negotiation — see GlunoProposalDraft.
+    public DbSet<GlunoProposalDraft> GlunoProposalDrafts => Set<GlunoProposalDraft>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -318,6 +323,79 @@ public class AppDbContext : DbContext
 
         modelBuilder.Entity<GlunoRejection>()
             .HasIndex(r => new { r.UserId, r.TripId, r.ExpiresAt });
+
+        // ── Clarifications ────────────────────────────────────────────────
+        //
+        // A question dies with its conversation: it is only answerable in the
+        // exchange that asked it, and a dangling clarification would offer a
+        // continuation with nothing to continue.
+        modelBuilder.Entity<GlunoClarification>()
+            .HasOne(c => c.Conversation)
+            .WithMany()
+            .HasForeignKey(c => c.ConversationId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<GlunoClarification>()
+            .HasOne<User>()
+            .WithMany()
+            .HasForeignKey(c => c.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // Deleting the Adventure leaves the question readable but no longer
+        // answerable — the membership re-check at resolve time finds nothing.
+        modelBuilder.Entity<GlunoClarification>()
+            .HasOne<Trip>()
+            .WithMany()
+            .HasForeignKey(c => c.TripId)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        // The chat's lookup: the open question for this conversation.
+        modelBuilder.Entity<GlunoClarification>()
+            .HasIndex(c => new { c.ConversationId, c.Status });
+
+        modelBuilder.Entity<GlunoClarification>()
+            .HasIndex(c => c.MessageId);
+
+        modelBuilder.Entity<GlunoClarificationOption>()
+            .HasOne(o => o.Clarification)
+            .WithMany(c => c.Options)
+            .HasForeignKey(o => o.ClarificationId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // One key per clarification: the key is what the client sends back, so
+        // two options sharing one would make the choice ambiguous.
+        modelBuilder.Entity<GlunoClarificationOption>()
+            .HasIndex(o => new { o.ClarificationId, o.OptionKey })
+            .IsUnique();
+
+        // ── Proposal drafts ───────────────────────────────────────────────
+        //
+        // A draft dies with its conversation and its owner: it is a
+        // half-finished negotiation, meaningless without the exchange that
+        // produced it.
+        modelBuilder.Entity<GlunoProposalDraft>()
+            .HasOne(d => d.Conversation)
+            .WithMany()
+            .HasForeignKey(d => d.ConversationId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<GlunoProposalDraft>()
+            .HasOne<User>()
+            .WithMany()
+            .HasForeignKey(d => d.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // Deleting the Adventure takes the draft with it, unlike a proposal.
+        // A proposal is history worth keeping; a draft is a suggestion that
+        // was never agreed, about a trip that no longer exists.
+        modelBuilder.Entity<GlunoProposalDraft>()
+            .HasOne<Trip>()
+            .WithMany()
+            .HasForeignKey(d => d.TripId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<GlunoProposalDraft>()
+            .HasIndex(d => new { d.ConversationId, d.Status });
 
         modelBuilder.Entity<TripEvent>()
             .HasOne(e => e.Trip)

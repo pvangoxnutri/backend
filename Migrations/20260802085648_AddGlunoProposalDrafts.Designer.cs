@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using sidequest.backend.Data;
@@ -11,9 +12,11 @@ using sidequest.backend.Data;
 namespace sidequest.backend.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260802085648_AddGlunoProposalDrafts")]
+    partial class AddGlunoProposalDrafts
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -283,17 +286,6 @@ namespace sidequest.backend.Migrations
                     b.Property<bool>("AllowFreeText")
                         .HasColumnType("boolean");
 
-                    b.Property<string>("ConflictMetaJson")
-                        .HasMaxLength(1000)
-                        .HasColumnType("character varying(1000)");
-
-                    b.Property<string>("ConflictType")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<int?>("ConflictVersion")
-                        .HasColumnType("integer");
-
                     b.Property<int>("ContextVersion")
                         .HasColumnType("integer");
 
@@ -305,12 +297,6 @@ namespace sidequest.backend.Migrations
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid?>("DraftId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int?>("DraftVersion")
-                        .HasColumnType("integer");
 
                     b.Property<DateTime>("ExpiresAt")
                         .HasColumnType("timestamp with time zone");
@@ -912,10 +898,6 @@ namespace sidequest.backend.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
-                    b.Property<string>("AcceptedConflictsJson")
-                        .HasMaxLength(400)
-                        .HasColumnType("character varying(400)");
-
                     b.Property<string>("ActionType")
                         .IsRequired()
                         .HasMaxLength(60)
@@ -1006,12 +988,6 @@ namespace sidequest.backend.Migrations
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid?>("DraftId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int?>("DraftVersion")
-                        .HasColumnType("integer");
 
                     b.Property<string>("FailureCode")
                         .HasMaxLength(60)

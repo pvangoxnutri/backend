@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using sidequest.backend.Data;
+using sidequest.backend.Dtos;
 using sidequest.backend.Models;
 
 namespace sidequest.backend.Services.Gluno;
@@ -86,6 +87,10 @@ public sealed class GlunoTurnResult
     public IReadOnlyList<GlunoPlaceCard> Places { get; init; } = Array.Empty<GlunoPlaceCard>();
     public IReadOnlyList<GlunoNavigationCard> Navigations { get; init; } = Array.Empty<GlunoNavigationCard>();
 
+    /// A question with tappable answers, when the turn could not proceed
+    /// without a choice. See GlunoClarificationService.
+    public GlunoClarification? Clarification { get; init; }
+
     /// <summary>
     /// A stable code from <see cref="GlunoFailureCodes"/> when something went
     /// wrong. The app localises it — a raw provider or SDK message never
@@ -129,6 +134,27 @@ public interface IGlunoChatService
     /// answer, a second charge or a second applicable proposal. Null from an
     /// older client, which simply proceeds unprotected.
     /// </param>
+    Task<GlunoTurnResult> ContinueFromClarificationAsync(
+        Guid userId, GlunoClarification clarification, GlunoClarificationOption option,
+        string? idempotencyKey, CancellationToken ct);
+
+    /// <summary>
+    /// Answers a proposal-conflict card.
+    ///
+    /// SEPARATE FROM THE ORDINARY CONTINUATION ON PURPOSE. That one replays the
+    /// original question through the model; this one applies a deterministic
+    /// fix to the stored draft and revalidates it. Routing a conflict answer
+    /// through the ordinary path would spend a model round re-deriving a plan
+    /// that already exists — and could return a different one, so the user
+    /// would have answered about one suggestion and been given another.
+    ///
+    /// No idempotency key: the clarification's own resolve claim is the
+    /// idempotency boundary, and a repeat tap replays the recorded answer.
+    /// </summary>
+    Task<GlunoTurnResult> ContinueFromDraftAsync(
+        Guid userId, GlunoClarification clarification, GlunoClarificationOption option,
+        CancellationToken ct);
+
     Task<GlunoTurnResult> SendAsync(
         Guid userId, Guid? conversationId, Guid? tripId, string message, string? screen,
         string? idempotencyKey, CancellationToken ct);
@@ -178,6 +204,8 @@ public sealed class GlunoChatService : IGlunoChatService
     private readonly GlunoTurnPlanner _planner;
     private readonly GlunoUsageBudget _usage;
     private readonly IGlunoIdempotencyStore _idempotency;
+    private readonly IGlunoClarificationService _clarifications;
+    private readonly IGlunoProposalDraftService _drafts;
     private readonly ILogger<GlunoChatService> _logger;
 
     /// <summary>
@@ -204,12 +232,16 @@ public sealed class GlunoChatService : IGlunoChatService
         GlunoTurnPlanner planner,
         GlunoUsageBudget usage,
         IGlunoIdempotencyStore idempotency,
+        IGlunoClarificationService clarifications,
+        IGlunoProposalDraftService drafts,
         ILogger<GlunoChatService> logger)
     {
         _grounding = grounding;
         _planner = planner;
         _usage = usage;
         _idempotency = idempotency;
+        _clarifications = clarifications;
+        _drafts = drafts;
         _db = db;
         _availability = availability;
         _conversations = conversations;
@@ -319,9 +351,16 @@ public sealed class GlunoChatService : IGlunoChatService
         }
     }
 
+    /// <param name="scopeTripId">
+    /// An Adventure chosen for THIS TURN only — either resolved deterministically
+    /// or picked from a clarification. It scopes the context; it does not change
+    /// the conversation's own scope, so a global conversation stays global.
+    /// Membership is verified before it is ever passed.
+    /// </param>
     private async Task<GlunoTurnResult> SendCoreAsync(
         Guid userId, Guid? conversationId, Guid? tripId, string message, string? screen,
-        string? idempotencyKey, CancellationToken ct)
+        string? idempotencyKey, CancellationToken ct, Guid? scopeTripId = null,
+        (string Type, string Value)? answered = null)
     {
         // An unrecognised screen id is dropped rather than trusted — a client
         // sending something this backend has never heard of should degrade to
@@ -471,10 +510,11 @@ public sealed class GlunoChatService : IGlunoChatService
         // canEdit is not known until the trip loads, so the workflow is
         // computed twice: once to decide what to LOAD, once with edit rights to
         // decide what to OFFER. Both are pure functions, so this costs nothing.
-        var loadPlan = GlunoPlanningStrategy.For(intent, conversation.TripId.HasValue, canEdit: true);
+        var loadPlan = GlunoPlanningStrategy.For(
+            intent, (scopeTripId ?? conversation.TripId).HasValue, canEdit: true);
 
         var context = await _contextBuilder.BuildAsync(
-            userId, conversation.TripId, conversation.Id,
+            userId, scopeTripId ?? conversation.TripId, conversation.Id,
             new GlunoContextOptions
             {
                 IncludeTrip = loadPlan.NeedsTripContext,
@@ -484,7 +524,70 @@ public sealed class GlunoChatService : IGlunoChatService
             },
             ct) with { CurrentScreen = currentScreen };
 
+        // ── Does this question need an Adventure we do not have? ──────────
+        //
+        // Checked HERE, before the turn plan, before any provider and before
+        // the model. A question that cannot be answered without knowing which
+        // trip it is about must not spend a model round guessing, and must not
+        // start a search scoped to nothing.
+        //
+        // Deterministic first: one Adventure, or one the question names, is
+        // resolved silently. Asking when the answer is already knowable is the
+        // fastest way to make this feature annoying.
+        if (context.Trip == null && scopeTripId == null && NeedsAnAdventure(intent))
+        {
+            var choices = TripChoicesFrom(context);
+            var single = GlunoClarificationBuilder.ResolveSingle(choices, text, context.Today);
+
+            if (single != null)
+            {
+                // Answer it with that Adventure's context, without touching
+                // the conversation's own scope — a global conversation stays
+                // global.
+                return await SendCoreAsync(
+                    userId, conversationId, tripId, message, screen, idempotencyKey, ct,
+                    scopeTripId: single.Id, answered: answered);
+            }
+
+            if (choices.Count > 1)
+            {
+                return await AskWhichAdventureAsync(
+                    conversation, userId, text, intent, choices, context, ct);
+            }
+        }
+
         var workflow = GlunoPlanningStrategy.For(intent, context.Trip != null, context.Trip?.CanEdit != false);
+
+        // ── Is a decisive choice missing? ─────────────────────────────────
+        //
+        // One detector, run once, BEFORE the turn plan, the providers, the
+        // model and anything that writes. Scattering these checks through the
+        // turn would let one run before a provider call and another after, and
+        // nobody could say from reading the code what a turn will do.
+        //
+        // It resolves silently wherever the data settles it — one Friday, a
+        // named museum, a saved pace — and only asks when the choice genuinely
+        // changes the answer.
+        var detection = GlunoClarificationDetector.Detect(new GlunoDetectionInput
+        {
+            Message = text,
+            Intent = intent,
+            Context = context,
+            Workflow = workflow,
+            Today = context.Today,
+            Language = context.User.Language,
+        });
+
+        // A question already answered is never asked again — see the
+        // continuation path for why this matters.
+        if (detection.Outcome == GlunoDetectionOutcome.NeedsClarification
+            && detection.Type != answered?.Type)
+        {
+            telemetry.FailureCategory = null;
+
+            return await AskClarificationAsync(
+                conversation, userId, text, intent, detection, context, ct);
+        }
 
         // ── The turn plan ─────────────────────────────────────────────────
         //
@@ -903,6 +1006,39 @@ public sealed class GlunoChatService : IGlunoChatService
 
             if (!quality.Passed)
             {
+                // ── The second clarification point ────────────────────────
+                //
+                // The gate blocked. Before silently repairing the suggestion
+                // away, check whether the blocker is something the USER can
+                // choose about — a clash with a booking, a day outside the
+                // trip, a duplicate.
+                //
+                // Stripping those quietly is the behaviour this replaces: the
+                // user asked for something, Gluno decided alone that it could
+                // not be done, and the answer arrived with a caveat instead of
+                // a plan. Asking costs one tap and keeps the decision theirs.
+                //
+                // Nothing here writes to the Adventure. The draft is a
+                // conversation about a change, not the change.
+                var conflictPlan = proposals.FirstOrDefault(item => item.Kind == "day_plan")?.Payload;
+
+                var conflicts = GlunoConflictMapper.From(
+                    quality,
+                    conflictVersion: 1,
+                    // The plan itself answers what each clash collides WITH —
+                    // a booking, a check-in, another suggestion — which is what
+                    // decides whether the existing item may be touched at all.
+                    dayPlan: conflictPlan,
+                    destinationMismatches: DestinationMismatches(conflictPlan, context));
+
+                var conflict = GlunoConflictMapper.MostBlocking(conflicts);
+
+                if (conflict != null && proposals.Count > 0 && conflict.AllowedStrategies.Count > 1)
+                {
+                    return await AskAboutConflictAsync(
+                        conversation, userId, text, intent, proposals[0], conflict, context, ct);
+                }
+
                 var repaired = ApplyCorrections(proposals, quality);
                 proposals.Clear();
                 proposals.AddRange(repaired);
@@ -975,11 +1111,7 @@ public sealed class GlunoChatService : IGlunoChatService
         // belongs to. The snapshot of the Adventure is taken here too — that
         // is what a later apply compares against to detect that someone else
         // changed the plan in between.
-        var records = new List<GlunoProposalRecord>(proposals.Count);
-        foreach (var proposal in proposals)
-        {
-            records.Add(await _proposals.CreateAsync(conversation, assistantMessage.Id, proposal, ct));
-        }
+        var records = await CreateProposalsAsync(conversation, assistantMessage.Id, proposals, ct);
 
         // ── Working memory ────────────────────────────────────────────────
         //
@@ -1225,6 +1357,1408 @@ public sealed class GlunoChatService : IGlunoChatService
         }
 
         return longest;
+    }
+
+    /// <summary>
+    /// Carries on with the question the clarification was asking about.
+    ///
+    /// The user does not resend anything and the original question is NOT
+    /// stored a second time — the clarification remembers which message it was
+    /// about, and this replays that text with the choice applied. What the
+    /// chat shows for the choice is a small selection row, not a fresh user
+    /// message repeating a question already on screen.
+    /// </summary>
+    public async Task<GlunoTurnResult> ContinueFromClarificationAsync(
+        Guid userId,
+        GlunoClarification clarification,
+        GlunoClarificationOption option,
+        string? idempotencyKey,
+        CancellationToken ct)
+    {
+        var original = await _conversations.GetMessageAsync(clarification.OriginalUserMessageId, userId, ct);
+        if (original == null)
+            return new GlunoTurnResult { Error = GlunoTurnError.ConversationNotFound };
+
+        // Only the Adventure choice changes what the turn can see. Every other
+        // type answers a question inside a scope that is already settled.
+        Guid? scopeTripId = option.EntityType == GlunoClarificationEntityTypes.Trip
+            ? option.EntityId
+            : null;
+
+        var result = await SendCoreAsync(
+            userId,
+            clarification.ConversationId,
+            tripId: null,
+            message: original.Text,
+            screen: null,
+            // A NEW claim: this is a new turn, bound to the clarification
+            // rather than to the original send, so it cannot collide with the
+            // send that asked the question.
+            idempotencyKey: idempotencyKey ?? $"clar-{clarification.Id:N}",
+            ct,
+            scopeTripId: scopeTripId,
+            // WITHOUT THIS THE TURN ASKS AGAIN. The continuation re-runs the
+            // same message through the same detector, which would find the
+            // same gap, ask the same question, and loop forever. The answer
+            // has to travel with it.
+            answered: (clarification.Type, option.Value));
+
+        // Remembered so a repeat tap replays this answer instead of running
+        // the whole turn a second time.
+        if (result.Error == GlunoTurnError.None && result.AssistantMessage != null)
+        {
+            await _clarifications.RecordContinuationAsync(
+                clarification.Id, result.AssistantMessage.Id, ct);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Whether this question is unanswerable without knowing which Adventure.
+    ///
+    /// Deliberately narrow. "What should I pack for Japan" needs no trip;
+    /// "what have we got on Friday" is meaningless without one. Getting this
+    /// wrong in the generous direction produces a chooser in front of every
+    /// general question, which is worse than the occasional clarifying
+    /// sentence.
+    /// </summary>
+    private static bool NeedsAnAdventure(GlunoIntentResult intent) => intent.PrimaryIntent
+        is GlunoIntent.TripReview
+        or GlunoIntent.PlanEmptyDay
+        or GlunoIntent.ImproveExistingDay
+        or GlunoIntent.BuildFullItinerary
+        or GlunoIntent.MoveActivity
+        or GlunoIntent.AddActivity
+        or GlunoIntent.ChangeAdventureDates
+        // A trip-scoped question the router recognised as being about the
+        // user's own plan rather than about travel in general.
+        || intent.Scope == GlunoIntentScope.Trip;
+
+    /// The user's Adventures, as the ranker and the option builder see them.
+    private static IReadOnlyList<TripChoice> TripChoicesFrom(GlunoContext context)
+        => context.Trips
+            .Select(trip => new TripChoice(trip.Id, trip.Title, trip.StartDate, trip.EndDate))
+            .ToList();
+
+    /// <summary>
+    /// Asks which Adventure, and stops.
+    ///
+    /// No model round, no providers, no proposal. The whole turn is a question
+    /// built from rows the user is already a member of — which is what makes
+    /// it fast enough to be worth doing rather than guessing.
+    /// </summary>
+    /// <summary>
+    /// Asks the question the detector produced, and stops.
+    ///
+    /// No model round, no providers, no proposal, no write. The whole turn is
+    /// a question built from data the user already has access to — which is
+    /// what makes asking cheap enough to be better than guessing.
+    /// </summary>
+    private async Task<GlunoTurnResult> AskClarificationAsync(
+        GlunoConversation conversation,
+        Guid userId,
+        string text,
+        GlunoIntentResult intent,
+        GlunoDetection detection,
+        GlunoContext context,
+        CancellationToken ct)
+    {
+        var userMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.User,
+            Text = text,
+        }, ct);
+
+        var question = GlunoClarificationBuilder.QuestionFor(detection.Type!, context.User.Language);
+
+        var assistantMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.Assistant,
+            Text = question,
+        }, ct);
+
+        var clarification = await _clarifications.CreateAsync(
+            new GlunoClarification
+            {
+                ConversationId = conversation.Id,
+                UserId = userId,
+                TripId = context.Trip?.Id,
+                OriginalUserMessageId = userMessage.Id,
+                MessageId = assistantMessage.Id,
+                Type = detection.Type!,
+                Question = question,
+                OriginalIntent = intent.PrimaryIntent.ToString(),
+                AllowFreeText = detection.AllowFreeText,
+            },
+            detection.Options,
+            ct);
+
+        _logger.LogInformation(
+            "[GLUNO] clarification needed type={Type} reason={Reason} options={Count}",
+            detection.Type, detection.Reason, detection.Options.Count);
+
+        return new GlunoTurnResult
+        {
+            Conversation = conversation,
+            UserMessage = userMessage,
+            AssistantMessage = assistantMessage,
+            Clarification = clarification,
+        };
+    }
+
+    /// <summary>
+    /// Stores the suggestion as a draft and asks how to resolve the clash.
+    ///
+    /// The proposal is NOT created. A proposal is something with an Apply
+    /// button on it, and putting one in front of somebody while it still
+    /// conflicts with their plan is an invitation to write a broken day. The
+    /// draft holds it until the conflict is answered.
+    /// </summary>
+    private async Task<GlunoTurnResult> AskAboutConflictAsync(
+        GlunoConversation conversation,
+        Guid userId,
+        string text,
+        GlunoIntentResult intent,
+        GlunoProposal proposal,
+        GlunoProposalConflict conflict,
+        GlunoContext context,
+        CancellationToken ct)
+    {
+        var userMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.User,
+            Text = text,
+        }, ct);
+
+        // One sentence naming what does not fit. The card shows the affected
+        // day and items separately, so this stays short by contract.
+        var explanation = GlunoConflictStrategies.Explain(
+            conflict.ConflictType, context.User.Language);
+
+        var assistantMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.Assistant,
+            Text = explanation,
+        }, ct);
+
+        var draft = await _drafts.CreateAsync(new GlunoProposalDraft
+        {
+            ConversationId = conversation.Id,
+            UserId = userId,
+            TripId = context.Trip!.Id,
+            OriginalUserMessageId = userMessage.Id,
+            OriginalIntent = intent.PrimaryIntent.ToString(),
+            ActionType = proposal.ActionName,
+            PayloadJson = JsonSerializer.Serialize(proposal.Payload, GlunoJson.Options),
+            Status = GlunoProposalDraftStatuses.AwaitingClarification,
+            ConflictVersion = conflict.ConflictVersion,
+        }, ct);
+
+        var clarification = await _clarifications.CreateAsync(
+            new GlunoClarification
+            {
+                ConversationId = conversation.Id,
+                UserId = userId,
+                TripId = context.Trip.Id,
+                OriginalUserMessageId = userMessage.Id,
+                MessageId = assistantMessage.Id,
+                Type = GlunoClarificationTypes.ProposalConflict,
+                Question = explanation,
+                OriginalIntent = intent.PrimaryIntent.ToString(),
+                // The strategies are the answers. A free-text escape here
+                // would invite the user to describe a fix the validator has
+                // no way to check.
+                AllowFreeText = false,
+                // ── What the tap will be checked against ──────────────────
+                //
+                // All four written by the server, none of them ever sent by
+                // the client. The versions are the whole staleness mechanism:
+                // a tap that arrives after the draft moved is answering about
+                // a plan that no longer exists, and honouring it would fix
+                // the wrong thing.
+                DraftId = draft.Id,
+                DraftVersion = draft.DraftVersion,
+                ConflictVersion = draft.ConflictVersion,
+                ConflictType = conflict.ConflictType,
+                ConflictMetaJson = ConflictMetaJson(conflict, proposal.Payload, context),
+            },
+            GlunoConflictMapper.Options(conflict, context.User.Language),
+            ct);
+
+        _logger.LogInformation(
+            "[GLUNO] proposal conflict conflict={Conflict} strategies={Count} draftVersion={DraftVersion}",
+            conflict.ConflictType, conflict.AllowedStrategies.Count, draft.DraftVersion);
+
+        return new GlunoTurnResult
+        {
+            Conversation = conversation,
+            UserMessage = userMessage,
+            AssistantMessage = assistantMessage,
+            Clarification = clarification,
+        };
+    }
+
+    /// <summary>
+    /// The ONLY place a chat turn turns suggestions into proposals.
+    ///
+    /// Both the ordinary path and the conflict continuation come through here,
+    /// so there is exactly one call to the store — a second creation path would
+    /// be a way to produce something with an Apply button on it that never went
+    /// past the draft flow.
+    /// </summary>
+    private async Task<List<GlunoProposalRecord>> CreateProposalsAsync(
+        GlunoConversation conversation,
+        Guid messageId,
+        IReadOnlyList<GlunoProposal> proposals,
+        CancellationToken ct,
+        Guid? draftId = null,
+        int? draftVersion = null)
+    {
+        var records = new List<GlunoProposalRecord>(proposals.Count);
+
+        foreach (var proposal in proposals)
+        {
+            records.Add(await _proposals.CreateAsync(
+                conversation, messageId, proposal, ct, draftId, draftVersion));
+        }
+
+        return records;
+    }
+
+    // ── The proposal-conflict continuation ────────────────────────────────
+
+    /// <summary>
+    /// Answers a conflict card: applies the chosen fix to the DRAFT, revalidates
+    /// against the Adventure as it stands now, and either asks the next question
+    /// or produces the proposal.
+    ///
+    /// WHY THIS IS SEPARATE FROM THE ORDINARY CONTINUATION. That one replays the
+    /// original question through the whole pipeline — router, providers, model.
+    /// Doing that here would be wrong twice over. It would spend a model round
+    /// to re-derive a plan that already exists in the draft, and the model would
+    /// be free to produce a DIFFERENT plan, so the user would have answered a
+    /// question about one suggestion and received another.
+    ///
+    /// NO MODEL RUNS ON THIS PATH AT ALL. Every supported strategy is a
+    /// deterministic edit to a JSON document, followed by the same quality gate
+    /// the original turn ran. That makes the outcome of a tap predictable, which
+    /// is what a tappable answer has to be.
+    ///
+    /// AND NOTHING HERE WRITES TO THE ADVENTURE. The draft changes; the plan
+    /// does not, until a proposal is approved.
+    /// </summary>
+    public async Task<GlunoTurnResult> ContinueFromDraftAsync(
+        Guid userId,
+        GlunoClarification clarification,
+        GlunoClarificationOption option,
+        CancellationToken ct)
+    {
+        // Everything the tap is checked against comes off the clarification
+        // row, which only the server has ever written. The client sent an id
+        // and an option key.
+        if (clarification.DraftId is not { } draftId
+            || clarification.DraftVersion is not { } draftVersion
+            || clarification.ConflictVersion is not { } conflictVersion
+            || clarification.ConflictType is not { } conflictType)
+        {
+            return new GlunoTurnResult { Error = GlunoTurnError.ConversationNotFound };
+        }
+
+        var conversation = await _conversations.GetOwnedAsync(clarification.ConversationId, userId, ct);
+        if (conversation == null)
+            return new GlunoTurnResult { Error = GlunoTurnError.ConversationNotFound };
+
+        // Read once, up front. The refusal paths below run before any context
+        // is built, and a message in the wrong language is a worse failure than
+        // the one it is reporting.
+        var language = await _db.Users
+            .Where(user => user.Id == userId)
+            .Select(user => user.Language)
+            .FirstOrDefaultAsync(ct) ?? "en";
+
+        // ── What is being answered ────────────────────────────────────────
+        //
+        // Three card types come through here and they carry different values.
+        // A conflict card's option IS the strategy. A day card's option is a
+        // date and a time card's option is a time — for those, the STRATEGY is
+        // implied by the card type, because that is what produced it.
+        //
+        // Reading the strategy from the card rather than from the tap is what
+        // stops a date arriving where a strategy was expected.
+        var strategy = clarification.Type switch
+        {
+            GlunoClarificationTypes.Day => GlunoConflictStrategies.ChooseAnotherDay,
+            GlunoClarificationTypes.ActivityTime => GlunoConflictStrategies.ChooseAnotherTime,
+            _ => option.Value,
+        };
+
+        // ── Every check, before any work ──────────────────────────────────
+        //
+        // Ownership, usability, TTL, status, both versions, the rebuild limit
+        // and the repeat guard. Ordered so the cheap refusals happen first and
+        // nothing is spent on a tap that was never going to be honoured.
+        var validated = await _drafts.ValidateResolveAsync(
+            draftId, userId, draftVersion, conflictVersion, conflictType, strategy, ct);
+
+        if (validated.Error != GlunoDraftError.None || validated.Draft is not { } draft)
+            return await ConflictStoppedAsync(conversation, clarification, validated.Error, language, ct);
+
+        // Membership NOW, not when the card was built. An hour is long enough
+        // to leave a group, and a stale button must not be an access path.
+        if (!await _db.TripMembers.AnyAsync(
+            member => member.TripId == draft.TripId && member.UserId == userId, ct))
+        {
+            return await ConflictStoppedAsync(
+                conversation, clarification, GlunoDraftError.Forbidden, language, ct);
+        }
+
+        // ── Backing out ───────────────────────────────────────────────────
+        //
+        // No revalidation, no gate, no proposal. The user said no; the fastest
+        // correct thing is to stop.
+        if (strategy == GlunoConflictStrategies.Cancel)
+        {
+            await _drafts.SetStatusAsync(
+                draftId, userId, GlunoProposalDraftStatuses.Cancelled, null, ct);
+
+            return await ConflictClosedAsync(
+                conversation, clarification,
+                string.Equals(language, "sv", StringComparison.OrdinalIgnoreCase)
+                    ? "Okej, jag lämnar planen som den är."
+                    : "Fine — I've left the plan as it was.",
+                ct);
+        }
+
+        // ── Revalidate against the Adventure as it stands now ─────────────
+        //
+        // Re-read BEFORE the fix is applied, not after. Between the question
+        // and the answer somebody else may have moved the very booking this
+        // clash was about, and the days and times offered next have to describe
+        // the plan as it is, not as it was an hour ago.
+        var context = await _contextBuilder.BuildAsync(
+            userId, draft.TripId, conversation.Id,
+            new GlunoContextOptions { IncludeTrip = true, IncludeDiscussedPlaces = true },
+            ct);
+
+        if (context.Trip == null)
+        {
+            return await ConflictStoppedAsync(
+                conversation, clarification, GlunoDraftError.NotUsable, language, ct);
+        }
+
+        // ── Apply the chosen fix to the draft ─────────────────────────────
+        var outcome = await ApplyStrategyAsync(
+            userId, draft, clarification, conflictType, strategy, option, context, ct);
+
+        // The strategy produced a QUESTION rather than a change — "which day?",
+        // "which time?". Nothing has moved yet, so no version moves and no
+        // rebuild is spent: the user has not chosen anything yet.
+        if (outcome.NextCard is { } nextCard)
+        {
+            return await AskSubQuestionAsync(
+                conversation, userId, clarification, draft, conflictType, nextCard, ct);
+        }
+
+        if (outcome.PayloadJson == null && !outcome.AcceptedInPlace)
+        {
+            // Nothing on offer could fix it. A controlled stop, never a silent
+            // no-op that leaves the draft claiming to be fixed.
+            await _drafts.SetStatusAsync(
+                draftId, userId, GlunoProposalDraftStatuses.Cancelled, null, ct);
+
+            return await ConflictClosedAsync(
+                conversation, clarification,
+                outcome.Message ?? (string.Equals(language, "sv", StringComparison.OrdinalIgnoreCase)
+                    ? "Då blir det inget kvar att föreslå. Säg till om du vill att jag försöker igen."
+                    : "That leaves nothing to suggest. Tell me if you'd like me to try again."),
+                ct);
+        }
+
+        if (outcome.AcceptedInPlace)
+        {
+            // Content is unchanged by design — the user decided the clash is
+            // acceptable. What changes is the draft's own record of that, so
+            // the gate does not ask the same question again the moment it
+            // re-runs.
+            draft = await _drafts.AcceptConflictAsync(draftId, userId, conflictType, ct) ?? draft;
+        }
+        else
+        {
+            draft = await _drafts.UpdatePayloadAsync(draftId, userId, outcome.PayloadJson!, ct) ?? draft;
+        }
+
+        // Counted whatever the strategy was: a fix that produced no progress is
+        // still an attempt, and the limit exists to stop exactly the case where
+        // each one reintroduces the last.
+        draft = await _drafts.RecordRebuildAsync(draftId, userId, conflictType, strategy, ct) ?? draft;
+
+        JsonElement payload;
+        try
+        {
+            using var document = JsonDocument.Parse(draft.PayloadJson);
+            payload = document.RootElement.Clone();
+        }
+        catch (JsonException)
+        {
+            await _drafts.SetStatusAsync(draftId, userId, GlunoProposalDraftStatuses.Failed, null, ct);
+            return await ConflictStoppedAsync(
+                conversation, clarification, GlunoDraftError.NotUsable, language, ct);
+        }
+
+        var proposal = new GlunoProposal
+        {
+            ActionName = draft.ActionType,
+            Kind = DraftKind(draft.ActionType),
+            TripId = draft.TripId,
+            Summary = GlunoDraftSummary(payload, context.User.Language),
+            Payload = payload,
+        };
+
+        // The SAME gate the original turn ran, on the edited payload. A second
+        // implementation of "does this day work" would drift from the first,
+        // and a plan one accepts and the other blocks can never be applied and
+        // never be fixed.
+        var quality = _qualityGate.Check(new GlunoQualityInput
+        {
+            AnswerText = string.Empty,
+            DayPlan = proposal.Kind == "day_plan" ? payload : null,
+            Findings = context.Trip?.Findings ?? Array.Empty<TripFinding>(),
+            ProducedProposal = true,
+            ExpectsProposal = true,
+            SomethingWasApplied = false,
+            HasVerifiedTravelTimes = _routing.HasVerifiedRouting,
+            HasVerifiedOpeningHours = context.DiscussedPlaces.Count > 0,
+            Pace = TripPaces.Parse(context.Preferences
+                .FirstOrDefault(preference => preference.Key == Models.GlunoPreferenceKeys.Pace)?.Value),
+            Language = context.User.Language,
+            ExistingTitles = context.Trip?.Activities.Select(activity => activity.Title).ToList()
+                ?? (IReadOnlyList<string>)Array.Empty<string>(),
+            SuggestedTitles = [proposal.Summary],
+        });
+
+        var remaining = GlunoConflictMapper
+            .From(quality, draft.ConflictVersion + 1,
+                dayPlan: payload,
+                destinationMismatches: DestinationMismatches(payload, context))
+            // What the user has already accepted is not asked again. Anything
+            // NEW still is — accepting a full day says nothing about a clash
+            // with a booking that appeared since.
+            .Where(item => !draft.HasAccepted(item.ConflictType))
+            .ToList();
+
+        // Moves ConflictVersion and sets the status from what was found, in one
+        // place, so the version and the verdict can never disagree.
+        draft = await _drafts.RecordConflictsAsync(draftId, userId, remaining.Count > 0, ct) ?? draft;
+
+        // ── The next question, or the proposal ────────────────────────────
+        var next = GlunoConflictMapper.MostBlocking(remaining);
+
+        if (next != null && GlunoConflictMapper.Options(next, context.User.Language).Count > 1)
+        {
+            if (draft.IsOutOfRebuilds)
+            {
+                return await ConflictStoppedAsync(
+                    conversation, clarification, GlunoDraftError.OutOfRebuilds, language, ct);
+            }
+
+            // One conflict at a time. Resolving the worst often removes the
+            // rest, and three questions about one suggestion is how a chat
+            // becomes a wizard.
+            return await AskNextConflictAsync(conversation, userId, clarification, draft, next, context, ct);
+        }
+
+        if (remaining.Count > 0)
+        {
+            // Still conflicting, and nothing left to offer about it.
+            await _drafts.SetStatusAsync(draftId, userId, GlunoProposalDraftStatuses.Failed, null, ct);
+            return await ConflictStoppedAsync(
+                conversation, clarification, GlunoDraftError.OutOfRebuilds, language, ct);
+        }
+
+        return await ReadyForApprovalAsync(conversation, userId, clarification, draft, proposal, context, ct);
+    }
+
+    /// <summary>
+    /// What applying a strategy produced.
+    ///
+    /// Exactly one of three things, and the caller branches on which: a new
+    /// payload, an acceptance that changed no content, or a further question.
+    /// All null means nothing could be done — which is an answer too, and a
+    /// better one than a silent no-op.
+    /// </summary>
+    private sealed record GlunoStrategyOutcome
+    {
+        public string? PayloadJson { get; init; }
+        public bool AcceptedInPlace { get; init; }
+        public GlunoSubQuestion? NextCard { get; init; }
+        /// A specific reason, when there is one worth saying.
+        public string? Message { get; init; }
+
+        public static GlunoStrategyOutcome Changed(string payloadJson) => new() { PayloadJson = payloadJson };
+        public static GlunoStrategyOutcome Accepted() => new() { AcceptedInPlace = true };
+        public static GlunoStrategyOutcome Ask(GlunoSubQuestion card) => new() { NextCard = card };
+        public static GlunoStrategyOutcome Impossible(string? message = null) => new() { Message = message };
+    }
+
+    /// A day or time chooser, built from real candidates.
+    private sealed record GlunoSubQuestion(
+        string Type, string Question, IReadOnlyList<GlunoOptionDraft> Options);
+
+    /// <summary>
+    /// Turns a chosen strategy into a change to the draft — deterministically.
+    ///
+    /// EVERY BRANCH HERE IS ARITHMETIC OVER DATA THE BACKEND ALREADY HAS: the
+    /// trip's dates, what is booked on each day, how long the journey takes,
+    /// when a place is open. None of it is a judgement call, which is why none
+    /// of it is a model call.
+    ///
+    /// A model asked to "move this to a better time" would be guessing at all
+    /// of that, and would sometimes guess a slot the scheduler then rejects —
+    /// so the user taps, waits, and gets the same card back. Worse: two
+    /// identical taps could produce different plans, and a conflict answer has
+    /// to be predictable to be worth offering.
+    /// </summary>
+    private async Task<GlunoStrategyOutcome> ApplyStrategyAsync(
+        Guid userId,
+        GlunoProposalDraft draft,
+        GlunoClarification clarification,
+        string conflictType,
+        string strategy,
+        GlunoClarificationOption option,
+        GlunoContext context,
+        CancellationToken ct)
+    {
+        var swedish = string.Equals(context.User.Language, "sv", StringComparison.OrdinalIgnoreCase);
+
+        if (ReadPayload(draft) is not { } payload)
+            return GlunoStrategyOutcome.Impossible();
+
+        var rows = GlunoDraftPlan.Rows(payload);
+        var target = GlunoDraftPlan.NewestSuggestion(rows);
+        var date = GlunoDraftPlan.DateOf(payload);
+
+        // Every strategy below acts on the row Gluno just suggested. Without
+        // one there is nothing this suggestion may touch — everything left in
+        // the plan belongs to the user.
+        if (target == null) return GlunoStrategyOutcome.Impossible();
+
+        switch (strategy)
+        {
+            // ── Answers to the sub-questions ──────────────────────────────
+
+            case GlunoConflictStrategies.ChooseAnotherDay
+                when clarification.Type == GlunoClarificationTypes.Day:
+            {
+                // The option's value is an ISO date the backend put there. It is
+                // re-parsed rather than trusted as a string, and re-checked
+                // against the trip, because the card may be an hour old.
+                if (!DateOnly.TryParseExact(
+                        option.Value, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var chosen)
+                    || !TripDateRange.Contains(context.Trip!.StartDate, context.Trip.EndDate, chosen))
+                {
+                    return GlunoStrategyOutcome.Impossible();
+                }
+
+                return GlunoDraftPlan.WithDate(draft.PayloadJson, chosen) is { } moved
+                    ? GlunoStrategyOutcome.Changed(moved)
+                    : GlunoStrategyOutcome.Impossible();
+            }
+
+            case GlunoConflictStrategies.ChooseAnotherTime
+                when clarification.Type == GlunoClarificationTypes.ActivityTime:
+            {
+                if (GlunoDraftPlan.ParseTime(option.Value) is not { } chosen)
+                    return GlunoStrategyOutcome.Impossible();
+
+                return GlunoDraftPlan.WithTime(
+                        draft.PayloadJson, target.Index, chosen, target.EffectiveDuration) is { } moved
+                    ? GlunoStrategyOutcome.Changed(moved)
+                    : GlunoStrategyOutcome.Impossible();
+            }
+
+            // ── The choosers ──────────────────────────────────────────────
+
+            case GlunoConflictStrategies.ChooseAnotherDay:
+                return DayQuestion(context, target, date, swedish);
+
+            case GlunoConflictStrategies.ChooseAnotherTime:
+                return TimeQuestion(context, rows, target, date, swedish);
+
+            // ── Move the new one ──────────────────────────────────────────
+            //
+            // The same arithmetic as the time chooser, without the tap: Gluno
+            // was asked to sort it out, so it takes the first slot that works.
+            // Falling back to the day chooser when the day is full is a real
+            // next step, not a failure — the activity has to go somewhere.
+            case GlunoConflictStrategies.MoveNew:
+            {
+                var times = AvailableTimesFor(context, rows, target, date);
+
+                if (times.Count == 0) return DayQuestion(context, target, date, swedish);
+
+                return GlunoDraftPlan.WithTime(
+                        draft.PayloadJson, target.Index, times[0], target.EffectiveDuration) is { } moved
+                    ? GlunoStrategyOutcome.Changed(moved)
+                    : GlunoStrategyOutcome.Impossible();
+            }
+
+            // ── Make it shorter ───────────────────────────────────────────
+            case GlunoConflictStrategies.Shorten:
+            {
+                var shortened = ShortestThatFits(context, rows, target, date);
+
+                if (shortened == null)
+                {
+                    return GlunoStrategyOutcome.Impossible(swedish
+                        ? "Den går inte att korta så mycket att den får plats."
+                        : "It can't be shortened enough to fit.");
+                }
+
+                return GlunoDraftPlan.WithShortened(draft.PayloadJson, target.Index, shortened.Value) is { } trimmed
+                    ? GlunoStrategyOutcome.Changed(trimmed)
+                    : GlunoStrategyOutcome.Impossible();
+            }
+
+            // ── Touching something that already exists ────────────────────
+            //
+            // Both of these act on the user's own plan, so neither happens now.
+            // The intent is recorded on the draft and carried out inside the
+            // apply transaction, behind the button, against the live row.
+            case GlunoConflictStrategies.MoveExisting:
+                return MoveExistingOperation(draft, rows, target, date, context, swedish);
+
+            case GlunoConflictStrategies.ReplaceExisting:
+                return ReplaceExistingOperation(draft, rows, target, swedish);
+
+            // ── The two that were already deterministic ───────────────────
+            case GlunoConflictStrategies.KeepBoth:
+                return GlunoStrategyOutcome.Accepted();
+
+            case GlunoConflictStrategies.RemoveNew:
+                return GlunoProposalDraftService.ApplyDeterministic(
+                        draft.PayloadJson, strategy, [target.Index]) is { } removed
+                    ? GlunoStrategyOutcome.Changed(removed)
+                    : GlunoStrategyOutcome.Impossible();
+
+            default:
+                return GlunoStrategyOutcome.Impossible();
+        }
+    }
+
+    /// <summary>
+    /// The day chooser, or an honest stop when no day could hold it.
+    ///
+    /// Only days that pass every deterministic check are offered, so a shown
+    /// day is a day that works.
+    /// </summary>
+    private static GlunoStrategyOutcome DayQuestion(
+        GlunoContext context, GlunoDraftRow target, DateOnly? currentDate, bool swedish)
+    {
+        var (_, maxStops) = TripPaces.DayStopRange(TripPaces.Parse(context.Preferences
+            .FirstOrDefault(preference => preference.Key == Models.GlunoPreferenceKeys.Pace)?.Value));
+
+        var days = GlunoDraftPlan.AvailableDays(context.Trip!, target, currentDate, maxStops);
+
+        if (days.Count == 0)
+        {
+            return GlunoStrategyOutcome.Impossible(swedish
+                ? "Det finns ingen annan dag på resan där den får plats."
+                : "There's no other day on the trip where it fits.");
+        }
+
+        // The same builder the ordinary day clarification uses, so a date row
+        // looks the same wherever it appears — and carries its destination, so
+        // two Fridays on a roadtrip are told apart.
+        var options = GlunoClarificationBuilder.DayOptions(
+            context.Trip!.Destinations ?? EmptyDestinations(context.Trip),
+            days,
+            context.User.Language);
+
+        return GlunoStrategyOutcome.Ask(new GlunoSubQuestion(
+            GlunoClarificationTypes.Day,
+            swedish ? "Vilken dag passar istället?" : "Which day suits instead?",
+            options));
+    }
+
+    /// <summary>
+    /// The time chooser, falling back to the day chooser when the day is full.
+    ///
+    /// Never claims success. If no time works and no day works either, the
+    /// caller stops and says so — pretending a strategy succeeded is the one
+    /// outcome worse than admitting it did not.
+    /// </summary>
+    private static GlunoStrategyOutcome TimeQuestion(
+        GlunoContext context,
+        IReadOnlyList<GlunoDraftRow> rows,
+        GlunoDraftRow target,
+        DateOnly? date,
+        bool swedish)
+    {
+        var times = AvailableTimesFor(context, rows, target, date);
+
+        if (times.Count == 0) return DayQuestion(context, target, date, swedish);
+
+        var options = times.Select((time, index) => new GlunoOptionDraft(
+            $"time-{index}",
+            time.ToString("HH:mm", CultureInfo.InvariantCulture))
+        {
+            Description = $"{time:HH\\:mm}–{time.AddMinutes(target.EffectiveDuration):HH\\:mm}",
+            // A fixed vocabulary value. Nothing behind it to rot, and nothing
+            // the model had any part in producing.
+            EntityType = GlunoClarificationEntityTypes.Enum,
+            Value = time.ToString("HH:mm", CultureInfo.InvariantCulture),
+            Icon = "time-outline",
+        }).ToList();
+
+        return GlunoStrategyOutcome.Ask(new GlunoSubQuestion(
+            GlunoClarificationTypes.ActivityTime,
+            swedish ? "Vilken tid passar istället?" : "What time suits instead?",
+            options));
+    }
+
+    /// <summary>
+    /// Valid start times for the affected row.
+    ///
+    /// The window is a plausible waking day, narrowed by the opening hours the
+    /// schedule engine already resolved onto the row. Not fetched again: the
+    /// engine did the provider call and wrote the answer, and asking twice
+    /// risks two answers to one question.
+    /// </summary>
+    private static IReadOnlyList<TimeOnly> AvailableTimesFor(
+        GlunoContext context, IReadOnlyList<GlunoDraftRow> rows, GlunoDraftRow target, DateOnly? date)
+        => date == null
+            ? Array.Empty<TimeOnly>()
+            : GlunoDraftPlan.AvailableTimes(
+                rows, target, dayStart: new TimeOnly(8, 0), dayEnd: new TimeOnly(22, 0));
+
+    /// <summary>
+    /// The shortest length that makes the affected row fit, or null.
+    ///
+    /// Walks DOWN from just under its current length in half-hour steps and
+    /// stops at the first that clears every neighbour — so the activity is
+    /// trimmed as little as possible rather than cut to the floor. Never goes
+    /// below the minimum, and never touches a locked row.
+    /// </summary>
+    private static int? ShortestThatFits(
+        GlunoContext context, IReadOnlyList<GlunoDraftRow> rows, GlunoDraftRow target, DateOnly? date)
+    {
+        if (target.IsLocked || target.Start is not { } start || date is not { } planDate) return null;
+
+        var others = rows.Where(row => row.Index != target.Index).ToList();
+
+        for (var minutes = target.EffectiveDuration - 30;
+             minutes >= GlunoDraftPlan.MinimumDurationMinutes;
+             minutes -= 30)
+        {
+            var trimmed = target with { DurationMinutes = minutes, End = start.AddMinutes(minutes) };
+
+            // Does the shortened version still fit where it already is? The
+            // window is exactly its own slot, so this asks "does it clear its
+            // neighbours now" and nothing else.
+            var candidate = GlunoDraftPlan.AvailableTimes(
+                others.Append(trimmed).ToList(), trimmed,
+                dayStart: start, dayEnd: start.AddMinutes(minutes));
+
+            if (candidate.Count > 0) return minutes;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Records an intended move of an Activity that already exists.
+    ///
+    /// NO WRITE HAPPENS. The user tapped an option on a suggestion they have
+    /// not approved; moving their booking now would be exactly the write the
+    /// draft flow exists to defer.
+    /// </summary>
+    private static GlunoStrategyOutcome MoveExistingOperation(
+        GlunoProposalDraft draft,
+        IReadOnlyList<GlunoDraftRow> rows,
+        GlunoDraftRow target,
+        DateOnly? date,
+        GlunoContext context,
+        bool swedish)
+    {
+        var existing = CollidingExisting(rows, target);
+
+        if (existing?.ExistingActivityId is not { } activityId)
+            return GlunoStrategyOutcome.Impossible();
+
+        // A booking with a time belongs to somebody else's system. Offering to
+        // move it would be offering something Gluno cannot do, and doing it
+        // would desynchronise the plan from a real reservation.
+        if (existing.IsFixed)
+        {
+            return GlunoStrategyOutcome.Impossible(swedish
+                ? "Den bokningen går inte att flytta."
+                : "That booking can't be moved.");
+        }
+
+        var live = context.Trip!.Activities.FirstOrDefault(activity => activity.Id == activityId);
+
+        // Gone since the card was built. Stale rather than guessed at.
+        if (live == null) return GlunoStrategyOutcome.Impossible();
+
+        // Somewhere the moved item does not clash with the suggestion.
+        var slot = FreeSlotAfter(rows, target);
+        if (slot is not { } newStart) return GlunoStrategyOutcome.Impossible();
+
+        var operation = new GlunoDraftOperation
+        {
+            Type = GlunoDraftOperationTypes.MoveExisting,
+            ActivityId = activityId,
+            ToDate = (date ?? live.Date).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            ToTime = newStart.ToString("HH:mm", CultureInfo.InvariantCulture),
+            // What it looked like when the user answered, so apply can tell
+            // "still as it was" from "somebody changed it since".
+            FromDate = live.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            FromTime = live.Time,
+            FromTitle = live.Title,
+        };
+
+        return GlunoDraftPlan.WithOperation(draft.PayloadJson, operation) is { } updated
+            ? GlunoStrategyOutcome.Changed(updated)
+            : GlunoStrategyOutcome.Impossible();
+    }
+
+    /// <summary>
+    /// Records that an existing Activity should be replaced by the suggestion.
+    ///
+    /// Offered only for a duplicate, where the two are the same thing twice —
+    /// and never for anything locked, because a booking with a reference number
+    /// is not something to quietly delete.
+    /// </summary>
+    private static GlunoStrategyOutcome ReplaceExistingOperation(
+        GlunoProposalDraft draft,
+        IReadOnlyList<GlunoDraftRow> rows,
+        GlunoDraftRow target,
+        bool swedish)
+    {
+        var existing = CollidingExisting(rows, target);
+
+        if (existing?.ExistingActivityId is not { } activityId)
+            return GlunoStrategyOutcome.Impossible();
+
+        if (existing.IsFixed)
+        {
+            return GlunoStrategyOutcome.Impossible(swedish
+                ? "Den bokningen går inte att ersätta."
+                : "That booking can't be replaced.");
+        }
+
+        var operation = new GlunoDraftOperation
+        {
+            Type = GlunoDraftOperationTypes.ReplaceExisting,
+            ActivityId = activityId,
+            FromTime = existing.Start?.ToString("HH:mm", CultureInfo.InvariantCulture),
+            FromTitle = existing.Title,
+        };
+
+        return GlunoDraftPlan.WithOperation(draft.PayloadJson, operation) is { } updated
+            ? GlunoStrategyOutcome.Changed(updated)
+            : GlunoStrategyOutcome.Impossible();
+    }
+
+    /// The existing row the suggestion collides with — the nearest earlier one
+    /// with a time, which is exactly what the quality gate compared against.
+    private static GlunoDraftRow? CollidingExisting(
+        IReadOnlyList<GlunoDraftRow> rows, GlunoDraftRow target)
+    {
+        for (var index = target.Index - 1; index >= 0; index--)
+        {
+            if (rows[index].Start != null && rows[index].IsLocked) return rows[index];
+        }
+
+        return rows.FirstOrDefault(row => row.IsLocked && row.ExistingActivityId.HasValue);
+    }
+
+    /// The first half hour after the suggestion ends. Where a displaced item
+    /// goes when the suggestion takes its slot.
+    private static TimeOnly? FreeSlotAfter(IReadOnlyList<GlunoDraftRow> rows, GlunoDraftRow target)
+    {
+        if (target.Start is not { } start) return null;
+
+        var after = start.AddMinutes(target.EffectiveDuration);
+        // Not past a sensible end of day: an activity pushed to 23:30 is not
+        // rescheduled, it is buried.
+        return after < new TimeOnly(21, 0) ? after : null;
+    }
+
+    /// A trip with no destination summary loaded still produces readable day
+    /// rows — the date is the answer, the place is the helpful extra.
+    private static TripDestinationSummary EmptyDestinations(GlunoTripContext trip)
+        => new()
+        {
+            Title = trip.Title,
+            StartDate = trip.StartDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            EndDate = trip.EndDate?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+        };
+
+    /// <summary>
+    /// Asks the day or time question the strategy produced.
+    ///
+    /// Bound to the SAME draft, carrying the versions as they stand. Nothing
+    /// has changed yet — the user picked a way to fix it, not a fix — so no
+    /// version moves and no rebuild is spent.
+    /// </summary>
+    private async Task<GlunoTurnResult> AskSubQuestionAsync(
+        GlunoConversation conversation,
+        Guid userId,
+        GlunoClarification previous,
+        GlunoProposalDraft draft,
+        string conflictType,
+        GlunoSubQuestion card,
+        CancellationToken ct)
+    {
+        var assistantMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.Assistant,
+            Text = card.Question,
+        }, ct);
+
+        var clarification = await _clarifications.CreateAsync(
+            new GlunoClarification
+            {
+                ConversationId = conversation.Id,
+                UserId = userId,
+                TripId = draft.TripId,
+                // The SAME original turn. The user typed it once.
+                OriginalUserMessageId = previous.OriginalUserMessageId,
+                MessageId = assistantMessage.Id,
+                Type = card.Type,
+                Question = card.Question,
+                OriginalIntent = previous.OriginalIntent,
+                // The options ARE the answers. A free-text escape would invite
+                // a date or a time the validator never checked.
+                AllowFreeText = false,
+                DraftId = draft.Id,
+                DraftVersion = draft.DraftVersion,
+                ConflictVersion = draft.ConflictVersion,
+                // Carried through, so the eventual change is recorded against
+                // the conflict it was fixing.
+                ConflictType = conflictType,
+                ConflictMetaJson = previous.ConflictMetaJson,
+            },
+            card.Options,
+            ct);
+
+        await _clarifications.RecordContinuationAsync(previous.Id, assistantMessage.Id, ct);
+
+        _logger.LogInformation(
+            "[GLUNO] conflict sub-question type={Type} options={Count}", card.Type, card.Options.Count);
+
+        return new GlunoTurnResult
+        {
+            Conversation = conversation,
+            UserMessage = assistantMessage,
+            AssistantMessage = assistantMessage,
+            Clarification = clarification,
+        };
+    }
+
+    /// <summary>
+    /// The draft validated clean. It becomes a proposal — and only now.
+    ///
+    /// Still no write to the Adventure: a proposal is a card with an Apply
+    /// button, and the button is the user's to press.
+    /// </summary>
+    private async Task<GlunoTurnResult> ReadyForApprovalAsync(
+        GlunoConversation conversation,
+        Guid userId,
+        GlunoClarification clarification,
+        GlunoProposalDraft draft,
+        GlunoProposal proposal,
+        GlunoContext context,
+        CancellationToken ct)
+    {
+        var swedish = string.Equals(context.User.Language, "sv", StringComparison.OrdinalIgnoreCase);
+
+        var assistantMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.Assistant,
+            Text = swedish ? "Då blir planen så här." : "Here's the plan then.",
+        }, ct);
+
+        // Status before the proposal, so a failure between the two leaves a
+        // draft that cannot become a second proposal on a retry.
+        var ready = await _drafts.SetStatusAsync(
+            draft.Id, userId, GlunoProposalDraftStatuses.ReadyForApproval, null, ct) ?? draft;
+
+        var records = await CreateProposalsAsync(
+            conversation, assistantMessage.Id, [proposal], ct,
+            // The binding apply re-checks. A proposal whose draft has moved on
+            // since is describing a plan the user never saw.
+            draftId: ready.Id, draftVersion: ready.DraftVersion);
+
+        if (records.Count > 0)
+        {
+            await _drafts.SetStatusAsync(
+                draft.Id, userId, GlunoProposalDraftStatuses.ReadyForApproval, records[0].Id, ct);
+        }
+
+        await _clarifications.RecordContinuationAsync(clarification.Id, assistantMessage.Id, ct);
+
+        _logger.LogInformation(
+            "[GLUNO] draft ready for approval draftVersion={DraftVersion} rebuilds={Rebuilds}",
+            ready.DraftVersion, ready.RebuildCount);
+
+        return new GlunoTurnResult
+        {
+            Conversation = conversation,
+            UserMessage = assistantMessage,
+            AssistantMessage = assistantMessage,
+            ProposalRecords = records,
+        };
+    }
+
+    /// <summary>
+    /// Asks about the conflict that is still there after the last fix.
+    ///
+    /// A NEW clarification bound to the SAME draft, carrying the versions as
+    /// they stand now. The original user message is referenced, never appended
+    /// again — the user typed it once.
+    /// </summary>
+    private async Task<GlunoTurnResult> AskNextConflictAsync(
+        GlunoConversation conversation,
+        Guid userId,
+        GlunoClarification previous,
+        GlunoProposalDraft draft,
+        GlunoProposalConflict conflict,
+        GlunoContext context,
+        CancellationToken ct)
+    {
+        var explanation = GlunoConflictStrategies.Explain(conflict.ConflictType, context.User.Language);
+
+        var assistantMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.Assistant,
+            Text = explanation,
+        }, ct);
+
+        var clarification = await _clarifications.CreateAsync(
+            new GlunoClarification
+            {
+                ConversationId = conversation.Id,
+                UserId = userId,
+                TripId = draft.TripId,
+                // The SAME original turn. Appending the question again would
+                // put it in the history twice for one thing the user asked.
+                OriginalUserMessageId = previous.OriginalUserMessageId,
+                MessageId = assistantMessage.Id,
+                Type = GlunoClarificationTypes.ProposalConflict,
+                Question = explanation,
+                OriginalIntent = previous.OriginalIntent,
+                AllowFreeText = false,
+                DraftId = draft.Id,
+                DraftVersion = draft.DraftVersion,
+                ConflictVersion = draft.ConflictVersion,
+                ConflictType = conflict.ConflictType,
+                ConflictMetaJson = ConflictMetaJson(conflict, ReadPayload(draft), context),
+            },
+            GlunoConflictMapper.Options(conflict, context.User.Language),
+            ct);
+
+        await _clarifications.RecordContinuationAsync(previous.Id, assistantMessage.Id, ct);
+
+        return new GlunoTurnResult
+        {
+            Conversation = conversation,
+            UserMessage = assistantMessage,
+            AssistantMessage = assistantMessage,
+            Clarification = clarification,
+        };
+    }
+
+    /// <summary>
+    /// Gluno could not resolve the plan. Says so plainly, once.
+    ///
+    /// Neutral by contract: no version numbers, no internal error names, no
+    /// blame. The user asked for something and it did not work out, and a
+    /// technical explanation would not help them decide what to do next.
+    /// </summary>
+    private async Task<GlunoTurnResult> ConflictStoppedAsync(
+        GlunoConversation conversation,
+        GlunoClarification clarification,
+        GlunoDraftError error,
+        string language,
+        CancellationToken ct)
+    {
+        var swedish = string.Equals(language, "sv", StringComparison.OrdinalIgnoreCase);
+
+        var text = error switch
+        {
+            GlunoDraftError.Stale or GlunoDraftError.NotUsable => swedish
+                ? "Planen har hunnit ändras sedan jag frågade. Fråga mig igen så tittar jag på nytt."
+                : "The plan changed since I asked. Ask me again and I'll take a fresh look.",
+
+            GlunoDraftError.Forbidden => swedish
+                ? "Du har inte längre tillgång till den resan."
+                : "You no longer have access to that Adventure.",
+
+            _ => swedish
+                ? "Jag lyckades inte få ihop planen automatiskt. Säg hur du vill ha det så gör jag om den."
+                : "I couldn't make the plan work automatically. Tell me how you'd like it and I'll redo it.",
+        };
+
+        // Code only — never which version, which draft or which trip.
+        _logger.LogInformation("[GLUNO] conflict continuation stopped reason={Reason}", error);
+
+        return await ConflictClosedAsync(conversation, clarification, text, ct);
+    }
+
+    /// One assistant message, bound to the clarification so a repeat tap
+    /// replays it rather than running the continuation twice.
+    private async Task<GlunoTurnResult> ConflictClosedAsync(
+        GlunoConversation conversation,
+        GlunoClarification clarification,
+        string text,
+        CancellationToken ct)
+    {
+        var assistantMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.Assistant,
+            Text = text,
+        }, ct);
+
+        await _clarifications.RecordContinuationAsync(clarification.Id, assistantMessage.Id, ct);
+
+        return new GlunoTurnResult
+        {
+            Conversation = conversation,
+            UserMessage = assistantMessage,
+            AssistantMessage = assistantMessage,
+        };
+    }
+
+    /// <summary>
+    /// Which rows of the draft the conflict is about.
+    ///
+    /// Recomputed from the draft's CURRENT payload rather than carried on the
+    /// clarification: the indexes are positions in an array, and an array that
+    /// has had a row removed since would make a remembered index point at the
+    /// wrong activity.
+    /// </summary>
+    private static IReadOnlyList<int> ConflictIndexesFor(GlunoProposalDraft draft, string conflictType)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(draft.PayloadJson);
+
+            if (!document.RootElement.TryGetProperty("activities", out var activities)
+                || activities.ValueKind != JsonValueKind.Array)
+            {
+                return Array.Empty<int>();
+            }
+
+            // The last row Gluno itself added: what "skip it" means when the
+            // clash is with something that was already in the plan.
+            var index = 0;
+            var candidate = -1;
+
+            foreach (var row in activities.EnumerateArray())
+            {
+                var isFixed = row.TryGetProperty("isFixed", out var flag)
+                    && flag.ValueKind == JsonValueKind.True;
+                var isExisting = row.TryGetProperty("existingActivityId", out var existing)
+                    && existing.ValueKind == JsonValueKind.String
+                    && !string.IsNullOrWhiteSpace(existing.GetString());
+
+                if (!isFixed && !isExisting) candidate = index;
+                index++;
+            }
+
+            return candidate >= 0 ? [candidate] : Array.Empty<int>();
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<int>();
+        }
+    }
+
+    /// Rows demonstrably in the wrong town, from stored coordinates only.
+    /// Empty whenever the trip context is absent — an unanswerable question
+    /// produces no conflict rather than a guessed one.
+    private static IReadOnlyList<int> DestinationMismatches(JsonElement? payload, GlunoContext context)
+        => payload is { } plan && context.Trip is { } trip
+            ? GlunoDestinationCheck.Mismatched(plan, trip)
+            : Array.Empty<int>();
+
+    /// The draft's payload, or null when it cannot be read. Never throws: this
+    /// runs while building a card, and an unreadable payload costs a detail on
+    /// screen, not the turn.
+    private static JsonElement? ReadPayload(GlunoProposalDraft draft)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(draft.PayloadJson);
+            return document.RootElement.Clone();
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// What the conflict card shows, built server-side.
+    ///
+    /// Titles come from the Adventure and from the draft itself — both things
+    /// the user can already see. Nothing here is an id or a version.
+    /// </summary>
+    private static string ConflictMetaJson(
+        GlunoProposalConflict conflict, JsonElement? payload, GlunoContext context)
+    {
+        var titles = new List<string>();
+
+        // What it clashes with, named. "That clashes with something already
+        // planned" is a worse sentence than one that says which booking.
+        foreach (var activityId in conflict.AffectedExistingActivityIds)
+        {
+            var match = context.Trip?.Activities.FirstOrDefault(activity => activity.Id == activityId);
+            if (match != null && !string.IsNullOrWhiteSpace(match.Title)) titles.Add(match.Title);
+        }
+
+        // And the suggested row the clash is about.
+        if (payload is { ValueKind: JsonValueKind.Object } plan
+            && plan.TryGetProperty("activities", out var activities)
+            && activities.ValueKind == JsonValueKind.Array)
+        {
+            var rows = activities.EnumerateArray().ToList();
+
+            foreach (var index in conflict.AffectedDraftItemIndexes)
+            {
+                if (index < 0 || index >= rows.Count) continue;
+                if (!rows[index].TryGetProperty("title", out var title)) continue;
+                if (title.ValueKind != JsonValueKind.String) continue;
+
+                var text = title.GetString();
+                if (!string.IsNullOrWhiteSpace(text) && !titles.Contains(text)) titles.Add(text);
+            }
+        }
+
+        return JsonSerializer.Serialize(new GlunoConflictDto
+        {
+            Type = conflict.ConflictType,
+            Date = conflict.Date,
+            StartTime = conflict.StartTime,
+            EndTime = conflict.EndTime,
+            // Not "we chose not to offer it" — the item genuinely is not ours
+            // to move, and the card says which.
+            ExistingIsLocked = conflict.ConflictType
+                is GlunoConflictTypes.LockedBooking
+                or GlunoConflictTypes.CheckInConflict
+                or GlunoConflictTypes.CheckOutConflict,
+            // Clamped at zero: a negative shortfall is not a shortfall, and
+            // "-5 minutes short" is the kind of sentence that makes somebody
+            // stop believing the rest of the card.
+            MissingTravelMinutes = Math.Max(0, conflict.RequiredTravelMinutes - conflict.AvailableMinutes),
+            AffectedTitles = titles,
+        }, GlunoJson.Options);
+    }
+
+    /// The card shape behind an action name. A draft only ever holds an
+    /// allow-listed action, so an unknown one is a build error, not input.
+    private static string DraftKind(string actionType) => actionType switch
+    {
+        GlunoActions.ProposeDayPlan => "day_plan",
+        GlunoActions.ProposeActivity => "activity",
+        GlunoActions.ProposeDayLocation => "day_location",
+        GlunoActions.ProposeActivityMove => "activity_move",
+        GlunoActions.ProposeTripDateChange => "trip_dates",
+        _ => "activity",
+    };
+
+    /// <summary>
+    /// The proposal card's heading, rebuilt from the payload.
+    ///
+    /// The date and the number of stops, and nothing else. Reusing the model's
+    /// original sentence would describe the plan BEFORE the fix — a summary
+    /// naming a stop that has since been removed is worse than a plain one.
+    /// </summary>
+    private static string GlunoDraftSummary(JsonElement payload, string language)
+    {
+        var swedish = string.Equals(language, "sv", StringComparison.OrdinalIgnoreCase);
+
+        var count = payload.ValueKind == JsonValueKind.Object
+            && payload.TryGetProperty("activities", out var activities)
+            && activities.ValueKind == JsonValueKind.Array
+                ? activities.GetArrayLength()
+                : 0;
+
+        if (count == 0) return swedish ? "Uppdaterad plan" : "Updated plan";
+
+        return swedish
+            ? $"Uppdaterad plan med {count} {(count == 1 ? "aktivitet" : "aktiviteter")}"
+            : $"Updated plan with {count} {(count == 1 ? "activity" : "activities")}";
+    }
+
+    private async Task<GlunoTurnResult> AskWhichAdventureAsync(
+        GlunoConversation conversation,
+        Guid userId,
+        string text,
+        GlunoIntentResult intent,
+        IReadOnlyList<TripChoice> choices,
+        GlunoContext context,
+        CancellationToken ct)
+    {
+        var ranked = GlunoClarificationBuilder.RankTrips(choices, text, context.Today);
+        var options = GlunoClarificationBuilder.TripOptions(ranked, context.Today, context.User.Language);
+
+        var userMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.User,
+            Text = text,
+        }, ct);
+
+        var question = GlunoClarificationBuilder.QuestionFor(
+            GlunoClarificationTypes.Adventure, context.User.Language);
+
+        // The card carries the question. The message text is the same
+        // sentence so a client that has never heard of clarifications still
+        // renders something sensible rather than an empty turn.
+        var assistantMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.Assistant,
+            Text = question,
+        }, ct);
+
+        var clarification = await _clarifications.CreateAsync(
+            new GlunoClarification
+            {
+                ConversationId = conversation.Id,
+                UserId = userId,
+                TripId = null,
+                OriginalUserMessageId = userMessage.Id,
+                MessageId = assistantMessage.Id,
+                Type = GlunoClarificationTypes.Adventure,
+                Question = question,
+                OriginalIntent = intent.PrimaryIntent.ToString(),
+                // More Adventures than fit: the rest are reachable by saying
+                // which, rather than by scrolling a list of twenty.
+                AllowFreeText = ranked.Count > GlunoClarificationBuilder.MaxOptions,
+            },
+            options,
+            ct);
+
+        return new GlunoTurnResult
+        {
+            Conversation = conversation,
+            UserMessage = userMessage,
+            AssistantMessage = assistantMessage,
+            Clarification = clarification,
+        };
     }
 
     /// <summary>
