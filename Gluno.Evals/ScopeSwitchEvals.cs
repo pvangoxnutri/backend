@@ -313,6 +313,148 @@ public class ScopeSwitchEvals
         Assert.Contains("selected={tripId === trip.id}", picker);
     }
 
+    // ── The dark block over the header ───────────────────────────────────
+
+    [Fact]
+    public void The_sheet_escapes_the_header_through_a_real_modal()
+    {
+        var picker = Picker();
+
+        // THE VISUAL BUG. The picker lives inside the chat header — a
+        // flexDirection: 'row' box about a hundred points tall — and
+        // ModalSheet's container is StyleSheet.absoluteFillObject. In React
+        // Native that fills the PARENT, so the dimming backdrop filled the
+        // header exactly: a dark empty block from the status bar down over the
+        // header, chat still visible below, list clipped out of sight.
+        //
+        // A Modal is React Native's portal — a full-screen window above
+        // everything, which is the containing block the sheet always assumed.
+        Assert.Contains("<Modal", picker);
+        Assert.Contains("visible={open}", picker);
+        Assert.Contains("transparent", picker);
+        Assert.Contains("statusBarTranslucent", picker);
+        // The sheet animates itself; a second animation would fight it.
+        Assert.Contains("animationType=\"none\"", picker);
+        Assert.Contains("onRequestClose={() => setOpen(false)}", picker);
+    }
+
+    [Fact]
+    public void The_sheet_still_sits_inside_that_modal()
+    {
+        var picker = Picker();
+
+        var modalAt = picker.IndexOf("<Modal", StringComparison.Ordinal);
+        var sheetAt = picker.IndexOf("<ModalSheet", StringComparison.Ordinal);
+        var closeAt = picker.IndexOf("</Modal>", StringComparison.Ordinal);
+
+        Assert.True(modalAt > 0 && sheetAt > modalAt && closeAt > sheetAt,
+            "the sheet must be inside the modal, or it is back in the header");
+    }
+
+    [Fact]
+    public void The_dimming_is_the_backdrops_alone()
+    {
+        var sheet = Mobile("components", "modal-sheet.tsx");
+
+        // Two dimming layers would double the darkness — the modal is
+        // transparent precisely so the backdrop is the only one.
+        Assert.Contains("backgroundColor: theme.isDark ? 'rgba(0,0,0,0.55)' : 'rgba(0, 0, 0, 0.28)'", sheet);
+        Assert.Contains("justifyContent: 'flex-end'", sheet);
+    }
+
+    [Fact]
+    public void The_sheet_has_a_bounded_height_and_does_not_fill_the_screen()
+    {
+        var sheet = Mobile("components", "modal-sheet.tsx");
+        var picker = Picker();
+
+        // An explicit height, not flex — a sheet that flexed would be the
+        // full-screen dark container this bug looked like.
+        Assert.Contains("{ height }", sheet);
+        Assert.Contains("const SHEET_HEIGHT = 460;", picker);
+
+        // Bounded to the style block itself — the next one along has a height
+        // of its own and would fail this for the wrong reason.
+        var start = sheet.IndexOf("  sheet: {", StringComparison.Ordinal);
+        var body = sheet[start..sheet.IndexOf("\n  },", start, StringComparison.Ordinal)];
+
+        Assert.DoesNotContain("flex: 1", body);
+        Assert.DoesNotContain("height: '100%'", body);
+        Assert.DoesNotContain("top: 0", body);
+    }
+
+    [Fact]
+    public void Closing_unmounts_every_layer()
+    {
+        var sheet = Mobile("components", "modal-sheet.tsx");
+        var picker = Picker();
+
+        // Both gates are the same flag, so a closed picker cannot leave a
+        // backdrop mounted over the chat.
+        Assert.Contains("if (!visible) return null;", sheet);
+        Assert.Contains("visible={open}", picker);
+        Assert.Contains("setOpen(false);", picker);
+    }
+
+    [Fact]
+    public void The_header_applies_its_safe_area_inset_exactly_once()
+    {
+        var screen = Screen();
+
+        // The header is the only thing that pads for the status bar. A second
+        // offset inside the sheet would push it down by that height again.
+        Assert.Equal(1, screen.Split("paddingTop: Math.max(insets.top, 18)").Length - 1);
+        Assert.DoesNotContain("SafeAreaView", screen);
+
+        var picker = Picker();
+        Assert.DoesNotContain("insets", picker);
+        Assert.DoesNotContain("useSafeAreaInsets", picker);
+    }
+
+    [Fact]
+    public void The_header_height_is_content_sized()
+    {
+        var screen = Screen();
+
+        var start = screen.IndexOf("  header: {", StringComparison.Ordinal);
+        var body = screen[start..screen.IndexOf("\n  },", start, StringComparison.Ordinal)];
+
+        // Nothing fixes it tall, and nothing positions it absolutely — so it
+        // returns to its compact height on its own after a scope change.
+        Assert.DoesNotContain("flex: 1", body);
+        Assert.DoesNotContain("height:", body);
+        Assert.DoesNotContain("minHeight", body);
+        Assert.DoesNotContain("position: 'absolute'", body);
+    }
+
+    [Fact]
+    public void A_loading_or_failed_list_still_renders_content()
+    {
+        var picker = Picker();
+
+        // Never an empty dark area: a spinner, the list, or a retry.
+        Assert.Contains("trips === null && !failed ?", picker);
+        Assert.Contains("<ActivityIndicator", picker);
+        Assert.Contains("{failed ? (", picker);
+        // And "All Adventures" is always present, so the sheet is never blank.
+        Assert.Contains("t('gluno.scope.global')", picker);
+    }
+
+    [Fact]
+    public void The_layer_diagnostics_name_each_layer_and_carry_nothing_else()
+    {
+        var picker = Picker();
+
+        Assert.Contains("picker layers modal=", picker);
+        Assert.Contains("if (!__DEV__) return;", picker);
+        // Booleans and labels. No titles, no ids, no user text.
+var logAt = picker.IndexOf("picker layers", StringComparison.Ordinal);
+        var line = picker[logAt..picker.IndexOf(");", logAt, StringComparison.Ordinal)];
+
+        Assert.DoesNotContain("trip.title", line);
+        Assert.DoesNotContain("tripTitle", line);
+    }
+
     // ── 23. Diagnostics stay internal ────────────────────────────────────
 
     [Fact]
