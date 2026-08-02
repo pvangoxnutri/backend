@@ -39,10 +39,33 @@ public sealed class TravelDataRegistry : ITravelDataRegistry
 
     public async Task<IReadOnlyList<RankedTravelPlace>> SearchPlacesAsync(TravelPlaceQuery query, CancellationToken ct)
     {
+        var startedAt = DateTime.UtcNow;
+
         var configured = _providers.Where(provider => provider.IsConfigured).ToList();
-        if (configured.Count == 0) return Array.Empty<RankedTravelPlace>();
+
+        // ── Not configured is not "no results" ────────────────────────────
+        //
+        // THE BUG THIS LOGS. An unconfigured provider returned an empty list,
+        // and so did a provider that answered with nothing, and so did one
+        // that timed out. Four different situations, one indistinguishable
+        // outcome — so a production Gluno that had never had a Tripadvisor key
+        // looked exactly like one whose search found nothing in Sevilla, and
+        // the only visible symptom was prose where place cards should have
+        // been.
+        //
+        // Counts and a category. Never the query, never a key, never a body.
+        if (configured.Count == 0)
+        {
+            _logger.LogWarning(
+                "[GLUNO] place search skipped reason=not_configured providers={Total}",
+                _providers.Count);
+
+            return Array.Empty<RankedTravelPlace>();
+        }
 
         var collected = new List<TravelPlace>();
+        var failed = 0;
+
         foreach (var provider in configured)
         {
             try
@@ -55,6 +78,8 @@ public sealed class TravelDataRegistry : ITravelDataRegistry
             }
             catch (Exception ex)
             {
+                failed++;
+
                 // Provider name and failure category only — never the query,
                 // never a key, never a response body.
                 _logger.LogWarning(
@@ -63,7 +88,21 @@ public sealed class TravelDataRegistry : ITravelDataRegistry
             }
         }
 
-        if (collected.Count == 0) return Array.Empty<RankedTravelPlace>();
+        var elapsed = (int)(DateTime.UtcNow - startedAt).TotalMilliseconds;
+
+        if (collected.Count == 0)
+        {
+            // Every provider threw, versus every provider genuinely answered
+            // with nothing. The first is an outage; the second is a real
+            // answer about Sevilla, and they need different fixes.
+            _logger.LogInformation(
+                "[GLUNO] place search empty reason={Reason} providers={Providers} "
+                + "failed={Failed} category={Category} in {Elapsed}ms",
+                failed == configured.Count ? "all_providers_failed" : "provider_returned_zero",
+                configured.Count, failed, query.Category, elapsed);
+
+            return Array.Empty<RankedTravelPlace>();
+        }
 
         // Same place from two providers stays two results — they carry
         // different ratings and attribution, and silently merging them would
@@ -73,9 +112,29 @@ public sealed class TravelDataRegistry : ITravelDataRegistry
             .Select(group => group.First())
             .ToList();
 
-        return TravelPlaceRanker.Rank(deduped, query)
+        var ranked = TravelPlaceRanker.Rank(deduped, query)
             .Take(Math.Clamp(query.Limit, 1, 10))
             .ToList();
+
+        // ── The other silent empty ────────────────────────────────────────
+        //
+        // "The provider found nothing" and "the provider found things and our
+        // own code discarded all of them" look identical from outside and have
+        // completely different fixes. Distinguishing them is the difference
+        // between chasing an API key and chasing a mapping bug.
+        _logger.LogInformation(
+            "[GLUNO] place search done raw={Raw} deduped={Deduped} ranked={Ranked} "
+            + "category={Category} in {Elapsed}ms",
+            collected.Count, deduped.Count, ranked.Count, query.Category, elapsed);
+
+        if (ranked.Count == 0)
+        {
+            _logger.LogWarning(
+                "[GLUNO] place search dropped every result raw={Raw} reason=mapping_or_ranking",
+                collected.Count);
+        }
+
+        return ranked;
     }
 
     public async Task<TravelPlace?> GetPlaceDetailsAsync(string externalId, string language, CancellationToken ct)

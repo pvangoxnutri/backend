@@ -657,6 +657,22 @@ public sealed class GlunoChatService : IGlunoChatService
                 conversation, userId, text, intent, detection, context, ct);
         }
 
+        // ── "Add Real Alcázar" ────────────────────────────────────────────
+        //
+        // The same thing the Add button does, said in words. Resolved against
+        // the places THIS conversation already showed — never a fresh search,
+        // because the user is pointing at something on their screen and a new
+        // lookup could return a different place with a similar name.
+        //
+        // Before the model, because a model asked to "add Real Alcázar" has to
+        // reconstruct which place that was and can only guess at the provider
+        // reference. It has no way to produce one at all.
+        if (GlunoPlaceOptions.IsAddRequest(text))
+        {
+            var added = await AddNamedPlaceAsync(userId, conversation, text, ct);
+            if (added != null) return added;
+        }
+
         // ── "Give me something I can tap" ─────────────────────────────────
         //
         // An explicit request for an interface, answered with an interface.
@@ -1093,6 +1109,20 @@ public sealed class GlunoChatService : IGlunoChatService
         // The caution survives; the explanation goes. Replaced rather than
         // deleted, because dropping that sentence outright would leave a
         // confident-looking answer with no hint that a lookup failed.
+        // ── A caution about one field must not advise about another ───────
+        //
+        // "I can't check the ratings, so check the opening hours before you
+        // go" sends somebody to verify something that was never in doubt and
+        // leaves the real gap unmentioned. The backend's own note is built
+        // per-field now; this catches the model writing its own version.
+        if (GlunoUiPromise.MixesUncertainFields(assistantText))
+        {
+            _logger.LogInformation("[GLUNO] answer mixed uncertain fields; clause dropped");
+
+            var separated = GlunoUiPromise.WithoutMixedFields(assistantText);
+            if (separated.Length > 0) assistantText = separated;
+        }
+
         if (GlunoUiPromise.ExplainsItsSources(assistantText))
         {
             // The real reason stays in the log and in the failure codes. It
@@ -1554,6 +1584,156 @@ public sealed class GlunoChatService : IGlunoChatService
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// "Add Real Alcázar", resolved against what this conversation just showed.
+    ///
+    /// Returns null when the sentence is not about a place we recommended, so
+    /// the caller carries on with the ordinary turn — "add a rest day" is an
+    /// add request and is nothing to do with this.
+    ///
+    /// THE PLACE IS NEVER SEARCHED FOR AGAIN. The user is pointing at
+    /// something on their screen; a fresh lookup could return a different
+    /// place with a similar name, and they would get a proposal for somewhere
+    /// they never saw.
+    /// </summary>
+    private async Task<GlunoTurnResult?> AddNamedPlaceAsync(
+        Guid userId, GlunoConversation conversation, string text, CancellationToken ct)
+    {
+        // The most recent assistant turn that actually showed places. Older
+        // ones are not searched: "add the first one" means the list in front
+        // of them, not one from twenty messages ago.
+        var recent = await _db.GlunoMessages
+            .AsNoTracking()
+            .Where(message => message.ConversationId == conversation.Id
+                && message.Role == GlunoMessageRoles.Assistant
+                && message.PayloadJson != null)
+            .OrderByDescending(message => message.CreatedAt)
+            .Take(GlunoContextLimits.MaxDiscussedPlaceTurns)
+            .ToListAsync(ct);
+
+        foreach (var message in recent)
+        {
+            var places = ReadPlaces(message);
+            if (places.Count == 0) continue;
+
+            var matches = GlunoPlaceOptions.Match(places, text);
+
+            // Exactly one: deterministic, no model, straight to the add flow.
+            if (matches.Count == 1)
+            {
+                return await AddRecommendedPlaceAsync(
+                    userId, message, places[matches[0]], null, null, ct);
+            }
+
+            // Several fit. A real question — adding the wrong one puts
+            // somewhere they did not choose into their plan.
+            if (matches.Count > 1)
+            {
+                return await AskWhichPlaceAsync(
+                    conversation, userId, text, matches.Select(index => places[index]).ToList(), ct);
+            }
+
+            // This turn showed places and none of them matched. Stop here
+            // rather than walking further back: the user is talking about the
+            // list they can see.
+            return null;
+        }
+
+        return null;
+    }
+
+    /// The places an assistant turn showed, or none when its payload cannot be
+    /// read. Never throws — this runs on a live turn.
+    private static IReadOnlyList<GlunoPlaceCard> ReadPlaces(GlunoMessage message)
+    {
+        if (message.PayloadJson == null) return Array.Empty<GlunoPlaceCard>();
+
+        try
+        {
+            var payload = JsonSerializer.Deserialize<GlunoAssistantPayload>(
+                message.PayloadJson, GlunoJson.Options);
+
+            return payload?.Places ?? (IReadOnlyList<GlunoPlaceCard>)Array.Empty<GlunoPlaceCard>();
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<GlunoPlaceCard>();
+        }
+    }
+
+    /// <summary>
+    /// Asks which of several matching places was meant.
+    ///
+    /// Options built from the places already shown, so every one is something
+    /// the user has seen and the backend has verified.
+    /// </summary>
+    private async Task<GlunoTurnResult> AskWhichPlaceAsync(
+        GlunoConversation conversation,
+        Guid userId,
+        string text,
+        IReadOnlyList<GlunoPlaceCard> candidates,
+        CancellationToken ct)
+    {
+        var language = await _db.Users
+            .Where(user => user.Id == userId)
+            .Select(user => user.Language)
+            .FirstOrDefaultAsync(ct) ?? "en";
+
+        var swedish = string.Equals(language, "sv", StringComparison.OrdinalIgnoreCase);
+        var question = swedish ? "Vilken av dem menar du?" : "Which one do you mean?";
+
+        var userMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.User,
+            Text = text,
+        }, ct);
+
+        var assistantMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.Assistant,
+            Text = question,
+        }, ct);
+
+        var options = candidates
+            .Take(GlunoClarificationBuilder.MaxOptions)
+            .Select((place, index) => new GlunoOptionDraft($"place-{index}", place.Name)
+            {
+                Description = place.Address,
+                // Namespaced provider id, which the existing place
+                // clarification path already knows how to carry.
+                EntityType = GlunoClarificationEntityTypes.ExternalPlace,
+                Value = place.ExternalId,
+                Icon = "location-outline",
+            })
+            .ToList();
+
+        var clarification = await _clarifications.CreateAsync(
+            new GlunoClarification
+            {
+                ConversationId = conversation.Id,
+                UserId = userId,
+                TripId = conversation.TripId,
+                OriginalUserMessageId = userMessage.Id,
+                MessageId = assistantMessage.Id,
+                Type = GlunoClarificationTypes.Place,
+                Question = question,
+                OriginalIntent = GlunoIntent.AddActivity.ToString(),
+                AllowFreeText = false,
+            },
+            options,
+            ct);
+
+        return new GlunoTurnResult
+        {
+            Conversation = conversation,
+            UserMessage = userMessage,
+            AssistantMessage = assistantMessage,
+            Clarification = clarification,
+        };
     }
 
     public async Task<GlunoTurnResult> AddRecommendedPlaceAsync(
@@ -3862,22 +4042,51 @@ public sealed class GlunoChatService : IGlunoChatService
     {
         var now = DateTime.UtcNow;
 
-        GlunoFallbackReason? reason = null;
+        // ── One status per field ──────────────────────────────────────────
+        //
+        // THE BUG THIS REPLACES. The old chain picked ONE reason by first
+        // match, and the opening-hours branch fired whenever any hours entry
+        // was stale — whatever the answer had actually been about. So a turn
+        // where the model wrote "I can't check the ratings" got "check the
+        // opening hours before you go" appended, and the two halves together
+        // said something false.
+        //
+        // Each field now reports itself, and the note names only the ones that
+        // are genuinely uncertain. A field nobody asked about stays silent.
+        var statuses = new Dictionary<GlunoDataField, GlunoFieldStatus>();
 
-        if (workflow.AllowsRouting
-            && !_routing.HasVerifiedRouting
-            && ledger.Entries.Any(entry => entry.Type == "route_leg"))
+        if (workflow.AllowsRouting && ledger.Entries.Any(entry => entry.Type == "route_leg"))
         {
-            reason = GlunoFallbackReason.RoutingUnavailable;
+            statuses[GlunoDataField.TravelTime] = _routing.HasVerifiedRouting
+                ? GlunoFieldStatus.Verified
+                : GlunoFieldStatus.Unavailable;
         }
-        else if (ledger.Stale(now).Any(entry => entry.Type == "opening_hours"))
+
+        // Only when hours were actually part of this answer. Absent entirely
+        // means nobody looked, which is not a gap worth mentioning.
+        var hours = ledger.Entries.Where(entry => entry.Type == "opening_hours").ToList();
+
+        if (hours.Count > 0)
         {
-            reason = GlunoFallbackReason.OpeningHoursUnavailable;
+            statuses[GlunoDataField.OpeningHours] =
+                ledger.Stale(now).Any(entry => entry.Type == "opening_hours")
+                    ? GlunoFieldStatus.Stale
+                    : GlunoFieldStatus.Verified;
         }
 
-        if (reason == null) return answerText;
+        var ratings = ledger.Entries.Where(entry => entry.Type == "place_rating").ToList();
 
-        var note = GlunoFallbacks.Note(reason.Value, language);
+        if (ratings.Count > 0)
+        {
+            statuses[GlunoDataField.Rating] =
+                ledger.Stale(now).Any(entry => entry.Type == "place_rating")
+                    ? GlunoFieldStatus.Stale
+                    : GlunoFieldStatus.Verified;
+        }
+
+        var note = GlunoFieldUncertainty.Note(statuses, language);
+
+        if (note == null) return answerText;
         if (answerText.Contains(note, StringComparison.OrdinalIgnoreCase)) return answerText;
 
         return $"{answerText.TrimEnd()}\n\n{note}";

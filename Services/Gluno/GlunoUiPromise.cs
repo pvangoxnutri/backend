@@ -209,6 +209,74 @@ public static class GlunoUiPromise
             : $"{string.Join(' ', kept).Trim()}\n\n{caution}";
     }
 
+    /// <summary>
+    /// A caution about one field that goes on to advise checking another.
+    ///
+    /// THE PRODUCTION SENTENCE: "Betygen kan jag inte kontrollera just nu, så
+    /// kolla öppettiderna innan ni går." Ratings could not be fetched, which
+    /// says nothing whatever about opening hours — and the advice sends
+    /// somebody to verify something that was never in doubt while leaving the
+    /// real gap unmentioned.
+    ///
+    /// The primary fix is structural: the note is built from per-field
+    /// statuses now (see GlunoFieldUncertainty). This catches the model
+    /// writing its own version anyway.
+    /// </summary>
+    public static bool MixesUncertainFields(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+
+        var normalised = Normalise(text);
+
+        // Each sentence on its own: an answer may legitimately mention ratings
+        // in one sentence and hours in another.
+        foreach (var sentence in Regex.Split(normalised, @"(?<=[.!?])\s+"))
+        {
+            var doubts = DoubtWords.Any(word => sentence.Contains(word, StringComparison.Ordinal));
+            if (!doubts) continue;
+
+            var fields = new[] { RatingWords, HoursWords, PriceWords }
+                .Count(group => group.Any(word => sentence.Contains(word, StringComparison.Ordinal)));
+
+            // Two different fields inside one sentence that expresses doubt.
+            if (fields > 1) return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Drops the sentences that mix fields, keeping the rest.
+    ///
+    /// The whole sentence goes rather than half of it: "I can't check the
+    /// ratings, so check the hours" has no salvageable half — the first clause
+    /// is about a field the structural note will cover properly, and the
+    /// second is the false inference. The backend appends its own per-field
+    /// caution afterwards.
+    /// </summary>
+    public static string WithoutMixedFields(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return string.Empty;
+
+        var kept = Regex.Split(text, @"(?<=[.!?])\s+")
+            .Where(sentence => !MixesUncertainFields(sentence))
+            .Select(sentence => sentence.Trim())
+            .Where(sentence => sentence.Length > 0)
+            .ToList();
+
+        return string.Join(' ', kept).Trim();
+    }
+
+    private static readonly string[] DoubtWords =
+    [
+        "kan inte", "kunde inte", "osaker", "inte bekrafta", "inte kontrollera",
+        "can't", "cannot", "couldn't", "could not", "unable to", "not sure",
+    ];
+
+    private static readonly string[] RatingWords = ["betyg", "omdome", "rating", "review"];
+    private static readonly string[] HoursWords = ["oppettid", "oppet", "opening hour", "hours", "stangt"];
+    private static readonly string[] PriceWords = ["pris", "kostar", "price", "cost"];
+
     private static bool ContainsWord(string text, string phrase)
     {
         var at = text.IndexOf(phrase, StringComparison.Ordinal);
