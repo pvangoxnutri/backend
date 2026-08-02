@@ -28,6 +28,10 @@ builder.Services.AddControllers();
 builder.Services.AddHttpClient<LinkPreviewService>();
 builder.Services.AddHttpClient<WeatherService>();
 builder.Services.AddScoped<TripDayLocationService>();
+// Where a trip is on each day, loaded AND resolved in one place. Weather and
+// Gluno both go through it, so the cities on the weather screen and the stops
+// Gluno describes cannot come from different rows.
+builder.Services.AddScoped<ITripResolvedLocationTimelineService, TripResolvedLocationTimelineService>();
 builder.Services.AddHttpClient<ISupabaseStorageService, SupabaseStorageService>();
 builder.Services
     .AddHttpClient<ITripDocumentStorageService, TripDocumentStorageService>()

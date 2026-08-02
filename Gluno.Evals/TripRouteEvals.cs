@@ -81,12 +81,22 @@ public class TripRouteEvals
             AppContext.BaseDirectory, "..", "..", "..", "..",
             "Controllers", "TripWeatherController.cs"));
 
-        // One implementation of "where is the trip on this day". A second would
-        // drift, and then two surfaces of the same app would disagree about
-        // somebody's holiday.
-        Assert.Contains("ResolveTimeline(", route);
-        Assert.Contains("ResolveTimeline(", weather);
-        Assert.Contains("new TripDayLocationService().ResolveTimeline(", route);
+        // One implementation of "where is the trip on this day" — and, since
+        // the España bug, one LOADER too. Calling the same pure function with
+        // rows you fetched yourself is not agreement; both now go through
+        // TripResolvedLocationTimelineService.
+        Assert.Contains("_timeline.BuildAsync(", weather);
+
+        // The route type itself is pure: it is handed rows and turns them into
+        // a chain. It does not fetch, and it does not resolve the timeline —
+        // the shared service does both before it is called.
+        Assert.DoesNotContain("AppDbContext", route);
+
+        var builder = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "..",
+            "Services", "Gluno", "GlunoContextBuilder.cs"));
+
+        Assert.Contains("_timeline.BuildAsync(", builder);
     }
 
     [Fact]
@@ -560,11 +570,11 @@ public class TripRouteEvals
         var body = builder[start..(start + 2600)];
 
         Assert.True(start > 0);
-        // Read fresh each turn, so a changed day location, a moved Activity or
-        // a new stop is visible on the next question. There is nothing to
-        // invalidate because nothing is stored.
-        Assert.Contains("_db.Trips", body);
-        Assert.Contains("_db.TripDayLocations", body);
+        // Read fresh each turn through the shared loader, so a changed day
+        // location, a moved Activity or a new stop is visible on the next
+        // question. There is nothing to invalidate because nothing is stored.
+        Assert.Contains("_timeline.BuildAsync(tripId, endOverride: null, ct)", body);
+        Assert.Contains("_db.TripActivities", body);
         Assert.Contains("AsNoTracking()", body);
     }
 

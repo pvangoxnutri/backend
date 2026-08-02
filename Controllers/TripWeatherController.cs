@@ -25,13 +25,14 @@ public class TripWeatherController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly WeatherService _weather;
-    private readonly TripDayLocationService _resolver;
+    private readonly ITripResolvedLocationTimelineService _timeline;
 
-    public TripWeatherController(AppDbContext db, WeatherService weather, TripDayLocationService resolver)
+    public TripWeatherController(
+        AppDbContext db, WeatherService weather, ITripResolvedLocationTimelineService timeline)
     {
         _db = db;
         _weather = weather;
-        _resolver = resolver;
+        _timeline = timeline;
     }
 
     [HttpGet]
@@ -46,9 +47,12 @@ public class TripWeatherController : ControllerBase
 
         var dto = new TripWeatherDto { DestinationName = trip.Destination };
 
-        var dayLocations = await _db.TripDayLocations
-            .Where(d => d.TripId == tripId)
-            .ToListAsync(ct);
+        // The shared loader. Gluno calls the same one, so the cities on this
+        // screen and the stops Gluno describes cannot come from different rows.
+        var loaded = await _timeline.BuildAsync(tripId, endOverride: null, ct);
+        if (loaded == null) return NotFound();
+
+        var dayLocations = loaded.DayLocations;
 
         // Cheap, date-range-independent check first — mirrors the original
         // no_coordinates precedence exactly for the zero-anchor case (this
@@ -97,9 +101,12 @@ public class TripWeatherController : ControllerBase
         var rangeEnd = TripDateRange.EffectiveEnd(trip.StartDate, trip.EndDate, today);
         if (rangeEnd > lastForecastDay) rangeEnd = lastForecastDay;
 
-        var timeline = _resolver.ResolveTimeline(
-            trip.StartDate, rangeEnd, dayLocations,
-            trip.Destination, trip.DestinationLatitude, trip.DestinationLongitude);
+        // Re-resolved to the FORECAST horizon rather than the trip's own end:
+        // past it there are no numbers to show, and walking further would only
+        // produce rows with a place and no weather. Same service, same rows —
+        // only the ceiling differs, and it differs for a stated reason.
+        var horizon = await _timeline.BuildAsync(tripId, endOverride: rangeEnd, ct);
+        var timeline = horizon?.Days ?? loaded.Days;
 
         // One provider call per unique coordinate actually visited by the
         // trip — not per day. Each still hits WeatherService's own

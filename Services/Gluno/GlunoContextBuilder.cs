@@ -76,6 +76,9 @@ public sealed class GlunoContextBuilder : IGlunoContextBuilder
     private readonly IGlunoPreferenceService _preferences;
     private readonly WeatherService _weather;
     private readonly ITripPlanningProfileBuilder _profiles;
+    /// The same loader the weather screen uses. Injected rather than
+    /// constructed so the two cannot drift apart in a later edit.
+    private readonly ITripResolvedLocationTimelineService _timeline;
     private readonly ILogger<GlunoContextBuilder> _logger;
 
     public GlunoContextBuilder(
@@ -83,12 +86,14 @@ public sealed class GlunoContextBuilder : IGlunoContextBuilder
         IGlunoPreferenceService preferences,
         WeatherService weather,
         ITripPlanningProfileBuilder profiles,
+        ITripResolvedLocationTimelineService timeline,
         ILogger<GlunoContextBuilder> logger)
     {
         _db = db;
         _preferences = preferences;
         _weather = weather;
         _profiles = profiles;
+        _timeline = timeline;
         _logger = logger;
     }
 
@@ -333,16 +338,15 @@ public sealed class GlunoContextBuilder : IGlunoContextBuilder
     /// </summary>
     private async Task<TripRouteContext?> BuildRouteAsync(Guid tripId, CancellationToken ct)
     {
-        var trip = await _db.Trips.AsNoTracking().FirstOrDefaultAsync(t => t.Id == tripId, ct);
-        if (trip == null) return null;
+        // THE shared loader — the same call the weather screen makes. Not the
+        // same pure function with a list of its own: two callers loading their
+        // own rows and handing them to one resolver is exactly how the app
+        // came to show cities on one screen and claim to know none on another.
+        var resolved = await _timeline.BuildAsync(tripId, endOverride: null, ct);
+        if (resolved == null) return null;
 
-        var dayLocations = await _db.TripDayLocations
-            .AsNoTracking()
-            .Where(d => d.TripId == tripId)
-            .OrderBy(d => d.StartDate)
-            .ThenBy(d => d.SortIndex)
-            .Take(GlunoContextLimits.MaxDayLocations + 1)
-            .ToListAsync(ct);
+        var trip = resolved.Trip;
+        var dayLocations = resolved.DayLocations;
 
         // Only what a location can be read from. A day the timeline could not
         // resolve is filled from a stay or an activity that carries a REAL
@@ -377,15 +381,32 @@ public sealed class GlunoContextBuilder : IGlunoContextBuilder
 
         var route = TripRouteResolver.Build(trip, dayLocations, activities);
 
-        // Shape only. Never a place name, a date, a coordinate or the trip's
-        // title — the whole point of the route is that it describes where
-        // somebody is going.
+        // ── The invariant that would have caught this in production ───────
+        //
+        // If the shared timeline resolved real stored locations, the route has
+        // to show them. A route that comes back as the country alone while the
+        // timeline holds six cities is the exact failure the user reported, and
+        // it must be loud rather than silent.
+        //
+        // Counts only — never a place name, a date, a coordinate or the trip's
+        // title.
+        if (!resolved.IsDestinationOnly && route.IsDestinationOnly)
+        {
+            _logger.LogError(
+                "[GLUNO] route collapsed to destination despite {MainLocations} stored locations",
+                resolved.MainLocationCount);
+        }
+
         _logger.LogInformation(
-            "[GLUNO] route resolved stops={Stops} extra={Extra} legs={Legs} unplaced={Unplaced}",
+            "[GLUNO] route resolved rows={Rows} main={Main} extra={Extra} "
+            + "stops={Stops} legs={Legs} unplaced={Unplaced} destinationOnly={DestinationOnly}",
+            resolved.DayLocations.Count,
+            resolved.MainLocationCount,
+            resolved.ExtraStopCount,
             route.Stops.Count(stop => stop.IsMainStop),
-            route.Stops.Count(stop => !stop.IsMainStop),
             route.Legs.Count,
-            route.DaysWithoutLocation.Count);
+            route.DaysWithoutLocation.Count,
+            route.IsDestinationOnly);
 
         return route;
     }
@@ -504,13 +525,14 @@ public sealed class GlunoContextBuilder : IGlunoContextBuilder
         // and nothing else: the Feed showed Málaga across three days because it
         // runs this resolver, and Gluno saw one row on one day and could not
         // say where the trip went.
-        var dayLocationEntities = await _db.TripDayLocations
-            .AsNoTracking()
-            .Where(d => d.TripId == tripId)
-            .OrderBy(d => d.StartDate)
-            .ThenBy(d => d.SortIndex)
-            .Take(GlunoContextLimits.MaxDayLocations + 1)
-            .ToListAsync(ct);
+        // The SAME shared loader again, not a third query. This one was a
+        // second set of rows for the same question inside Gluno itself — it
+        // capped at MaxDayLocations while the route did not, so a long trip
+        // could describe itself two different ways in one answer.
+        var timeline = await _timeline.BuildAsync(tripId, endOverride: null, ct);
+
+        var dayLocationEntities = timeline?.DayLocations
+            ?? (IReadOnlyList<Models.TripDayLocation>)Array.Empty<Models.TripDayLocation>();
 
         var dayLocationRows = dayLocationEntities
             .Select(d => new GlunoDayLocationContext

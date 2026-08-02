@@ -24,6 +24,18 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
     <PackageReference Include="xunit" Version="2.*" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.*" />
+    <!--
+      TEST-ONLY, and the exception to "never touches a database" above.
+
+      One class of bug cannot be caught any other way: two features that call
+      the same pure function with DIFFERENT rows. Weather and Gluno both invoke
+      ResolveTimeline, and a test that hands each a hand-built list proves only
+      that the function is deterministic — which was never in doubt. Proving
+      they AGREE needs both production loaders reading one database.
+
+      In-memory, per-test, never a real connection string.
+    -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" Version="9.*" />
   </ItemGroup>
 
   <ItemGroup>
