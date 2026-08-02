@@ -200,6 +200,11 @@ public class TurnBoundaryEvals
             sidequest.backend.Models.GlunoClarificationOption option, CancellationToken ct)
             => throw new NotSupportedException();
 
+        public Task<GlunoTurnResult> RefreshPlaceSuggestionsAsync(
+            Guid userId, sidequest.backend.Models.GlunoMessage message,
+            string? idempotencyKey, CancellationToken ct)
+            => throw new NotSupportedException();
+
         public Task<GlunoTurnResult> AddRecommendedPlaceAsync(
             Guid userId, sidequest.backend.Models.GlunoMessage message, string optionKey,
             DateOnly? date, string? idempotencyKey, CancellationToken ct)

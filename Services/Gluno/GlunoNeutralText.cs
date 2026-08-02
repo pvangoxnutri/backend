@@ -34,6 +34,28 @@ public static class GlunoNeutralText
         ? "Jag tog fram några platsförslag för er resa."
         : "I put together a few place suggestions for your trip.";
 
+    /// <summary>
+    /// The heading over a freshly fetched shortlist.
+    ///
+    /// LIVE ONLY when the provider's content may not be stored — the history
+    /// gets <see cref="PlaceAnswer"/> instead. The destination is safe in both:
+    /// it is SideQuest's own resolved geography, out of the user's Adventure,
+    /// and never a provider's name for anything.
+    /// </summary>
+    public static string NewSuggestions(string? destination, string? language)
+    {
+        var swedish = Swedish(language);
+
+        if (string.IsNullOrWhiteSpace(destination))
+        {
+            return swedish ? "Här är nya förslag:" : "Here are some new suggestions:";
+        }
+
+        return swedish
+            ? $"Här är nya förslag i {destination}:"
+            : $"Here are some new suggestions in {destination}:";
+    }
+
     /// The stand-in for a place's name inside a sentence.
     public static string ThePlace(string? language) => Swedish(language) ? "platsen" : "the place";
 

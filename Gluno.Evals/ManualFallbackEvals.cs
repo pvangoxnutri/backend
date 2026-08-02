@@ -166,15 +166,15 @@ public class ManualFallbackEvals
 
         var start = chat.IndexOf(
             "private async Task<GlunoTurnResult?> AddNamedPlaceAsync", StringComparison.Ordinal);
-        var body = chat[start..(start + 2600)];
+        var body = chat[start..(start + 4200)];
 
         // A name and an ordinal are the same lookup against the same shortlist,
         // and both end at the option key rather than at a described place.
-        Assert.Contains("GlunoPlaceOptions.Match(places, text)", body);
-        Assert.Contains("GlunoPlaceOptions.KeyFor(matches[0])", body);
+        Assert.Contains("GlunoPlaceOptions.Match(places, text, allowOrdinals: complete)", body);
+        Assert.Contains("keys[matches[0]]", body);
         // After a reload the names are gone, so the list is fetched again from
         // the ids that were kept.
-        Assert.Contains("RefetchShownPlacesAsync(message, userId, ct)", body);
+        Assert.Contains("RefetchShownPlacesAsync(message, ct)", body);
     }
 
     [Fact]
@@ -190,7 +190,7 @@ public class ManualFallbackEvals
         // Every row is something this conversation actually offered, and
         // tapping one goes straight to the add flow.
         Assert.Contains("AskWhichPlaceAsync(conversation, userId, text, places, ct)", body);
-        Assert.Contains("RefetchShownPlacesAsync(message, userId, ct)", body);
+        Assert.Contains("RefetchShownPlacesAsync(message, ct)", body);
     }
 
     [Fact]
@@ -211,14 +211,17 @@ public class ManualFallbackEvals
     {
         var chat = Source("Services", "Gluno", "GlunoChatService.cs");
 
-        foreach (var line in new[]
+        foreach (var status in new[]
         {
-            "Jag kunde inte hämta platsen igen. Be Gluno ta fram nya förslag.",
-            "Jag kunde inte hämta platsen just nu. Försök igen om en liten stund.",
+            GlunoRehydrationStatus.NotFound, GlunoRehydrationStatus.Busy,
+            GlunoRehydrationStatus.Unavailable,
         })
         {
-            Assert.Contains(line, chat);
-            Assert.False(GlunoManualFallback.Mentions(line), line);
+            foreach (var language in new[] { "sv", "en" })
+            {
+                var line = GlunoPlaceFailureText.For(status, language);
+                Assert.False(GlunoManualFallback.Mentions(line), line);
+            }
         }
     }
 
@@ -233,7 +236,8 @@ public class ManualFallbackEvals
         // The card hands back the message id and the place; the screen turns
         // that into the add call. Never the composer.
         Assert.Contains("await onAddPlace(message.id, place);", row);
-        Assert.Contains("addGlunoRecommendedPlace(messageId, place.optionKey, {", screen);
+        Assert.Contains("runAddPlace(messageId, place.optionKey)", screen);
+        Assert.Contains("addGlunoRecommendedPlace(messageId, optionKey, {", screen);
     }
 
     [Fact]
@@ -262,7 +266,7 @@ public class ManualFallbackEvals
         Assert.Contains("/places/${encodeURIComponent(optionKey)}/add", client);
         Assert.Contains("idempotencyKey: options?.idempotencyKey ?? null,", client);
         // Stable per card, so a double tap cannot add twice.
-        Assert.Contains("idempotencyKey: `place-${messageId}-${place.optionKey}`", screen);
+        Assert.Contains("`place-${messageId}-${optionKey}`", screen);
         // And nothing about the place itself travels.
         Assert.DoesNotContain("name: place.name", screen);
         Assert.DoesNotContain("latitude", client[client.IndexOf(

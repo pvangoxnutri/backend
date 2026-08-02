@@ -109,7 +109,8 @@ public class PersistencePolicyEvals
         // Send, resolve-clarification and add all return a turn. Missing one
         // would make places vanish on that path only, which is the hardest kind
         // of bug to notice.
-        Assert.Equal(3, controller.Split("livePlaces: result.Places").Length - 1);
+// Send, resolve-clarification, add and refresh all return a turn.
+        Assert.Equal(4, controller.Split("livePlaces: result.Places").Length - 1);
     }
 
     // ── 2-8. What the payload may hold ───────────────────────────────────
@@ -455,8 +456,12 @@ public class PersistencePolicyEvals
     {
         var chat = Source("Services", "Gluno", "GlunoChatService.cs");
 
-        Assert.Contains("Jag kunde inte hämta platsen igen. Be Gluno ta fram nya förslag.", chat);
-        Assert.Contains("I couldn't fetch that place again.", chat);
+        // Fixed strings, now in one place — see GlunoPlaceFailureText.
+        Assert.Equal(
+            "Jag kunde inte hämta platsen igen. Ta fram nya förslag.",
+            GlunoPlaceFailureText.For(GlunoRehydrationStatus.NotFound, "sv"));
+        Assert.Contains("couldn't fetch that place again",
+            GlunoPlaceFailureText.For(GlunoRehydrationStatus.NotFound, "en"));
     }
 
     [Fact]
@@ -464,13 +469,21 @@ public class PersistencePolicyEvals
     {
         var chat = Source("Services", "Gluno", "GlunoChatService.cs");
 
-        var start = chat.IndexOf("private static string RehydrationFailureText", StringComparison.Ordinal);
-        var body = chat[start..(start + 1200)];
-
-        Assert.True(start > 0);
-        foreach (var word in new[] { "Terra", "Tripadvisor", "licen", "persist", "rate limit", "429", "API" })
+        foreach (var status in new[]
         {
-            Assert.DoesNotContain(word, body, StringComparison.OrdinalIgnoreCase);
+            GlunoRehydrationStatus.NotFound, GlunoRehydrationStatus.Busy,
+            GlunoRehydrationStatus.Unavailable,
+        })
+        {
+            foreach (var language in new[] { "sv", "en" })
+            {
+                var text = GlunoPlaceFailureText.For(status, language);
+
+                foreach (var word in new[] { "Terra", "Tripadvisor", "licen", "persist", "rate limit", "429", "API" })
+                {
+                    Assert.DoesNotContain(word, text, StringComparison.OrdinalIgnoreCase);
+                }
+            }
         }
     }
 
@@ -481,8 +494,12 @@ public class PersistencePolicyEvals
 
         // "Over the rate limit" and "that place is gone" are the same empty
         // result and must not become the same sentence.
-        Assert.Contains("Försök igen om en liten stund.", chat);
-        Assert.Contains("status == GlunoRehydrationStatus.Busy", chat);
+Assert.Equal(
+            "Jag kunde inte hämta platsen just nu. Försök igen om en liten stund.",
+            GlunoPlaceFailureText.For(GlunoRehydrationStatus.Busy, "sv"));
+        Assert.NotEqual(
+            GlunoPlaceFailureText.For(GlunoRehydrationStatus.Busy, "sv"),
+            GlunoPlaceFailureText.For(GlunoRehydrationStatus.NotFound, "sv"));
     }
 
     [Fact]
@@ -852,13 +869,15 @@ public class PersistencePolicyEvals
         var chat = Source("Services", "Gluno", "GlunoChatService.cs");
 
         var start = chat.IndexOf("private async Task<GlunoTurnResult?> AddNamedPlaceAsync", StringComparison.Ordinal);
-        var body = chat[start..(start + 2600)];
+        var body = chat[start..(start + 4200)];
 
         Assert.True(start > 0);
         // "Add the first one" and "add Real Alcázar" both end at the option key
         // and the same verified add, never at a place the sentence described.
-        Assert.Contains("GlunoPlaceOptions.KeyFor(matches[0])", body);
-        Assert.Contains("RefetchShownPlacesAsync(message, userId, ct)", body);
+        // The key comes from the REFERENCE, not the position — a re-fetched
+        // list can be short, and a positional key would point elsewhere.
+        Assert.Contains("keys[matches[0]]", body);
+        Assert.Contains("RefetchShownPlacesAsync(message, ct)", body);
     }
 
     [Fact]
@@ -867,16 +886,17 @@ public class PersistencePolicyEvals
         var chat = Source("Services", "Gluno", "GlunoChatService.cs");
 
         var start = chat.IndexOf(
-            "private async Task<List<GlunoPlaceCard>?> RefetchShownPlacesAsync", StringComparison.Ordinal);
-        var body = chat[start..(start + 1400)];
+            "private async Task<RefetchedPlaces> RefetchShownPlacesAsync", StringComparison.Ordinal);
+        var body = chat[start..(start + 1800)];
 
         Assert.True(start > 0);
         // Built by walking the stored references, not the provider's ordering
         // today — "the second one" means the second card the user saw.
         Assert.Contains("foreach (var reference in references)", body);
-        // All or nothing: if one of six did not come back, every position after
-        // it shifts and "the fourth" resolves to the fifth.
-        Assert.Contains("if (!rehydrated.Places.TryGetValue(reference.OptionKey, out var place)) return null;", body);
+        // A short list keeps its real keys, and ORDINALS are gated on
+        // completeness rather than the whole list being thrown away.
+        Assert.Contains("keys.Add(reference.OptionKey);", body);
+        Assert.Contains("places.Count == references.Count", body);
     }
 
     [Fact]

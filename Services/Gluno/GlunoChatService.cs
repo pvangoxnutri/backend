@@ -119,6 +119,15 @@ public sealed class GlunoTurnResult
     public string? LiveAssistantText { get; init; }
 
     /// <summary>
+    /// Something the app may offer to do again — see <see cref="GlunoTurnAction"/>.
+    ///
+    /// Live only. It describes work the server can redo from ids it already
+    /// owns, so it belongs to this response and not to the history: a button
+    /// offered after a reload would be a button whose failure nobody remembers.
+    /// </summary>
+    public GlunoTurnAction? Action { get; init; }
+
+    /// <summary>
     /// A stable code from <see cref="GlunoFailureCodes"/> when something went
     /// wrong. The app localises it — a raw provider or SDK message never
     /// crosses this boundary.
@@ -220,6 +229,15 @@ public interface IGlunoChatService
         Guid userId, GlunoMessage message, string optionKey,
         DateOnly? date, string? idempotencyKey, CancellationToken ct);
 
+    /// <summary>
+    /// Runs a turn's recommendation search again, deterministically.
+    ///
+    /// No model: this repeats the SEARCH, not the reasoning. Everything comes
+    /// from the stored search context — see the implementation.
+    /// </summary>
+    Task<GlunoTurnResult> RefreshPlaceSuggestionsAsync(
+        Guid userId, GlunoMessage message, string? idempotencyKey, CancellationToken ct);
+
     Task<GlunoTurnResult> SendAsync(
         Guid userId, Guid? conversationId, Guid? tripId, string message, string? screen,
         string? idempotencyKey, CancellationToken ct);
@@ -272,6 +290,9 @@ public sealed class GlunoChatService : IGlunoChatService
     private readonly IGlunoClarificationService _clarifications;
     private readonly IGlunoProposalDraftService _drafts;
     private readonly IGlunoPlaceRehydrator _rehydrator;
+    /// Used only by the deterministic refresh below — an ordinary turn reaches
+    /// the providers through the action executor.
+    private readonly ITravelDataRegistry _travelData;
     private readonly ILogger<GlunoChatService> _logger;
 
     /// <summary>
@@ -301,9 +322,11 @@ public sealed class GlunoChatService : IGlunoChatService
         IGlunoClarificationService clarifications,
         IGlunoProposalDraftService drafts,
         IGlunoPlaceRehydrator rehydrator,
+        ITravelDataRegistry travelData,
         ILogger<GlunoChatService> logger)
     {
         _rehydrator = rehydrator;
+        _travelData = travelData;
         _grounding = grounding;
         _planner = planner;
         _usage = usage;
@@ -1793,21 +1816,53 @@ public sealed class GlunoChatService : IGlunoChatService
             // list in the order the user was shown it.
             var places = ReadPlaces(message);
 
+            // The key each entry was shown under. For stored cards that is the
+            // position; for a re-fetched list it is NOT, because the list can
+            // come back short — and a positional key from a short list points
+            // at a different place than the one the user named.
+            IReadOnlyList<string> keys = places
+                .Select((_, index) => GlunoPlaceOptions.KeyFor(index))
+                .ToList();
+
+            var complete = true;
+
             if (places.Count == 0)
             {
-                var refetched = await RefetchShownPlacesAsync(message, userId, ct);
-                if (refetched == null) continue;
+                var refetched = await RefetchShownPlacesAsync(message, ct);
 
-                places = refetched;
+                // ── The production failure ────────────────────────────────
+                //
+                // This used to be `if (refetched == null) continue;`, so a
+                // provider that could not be reached was indistinguishable from
+                // a turn that showed nothing. The loop kept looking, ran out of
+                // messages, returned null, and the add request fell through to
+                // the model — which replied by asking the user to type "lägg
+                // till Casas de Pilatos" again.
+                //
+                // A failed lookup is an ANSWER, and it is this method's to give.
+                if (refetched.Status != GlunoRehydrationStatus.Ok)
+                {
+                    return await PlaceLookupFailedAsync(
+                        conversation, userId, message, refetched.Status, ct);
+                }
+
+                if (refetched.Places.Count == 0) continue;
+
+                places = refetched.Places;
+                keys = refetched.OptionKeys;
+                complete = refetched.Complete;
             }
 
-            var matches = GlunoPlaceOptions.Match(places, text);
+            // Ordinals need every card present — "the fourth one" means the
+            // fourth CARD, and a short list would renumber them. A name does
+            // not care where the place sits.
+            var matches = GlunoPlaceOptions.Match(places, text, allowOrdinals: complete);
 
             // Exactly one: deterministic, no model, straight to the add flow.
             if (matches.Count == 1)
             {
                 return await AddRecommendedPlaceAsync(
-                    userId, message, GlunoPlaceOptions.KeyFor(matches[0]), null, null, ct);
+                    userId, message, keys[matches[0]], null, null, ct);
             }
 
             // Several fit. A real question — adding the wrong one puts
@@ -1828,6 +1883,36 @@ public sealed class GlunoChatService : IGlunoChatService
     }
 
     /// <summary>
+    /// The answer when a place could not be fetched again.
+    ///
+    /// FIXED, LOCALISED SENTENCES — never the model's. The production failure
+    /// was a model-written apology, complete with spelling mistakes, telling
+    /// the user to retype the exact command they had just sent. What they get
+    /// now is one short line and a button that resumes the same add.
+    ///
+    /// Three outcomes, because they need three different things from the user:
+    /// wait a moment, try again, or ask for fresh suggestions.
+    /// </summary>
+    private async Task<GlunoTurnResult> PlaceLookupFailedAsync(
+        GlunoConversation conversation,
+        Guid userId,
+        GlunoMessage source,
+        GlunoRehydrationStatus status,
+        CancellationToken ct)
+    {
+        var language = await LanguageOfAsync(userId, ct);
+
+        var text = GlunoPlaceFailureText.For(status, language);
+        var action = GlunoTurnAction.For(status, source.Id, optionKey: null);
+
+        _logger.LogInformation(
+            "[GLUNO] place add lookup failed status={Status} action={Action}",
+            status, action?.Type ?? "none");
+
+        return await PlaceAddStoppedAsync(conversation, text, ct, action);
+    }
+
+    /// <summary>
     /// The list a turn showed, fetched again from the ids it kept.
     ///
     /// FOR RESOLVING WHICH ONE THE USER MEANT, and nothing else. "Add the first
@@ -1844,28 +1929,69 @@ public sealed class GlunoChatService : IGlunoChatService
     /// positions after it shift, and "the fourth one" would resolve to the
     /// fifth card. Null rather than a shorter list.
     /// </summary>
-    private async Task<List<GlunoPlaceCard>?> RefetchShownPlacesAsync(
-        GlunoMessage message, Guid userId, CancellationToken ct)
+    /// <summary>
+    /// What a re-fetch produced, with the two things the caller has to know
+    /// apart.
+    ///
+    /// WHY THIS IS NOT JUST A LIST. It used to be, and returning null for every
+    /// unhappy ending is what caused the production failure: a provider that
+    /// could not be reached and a shortlist that genuinely held nothing were the
+    /// same answer, so the caller kept looking, ran out of turns, and handed an
+    /// add request to the model — which replied by asking the user to type the
+    /// place name again.
+    /// </summary>
+    private sealed record RefetchedPlaces(
+        GlunoRehydrationStatus Status,
+        IReadOnlyList<GlunoPlaceCard> Places,
+        /// The option key each entry was shown under. NOT its index here — the
+        /// list can be short, and a positional key from a short list points at
+        /// the wrong card.
+        IReadOnlyList<string> OptionKeys,
+        /// Whether every reference came back. Ordinals need this; a name does
+        /// not.
+        bool Complete)
+    {
+        public static readonly RefetchedPlaces Nothing = new(
+            GlunoRehydrationStatus.NotFound, [], [], false);
+    }
+
+    private async Task<RefetchedPlaces> RefetchShownPlacesAsync(
+        GlunoMessage message, CancellationToken ct)
     {
         var references = GlunoPlaceOptions.References(message);
         var search = GlunoPlaceOptions.SearchContext(message);
 
-        if (references.Count == 0 || search == null) return null;
+        if (references.Count == 0 || search == null) return RefetchedPlaces.Nothing;
 
         var rehydrated = await _rehydrator.RehydrateAsync(references, search, null, ct);
 
-        if (rehydrated.Status != GlunoRehydrationStatus.Ok) return null;
+        if (rehydrated.Status != GlunoRehydrationStatus.Ok)
+        {
+            return new RefetchedPlaces(rehydrated.Status, [], [], false);
+        }
 
-        var ordered = new List<GlunoPlaceCard>(references.Count);
+        // ── Whatever came back, in the order it was shown ─────────────────
+        //
+        // PARTIAL IS USEFUL, which is the fix. Terra re-ranks between calls, so
+        // one of six sliding out of the results is ordinary — and discarding
+        // the whole list because of it threw away the place the user had just
+        // named. A name identifies a place regardless of where it sits.
+        //
+        // Positions are a different matter: "the fourth one" means the fourth
+        // CARD, so `Complete` gates that separately below.
+        var places = new List<GlunoPlaceCard>(references.Count);
+        var keys = new List<string>(references.Count);
 
         foreach (var reference in references)
         {
-            if (!rehydrated.Places.TryGetValue(reference.OptionKey, out var place)) return null;
+            if (!rehydrated.Places.TryGetValue(reference.OptionKey, out var place)) continue;
 
-            ordered.Add(GlunoPlaceCards.From(place));
+            places.Add(GlunoPlaceCards.From(place));
+            keys.Add(reference.OptionKey);
         }
 
-        return ordered;
+        return new RefetchedPlaces(
+            rehydrated.Status, places, keys, places.Count == references.Count);
     }
 
     /// <summary>
@@ -1917,10 +2043,19 @@ public sealed class GlunoChatService : IGlunoChatService
 
             if (places.Count == 0)
             {
-                var refetched = await RefetchShownPlacesAsync(message, userId, ct);
-                if (refetched == null) continue;
+                var refetched = await RefetchShownPlacesAsync(message, ct);
 
-                places = refetched;
+                // Same rule as the named path: a lookup that failed is an
+                // answer, not a reason to keep searching older turns.
+                if (refetched.Status != GlunoRehydrationStatus.Ok)
+                {
+                    return await PlaceLookupFailedAsync(
+                        conversation, userId, message, refetched.Status, ct);
+                }
+
+                if (refetched.Places.Count == 0) continue;
+
+                places = refetched.Places;
             }
 
             // Verified options: every row is something this conversation
@@ -2137,7 +2272,7 @@ public sealed class GlunoChatService : IGlunoChatService
         }
 
         var result = await AddPlaceFromKeyAsync(
-            userId, conversation, message, optionKey, date, ct);
+            userId, conversation, message, optionKey, date, idempotencyKey, ct);
 
         if (claim.Existing != null && result.AssistantMessage != null)
         {
@@ -2147,12 +2282,207 @@ public sealed class GlunoChatService : IGlunoChatService
         return result;
     }
 
+    /// <summary>
+    /// Runs the same recommendation search again and offers what it finds now.
+    ///
+    /// WHEN THIS IS THE RIGHT ANSWER. A place the user tried to add is no
+    /// longer in the provider's results. Retrying that lookup would fail the
+    /// same way every time; the only thing that helps is a current shortlist.
+    ///
+    /// NO MODEL. The question was answered once already — this repeats the
+    /// SEARCH, not the reasoning, so the heading is written here and the cards
+    /// come straight from the provider. A model round would cost seconds to
+    /// re-derive a sentence SideQuest can write itself, and could describe
+    /// places it had not seen.
+    ///
+    /// EVERYTHING COMES FROM THE STORED CONTEXT: the destination the user's own
+    /// Adventure resolved, SideQuest's category, its sanitised search words,
+    /// the language and the limit. The client sends a message id and nothing
+    /// else — it cannot widen the search, move it, or aim it at another place.
+    /// </summary>
+    public async Task<GlunoTurnResult> RefreshPlaceSuggestionsAsync(
+        Guid userId, GlunoMessage message, string? idempotencyKey, CancellationToken ct)
+    {
+        var conversation = await _conversations.GetOwnedAsync(message.ConversationId, userId, ct);
+        if (conversation == null)
+            return new GlunoTurnResult { Error = GlunoTurnError.ConversationNotFound };
+
+        // The search SideQuest ran the first time. Without it there is nothing
+        // to repeat — and nothing to guess at, because guessing a destination
+        // would search somewhere the user never asked about.
+        var search = GlunoPlaceOptions.SearchContext(message);
+
+        if (search is not { IsUsable: true })
+            return new GlunoTurnResult { Error = GlunoTurnError.PlaceNotRetained };
+
+        var claim = await _idempotency.ClaimAsync(idempotencyKey, userId, conversation.Id, ct);
+
+        if (claim.Outcome == GlunoIdempotencyOutcome.AlreadyInFlight)
+        {
+            // One press, one upstream call. A second press while the first is
+            // running must not spend another.
+            return new GlunoTurnResult { Error = GlunoTurnError.DuplicateInFlight };
+        }
+
+        if (claim.Outcome == GlunoIdempotencyOutcome.AlreadyCompleted
+            && claim.Existing?.AssistantMessageId is { } completedId)
+        {
+            var replayed = await _db.GlunoMessages
+                .AsNoTracking()
+                .FirstOrDefaultAsync(stored => stored.Id == completedId, ct);
+
+            // The first press's answer, not a second list. Two shortlists for
+            // one tap is worse than a slow one.
+            if (replayed != null)
+            {
+                return new GlunoTurnResult
+                {
+                    Conversation = conversation,
+                    UserMessage = replayed,
+                    AssistantMessage = replayed,
+                };
+            }
+        }
+
+        var language = await LanguageOfAsync(userId, ct);
+
+        var result = await _travelData.SearchAllAsync(
+            new TravelPlaceQuery
+            {
+                // Replayed from the stored context, exactly as the rehydrator
+                // does — the same fields the original search used.
+                Query = search.Query ?? string.Empty,
+                Near = search.Near,
+                Category = TravelPlaceCategories.Parse(search.Category),
+                Limit = search.Limit,
+                Language = search.Language,
+            },
+            ct);
+
+        if (result.Status is TravelSearchStatus.RateLimited or TravelSearchStatus.Failed)
+        {
+            var busy = result.Status == TravelSearchStatus.RateLimited;
+
+            _logger.LogInformation(
+                "[GLUNO] place refresh failed status={Status} category={Category}",
+                result.Status, search.Category);
+
+            return await PlaceAddStoppedAsync(
+                conversation,
+                GlunoPlaceFailureText.ForRefresh(busy, empty: false, language),
+                ct,
+                // Worth another press only when the provider was busy. A
+                // rejected key fails identically every time, and a button that
+                // cannot work invites a loop.
+                busy
+                    ? new GlunoTurnAction
+                    {
+                        Type = GlunoTurnActionTypes.ShowNewPlaceSuggestions,
+                        MessageId = message.Id,
+                    }
+                    : null);
+        }
+
+        // SideQuest's own ranking, then the same per-turn cap the chat uses.
+        var telemetry = new GlunoTurnTelemetry { ConversationId = conversation.Id };
+
+        var places = TravelPlaceRanker.Rank(result.Places, new TravelPlaceQuery
+            {
+                Query = search.Query ?? string.Empty,
+                Near = search.Near,
+                Category = TravelPlaceCategories.Parse(search.Category),
+                Limit = search.Limit,
+                Language = search.Language,
+            })
+            .Take(MaxPlaceCardsPerTurn)
+            .Select(ranked =>
+            {
+                var card = GlunoPlaceCards.From(ranked.Place, ranked.Signals);
+
+                // A place name is data; it does not get to issue instructions.
+                return SanitizePlace(card, telemetry);
+            })
+            .ToList();
+
+        if (places.Count == 0)
+        {
+            // An empty answer is an answer. Inventing one is the one thing
+            // this must never do.
+            _logger.LogInformation(
+                "[GLUNO] place refresh empty category={Category}", search.Category);
+
+            return await PlaceAddStoppedAsync(
+                conversation,
+                GlunoPlaceFailureText.ForRefresh(busy: false, empty: true, language),
+                ct);
+        }
+
+        // ── The same persistence rule as any other turn ───────────────────
+        //
+        // New cards, new keys — the OLD message keeps its own references
+        // untouched, so a stale key cannot resolve against this list.
+        var retention = GlunoPlaceRetention.Decide(places, new GlunoPlaceSearchContext
+        {
+            Near = search.Near,
+            Category = search.Category,
+            Query = search.Query,
+            Language = search.Language,
+            Limit = search.Limit,
+            OriginSource = search.OriginSource,
+            SearchedAtUtc = DateTime.UtcNow,
+        });
+
+        var liveText = GlunoNeutralText.NewSuggestions(search.Near, language);
+
+        var assistantMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.Assistant,
+            // Neutral when the content may not be kept — same rule, same
+            // reason, and the destination is SideQuest's own either way.
+            Text = retention.Reduced
+                ? GlunoNeutralText.PlaceAnswer(language)
+                : liveText,
+            PayloadJson = retention.Places.Count > 0 || retention.References.Count > 0
+                ? JsonSerializer.Serialize(
+                    new GlunoAssistantPayload
+                    {
+                        Places = retention.Places.ToList(),
+                        PlaceRefs = retention.References.ToList(),
+                        PlaceSearch = retention.Search,
+                    },
+                    GlunoJson.Options)
+                : null,
+        }, ct);
+
+        if (claim.Existing != null)
+        {
+            await _idempotency.CompleteAsync(claim.Existing.Id, assistantMessage.Id, ct);
+        }
+
+        _logger.LogInformation(
+            "[GLUNO] place refresh done category={Category} shown={Shown} stored={Stored}",
+            search.Category, places.Count, retention.Places.Count);
+
+        return new GlunoTurnResult
+        {
+            Conversation = conversation,
+            UserMessage = assistantMessage,
+            AssistantMessage = assistantMessage,
+            Places = places,
+            LiveAssistantText = retention.Reduced ? liveText : null,
+        };
+    }
+
     private async Task<GlunoTurnResult> AddPlaceFromKeyAsync(
         Guid userId,
         GlunoConversation conversation,
         GlunoMessage message,
         string optionKey,
         DateOnly? date,
+        /// Carried so a failure can hand back an action that reuses it — a
+        /// retry on a new key could produce a second proposal.
+        string? idempotencyKey,
         CancellationToken ct)
     {
         var stored = GlunoPlaceOptions.Resolve(message, optionKey);
@@ -2181,8 +2511,19 @@ public sealed class GlunoChatService : IGlunoChatService
         if (rehydrated.Status != GlunoRehydrationStatus.Ok
             || !rehydrated.Places.TryGetValue(optionKey, out var fresh))
         {
+            // The button's own failure. Everything needed to press it again is
+            // already known here — which message, which card, which day the
+            // user had reached — so the answer carries a real action rather
+            // than a sentence asking them to start over.
+            var status = rehydrated.Status == GlunoRehydrationStatus.Ok
+                ? GlunoRehydrationStatus.NotFound
+                : rehydrated.Status;
+
             return await PlaceAddStoppedAsync(
-                conversation, RehydrationFailureText(rehydrated.Status, language), ct);
+                conversation,
+                GlunoPlaceFailureText.For(status, language),
+                ct,
+                GlunoTurnAction.For(status, message.Id, optionKey, date, idempotencyKey));
         }
 
         // Belt and braces. The rehydrator already matched on the exact id, and
@@ -2192,31 +2533,14 @@ public sealed class GlunoChatService : IGlunoChatService
             || !string.Equals(fresh.Provider, reference.ProviderId, StringComparison.Ordinal))
         {
             return await PlaceAddStoppedAsync(
-                conversation, RehydrationFailureText(GlunoRehydrationStatus.NotFound, language), ct);
+                conversation,
+                GlunoPlaceFailureText.For(GlunoRehydrationStatus.NotFound, language),
+                ct,
+                GlunoTurnAction.For(GlunoRehydrationStatus.NotFound, message.Id, optionKey));
         }
 
         return await AddResolvedPlaceAsync(
             userId, conversation, GlunoPlaceCards.From(fresh), message.Id, optionKey, date, ct);
-    }
-
-    /// <summary>
-    /// What to say when the place could not be fetched again.
-    ///
-    /// Short, and about the place rather than about the machinery. No provider,
-    /// no licence, no persistence, no rate limit — none of that is the user's
-    /// to think about, and the useful half of the sentence is what to do next.
-    /// </summary>
-    private static string RehydrationFailureText(GlunoRehydrationStatus status, string language)
-    {
-        var swedish = string.Equals(language, "sv", StringComparison.OrdinalIgnoreCase);
-
-        return status == GlunoRehydrationStatus.Busy
-            ? swedish
-                ? "Jag kunde inte hämta platsen just nu. Försök igen om en liten stund."
-                : "I couldn't fetch that place just now. Try again in a moment."
-            : swedish
-                ? "Jag kunde inte hämta platsen igen. Be Gluno ta fram nya förslag."
-                : "I couldn't fetch that place again. Ask Gluno for fresh suggestions.";
     }
 
     private async Task<string> LanguageOfAsync(Guid userId, CancellationToken ct)
@@ -2608,7 +2932,8 @@ public sealed class GlunoChatService : IGlunoChatService
 
     /// One short line, no card, no proposal.
     private async Task<GlunoTurnResult> PlaceAddStoppedAsync(
-        GlunoConversation conversation, string text, CancellationToken ct)
+        GlunoConversation conversation, string text, CancellationToken ct,
+        GlunoTurnAction? action = null)
     {
         var assistantMessage = await _conversations.AppendAsync(new GlunoMessage
         {
@@ -2622,6 +2947,10 @@ public sealed class GlunoChatService : IGlunoChatService
             Conversation = conversation,
             UserMessage = assistantMessage,
             AssistantMessage = assistantMessage,
+            // Not persisted: it is rebuilt from ids the server already owns, so
+            // a reload simply does not offer it rather than offering a button
+            // whose context has gone.
+            Action = action,
         };
     }
 

@@ -54,7 +54,7 @@ public static class GlunoPlaceCards
     /// anything, and claiming otherwise would put SideQuest's reasons on a
     /// result that never went through them.
     /// </summary>
-    public static GlunoPlaceCard From(TravelPlace place) => new()
+    public static GlunoPlaceCard From(TravelPlace place, IReadOnlyList<string>? signals = null) => new()
     {
         Provider = place.Provider,
         ExternalId = place.ExternalId,
@@ -75,6 +75,7 @@ public static class GlunoPlaceCards
         OpeningHours = place.OpeningHours,
         ReviewSummary = place.ReviewSummary,
         AllowsContentPersistence = place.AllowsContentPersistence,
+        Signals = signals ?? Array.Empty<string>(),
         AllowsIdentityPersistence = place.AllowsIdentityPersistence,
     };
 

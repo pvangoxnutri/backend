@@ -159,7 +159,16 @@ public static class GlunoPlaceOptions
     /// A model may never supply the answer here; it has no way to produce a
     /// provider reference at all.
     /// </summary>
-    public static IReadOnlyList<int> Match(IReadOnlyList<GlunoPlaceCard> places, string message)
+    /// <param name="allowOrdinals">
+    /// False when the list is known to be incomplete.
+    ///
+    /// "The fourth one" means the fourth CARD the user saw. A re-fetched list
+    /// can come back short — a provider re-ranks between calls — and counting
+    /// positions in a short list silently renumbers everything after the gap.
+    /// A NAME is unaffected, which is why only ordinals are gated.
+    /// </param>
+    public static IReadOnlyList<int> Match(
+        IReadOnlyList<GlunoPlaceCard> places, string message, bool allowOrdinals = true)
     {
         if (places.Count == 0) return Array.Empty<int>();
 
@@ -180,7 +189,10 @@ public static class GlunoPlaceOptions
 
         // ── By position ───────────────────────────────────────────────────
         //
-        // "the first one", "den andra". Counted as people count, from one.
+        // "the first one", "den andra". Counted as people count, from one, and
+        // only against a list that still has every card in it.
+        if (!allowOrdinals) return Array.Empty<int>();
+
         for (var ordinal = 0; ordinal < Ordinals.Length; ordinal++)
         {
             if (!Ordinals[ordinal].Any(word => ContainsWord(text, word))) continue;

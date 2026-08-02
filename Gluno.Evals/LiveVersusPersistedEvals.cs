@@ -41,7 +41,7 @@ public class LiveVersusPersistedEvals
         // The turn carries both, and the response prefers the live one.
         Assert.Contains("LiveAssistantText = ReferenceEquals(persistedText, assistantText) ? null : assistantText,", chat);
         Assert.Contains("Text = liveText ?? m.Text,", controller);
-        Assert.Equal(3, controller.Split("liveText: result.LiveAssistantText").Length - 1);
+Assert.Equal(4, controller.Split("liveText: result.LiveAssistantText").Length - 1);
     }
 
     [Fact]
@@ -522,12 +522,16 @@ public class LiveVersusPersistedEvals
         var chat = Chat();
         var apply = Source("Services", "Gluno", "GlunoProposalApplyService.cs");
 
-        Assert.Contains("Jag kunde inte hämta platsen just nu. Försök igen om en liten stund.", chat);
-        Assert.Contains("Try again in a moment.", chat);
+        // Fixed strings, now in one place — see GlunoPlaceFailureText.
+        Assert.Equal(
+            "Jag kunde inte hämta platsen just nu. Försök igen om en liten stund.",
+            GlunoPlaceFailureText.For(GlunoRehydrationStatus.Busy, "sv"));
+        Assert.Contains("Try again in a moment.", GlunoPlaceFailureText.For(GlunoRehydrationStatus.Busy, "en"));
         Assert.Contains("Try saving again in a moment.", apply);
 
         // No proposal on that path, and no Activity.
-        var start = chat.IndexOf("private static string RehydrationFailureText", StringComparison.Ordinal);
+        var start = chat.IndexOf(
+            "private async Task<GlunoTurnResult> PlaceLookupFailedAsync", StringComparison.Ordinal);
         Assert.DoesNotContain("CreateProposalsAsync", chat[start..(start + 900)]);
     }
 

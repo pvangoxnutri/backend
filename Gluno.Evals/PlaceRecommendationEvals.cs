@@ -389,7 +389,7 @@ public class PlaceRecommendationEvals
 
         // Same key on a retry, so a dropped connection cannot produce two
         // proposals for one tap.
-        Assert.Contains("idempotencyKey: `place-${messageId}-${place.optionKey}`", screen);
+        Assert.Contains("place-${messageId}-${optionKey}", screen);
     }
 
     [Fact]
@@ -397,7 +397,7 @@ public class PlaceRecommendationEvals
     {
         var screen = Mobile("app", "gluno.tsx");
 
-        var start = screen.IndexOf("const handleAddPlace = useCallback(", StringComparison.Ordinal);
+        var start = screen.IndexOf("const runAddPlace = useCallback(", StringComparison.Ordinal);
         var body = screen[start..(start + 1200)];
 
         Assert.True(start > 0);

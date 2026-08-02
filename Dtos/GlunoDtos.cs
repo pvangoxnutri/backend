@@ -336,6 +336,44 @@ public class GlunoTurnResponseDto
     /// A question with tappable answers, when the turn stopped to ask one.
     /// Null on an ordinary turn.
     public GlunoClarificationDto? Clarification { get; set; }
+
+    /// <summary>
+    /// Something the app may offer to do again after a failure.
+    ///
+    /// Live only, and deliberately not part of the message history: it
+    /// describes work the server can redo from ids it already owns, and a
+    /// button offered after a reload would be one whose failure nobody
+    /// remembers.
+    /// </summary>
+    public GlunoTurnActionDto? Action { get; set; }
+}
+
+/// <summary>
+/// A retry the server owns, described by ids the server minted.
+///
+/// THE BUG THIS EXISTS FOR. A failed add told the user to retype "lägg till
+/// Casas de Pilatos". Everything needed to try again was already known —
+/// which turn, which card, which day, which idempotency key — so the answer
+/// carries them and the app renders a button.
+///
+/// The app sends these back UNCHANGED, to the same add route that produced
+/// them. Nothing here is a place name, a coordinate or a provider id, and none
+/// of it is anything the app could usefully forge: every field is re-verified
+/// against the caller's own conversation on the next call.
+/// </summary>
+public class GlunoTurnActionDto
+{
+    /// "retry_place_add" | "show_new_place_suggestions".
+    public string Type { get; set; } = string.Empty;
+
+    public Guid? MessageId { get; set; }
+    public string? OptionKey { get; set; }
+
+    /// The day already chosen, so a retry does not ask for it again.
+    public string? Date { get; set; }
+
+    /// Reused verbatim, so a retry cannot produce a second proposal.
+    public string? IdempotencyKey { get; set; }
 }
 
 /// <summary>
@@ -827,6 +865,20 @@ public class GlunoAddPlaceDto
     public DateOnly? Date { get; set; }
 
     /// Reused across retries so a dropped connection cannot add twice.
+    public string? IdempotencyKey { get; set; }
+}
+
+/// <summary>
+/// A request for a fresh shortlist.
+///
+/// ONE FIELD. The destination, the category, the search words, the language and
+/// the limit all come from the stored context of the message in the route —
+/// SideQuest's own request, not the provider's answer. A client that could send
+/// any of them could aim the search somewhere the user never asked about.
+/// </summary>
+public class GlunoRefreshPlacesDto
+{
+    /// Reused across presses so one tap cannot produce two shortlists.
     public string? IdempotencyKey { get; set; }
 }
 

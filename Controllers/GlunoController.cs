@@ -452,6 +452,7 @@ public class GlunoController : ControllerBase
                 result.AssistantMessage!, result.ProposalRecords, livePlaces: result.Places,
                 liveText: result.LiveAssistantText, liveProposals: result.Proposals),
             Clarification = MapClarification(result.Clarification),
+            Action = MapAction(result.Action),
         });
     }
 
@@ -566,6 +567,7 @@ public class GlunoController : ControllerBase
                 result.AssistantMessage!, result.ProposalRecords, livePlaces: result.Places,
                 liveText: result.LiveAssistantText, liveProposals: result.Proposals),
             Clarification = MapClarification(result.Clarification),
+            Action = MapAction(result.Action),
         });
     }
 
@@ -715,6 +717,57 @@ public class GlunoController : ControllerBase
     /// No model runs: the place is already known, and which one the user meant
     /// is a lookup rather than a judgement.
     /// </summary>
+    /// <summary>
+    /// Runs the same recommendation search again and offers what it finds now.
+    ///
+    /// FOR THE ONE CASE RETRY CANNOT FIX: a place that is no longer in the
+    /// provider's results. Retrying that lookup would fail identically every
+    /// time; a current shortlist is the only thing that helps.
+    ///
+    /// THE REQUEST CARRIES A MESSAGE ID AND AN IDEMPOTENCY KEY. Everything the
+    /// search needs — the destination, the category, the search words, the
+    /// language, the limit — comes from the context that message already
+    /// stored, which is SideQuest's own and not the provider's. So the client
+    /// cannot widen the search, move it, or aim it somewhere else.
+    ///
+    /// Ownership is the lookup, as everywhere: a message from somebody else's
+    /// conversation is simply not found.
+    /// </summary>
+    [HttpPost("messages/{messageId:guid}/places/refresh")]
+    public async Task<ActionResult<GlunoTurnResponseDto>> RefreshRecommendedPlaces(
+        Guid messageId, [FromBody] GlunoRefreshPlacesDto? dto)
+    {
+        var ct = HttpContext.RequestAborted;
+        var userId = GetUserId();
+
+        var message = await _conversations.GetMessageAsync(messageId, userId, ct);
+        if (message == null) return NotFound(GlunoErrors.Body("message_not_found", false));
+
+        var result = await _chat.RefreshPlaceSuggestionsAsync(userId, message, dto?.IdempotencyKey, ct);
+
+        if (result.Error == GlunoTurnError.PlaceNotRetained)
+        {
+            // The turn kept no search context, so there is nothing to repeat —
+            // and nothing to guess at either.
+            return Conflict(GlunoErrors.Body("place_not_retained", false));
+        }
+
+        if (result.Error == GlunoTurnError.DuplicateInFlight)
+            return Conflict(GlunoErrors.Body("duplicate_in_flight", true));
+
+        if (result.Error != GlunoTurnError.None) return TurnFailure(result);
+
+        return Ok(new GlunoTurnResponseDto
+        {
+            Conversation = MapConversation(result.Conversation!),
+            UserMessage = MapMessage(result.UserMessage!, Array.Empty<Models.GlunoProposalRecord>()),
+            AssistantMessage = MapMessage(
+                result.AssistantMessage!, result.ProposalRecords, livePlaces: result.Places,
+                liveText: result.LiveAssistantText, liveProposals: result.Proposals),
+            Action = MapAction(result.Action),
+        });
+    }
+
     [HttpPost("messages/{messageId:guid}/places/{optionKey}/add")]
     public async Task<ActionResult<GlunoTurnResponseDto>> AddRecommendedPlace(
         Guid messageId, string optionKey, [FromBody] GlunoAddPlaceDto? dto)
@@ -767,6 +820,7 @@ public class GlunoController : ControllerBase
                 result.AssistantMessage!, result.ProposalRecords, livePlaces: result.Places,
                 liveText: result.LiveAssistantText, liveProposals: result.Proposals),
             Clarification = MapClarification(result.Clarification),
+            Action = MapAction(result.Action),
         });
     }
 
@@ -968,6 +1022,22 @@ public class GlunoController : ControllerBase
     /// rendering it would leave a live Apply path under a card with no meaning.
     /// The history drops it; the user asks again and gets a fresh one.
     /// </summary>
+    /// <summary>
+    /// A retry the server owns, as the app receives it.
+    ///
+    /// Ids only — the same ones the add route already verifies on every call.
+    /// Nothing here is a place name, a coordinate or a provider id.
+    /// </summary>
+    private static GlunoTurnActionDto? MapAction(Services.Gluno.GlunoTurnAction? action)
+        => action == null ? null : new GlunoTurnActionDto
+        {
+            Type = action.Type,
+            MessageId = action.MessageId,
+            OptionKey = action.OptionKey,
+            Date = action.Date?.ToString("yyyy-MM-dd"),
+            IdempotencyKey = action.IdempotencyKey,
+        };
+
     private static Models.GlunoClarification? Renderable(Models.GlunoClarification? clarification)
         => clarification is { ContentSuppressed: true } ? null : clarification;
 
