@@ -63,6 +63,28 @@ public sealed class GlunoProposal
     /// One-line human summary, used as the proposal card's heading.
     public required string Summary { get; init; }
     public required JsonElement Payload { get; init; }
+
+    /// <summary>
+    /// What goes on the row instead, when the real summary may not be stored.
+    ///
+    /// Null on every ordinary proposal, and then the summary above is used for
+    /// both. Set only where the heading is a provider's name for a place and
+    /// that provider does not licence its content for storage.
+    /// </summary>
+    public string? PersistedSummary { get; init; }
+
+    /// <summary>
+    /// What goes on the row instead of <see cref="Payload"/>.
+    ///
+    /// Same rule, same reason. A proposal waits for review and is applied
+    /// later, possibly from another device — so under those terms the waiting
+    /// copy carries the place's IDENTITY and the user's own decisions, and the
+    /// content is fetched again at Apply.
+    ///
+    /// Both are chosen where the proposal is built, never derived from each
+    /// other by removing fields afterwards.
+    /// </summary>
+    public JsonElement? PersistedPayload { get; init; }
 }
 
 /// <summary>
@@ -99,6 +121,38 @@ public sealed class GlunoPlaceCard
     public string? ReviewSummary { get; init; }
     /// SideQuest's ranking signals ("highly_rated", "walkable", …).
     public IReadOnlyList<string> Signals { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// The provider's own bare id, without the namespace.
+    ///
+    /// Never serialised, and never sent to the model or the app on its own —
+    /// they get <see cref="ExternalId"/>. This is here so the minimal reference
+    /// that replaces the card in storage can be built without re-parsing.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? ProviderPlaceId { get; init; }
+
+    /// <summary>
+    /// Whether this card's CONTENT may be written into the stored payload.
+    ///
+    /// Stamped by the provider that produced it. Terra's terms permit storing
+    /// only the location id, so its cards travel to the app for the turn that
+    /// fetched them and are not kept.
+    ///
+    /// Never serialised — see GlunoAssistantPayload. The flag exists to decide
+    /// what gets written, so writing it would be pointless.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool AllowsContentPersistence { get; init; }
+
+    /// <summary>
+    /// Whether this card's IDENTITY may be kept when its content may not.
+    ///
+    /// The two together decide which of three things is stored for this card:
+    /// the whole card, a bare reference, or nothing at all.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool AllowsIdentityPersistence { get; init; }
 }
 
 /// <summary>
@@ -148,6 +202,16 @@ public sealed class GlunoActionOutcome
     /// External places to render as cards in the chat. Empty for everything
     /// except a successful place search.
     public IReadOnlyList<GlunoPlaceCard> Places { get; init; } = Array.Empty<GlunoPlaceCard>();
+
+    /// <summary>
+    /// SideQuest's own request behind <see cref="Places"/>.
+    ///
+    /// Carried out of the executor because this is the only place that knows
+    /// it: by the time the turn decides what to store, the query, the resolved
+    /// geography and the category are gone. Needed so a place whose content
+    /// cannot be kept can still be asked for again later.
+    /// </summary>
+    public GlunoPlaceSearchContext? PlaceSearch { get; init; }
     /// Verified screens the chat may offer to open. Never navigated
     /// automatically — the app renders a button and waits for a tap.
     public IReadOnlyList<GlunoNavigationCard> Navigations { get; init; } = Array.Empty<GlunoNavigationCard>();
@@ -870,6 +934,19 @@ public sealed class GlunoActionExecutor : IGlunoActionExecutor
         {
             Ok = true,
             Places = cards,
+            // SideQuest's own request, not the provider's answer — a resolved
+            // destination, our category vocabulary, our search words stripped
+            // to search words. The user's sentence is not in it.
+            PlaceSearch = new GlunoPlaceSearchContext
+            {
+                Near = origin.Label ?? string.Empty,
+                Category = TravelPlaceCategories.ToWireValue(category),
+                Query = GlunoPlaceSearchContexts.Sanitise(query),
+                Language = scope.Language,
+                Limit = limit,
+                OriginSource = origin.Source,
+                SearchedAtUtc = DateTime.UtcNow,
+            },
             ResultJson = JsonSerializer.Serialize(new
             {
                 providerConfigured = true,
@@ -918,6 +995,7 @@ public sealed class GlunoActionExecutor : IGlunoActionExecutor
     {
         Provider = ranked.Place.Provider,
         ExternalId = ranked.Place.ExternalId,
+        ProviderPlaceId = ranked.Place.ProviderPlaceId,
         Name = ranked.Place.Name,
         Category = ranked.Place.Category,
         CategoryLabel = ranked.Place.CategoryLabel,
@@ -935,6 +1013,8 @@ public sealed class GlunoActionExecutor : IGlunoActionExecutor
         OpeningHours = ranked.Place.OpeningHours,
         ReviewSummary = ranked.Place.ReviewSummary,
         Signals = ranked.Signals,
+        AllowsContentPersistence = ranked.Place.AllowsContentPersistence,
+        AllowsIdentityPersistence = ranked.Place.AllowsIdentityPersistence,
     };
 
     private sealed record SearchOrigin(string? Label, double? Latitude, double? Longitude, string Source);

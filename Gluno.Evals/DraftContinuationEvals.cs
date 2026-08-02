@@ -68,7 +68,7 @@ public class DraftContinuationEvals
         // The binding rather than the type, because a conflict can produce a
         // day or a time chooser and those are ordinary `day` and
         // `activity_time` cards — but they answer about a draft.
-        Assert.Contains("clarification.DraftId.HasValue", source);
+        Assert.Contains("{ DraftId: not null } => await _chat.ContinueFromDraftAsync", source);
         Assert.Contains("ContinueFromDraftAsync(userId, clarification, option, ct)", source);
     }
 

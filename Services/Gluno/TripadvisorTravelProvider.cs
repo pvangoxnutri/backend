@@ -99,6 +99,22 @@ public sealed class TripadvisorTravelProvider : ITravelDataProvider
         && Uri.TryCreate(BaseUrl, UriKind.Absolute, out var baseUri)
         && baseUri.Scheme == Uri.UriSchemeHttps;
 
+    /// <summary>
+    /// True — this integration was built around the Content API's own cache
+    /// and detail-hydration model, and its search and detail caches predate
+    /// the Terra terms.
+    ///
+    /// Left as it was rather than tightened speculatively: this provider is
+    /// being retired (Content API keys stop working 2026-08-31), and changing
+    /// its storage behaviour now would alter a working integration on a
+    /// reading of terms that apply to the other product.
+    /// </summary>
+    public bool AllowsContentPersistence => true;
+
+    /// True, like every provider that has an id worth keeping. Stated
+    /// separately from content so the two permissions stay two questions.
+    public bool AllowsLocationIdPersistence => true;
+
     private TimeSpan Timeout => TimeSpan.FromSeconds(Math.Clamp(_config.GetValue("Tripadvisor:TimeoutSeconds", 6), 2, 20));
     private int MaxDetailHydrations => Math.Clamp(_config.GetValue("Tripadvisor:MaxDetailHydrations", 6), 1, 10);
     private bool IncludePhotos => _config.GetValue("Tripadvisor:IncludePhotos", true);
@@ -271,6 +287,10 @@ public sealed class TripadvisorTravelProvider : ITravelDataProvider
             ImageUrl = imageUrl,
             ProviderUrl = SafeLink(ReadString(root, "web_url")),
             SourceAttribution = Attribution,
+            // The Content API integration was built around its own cache; its
+            // results stay storable. See AllowsContentPersistence.
+            AllowsContentPersistence = true,
+            AllowsIdentityPersistence = true,
             OpeningHours = openingHours,
             // Stamped with when we fetched it, so the schedule engine can
             // refuse to quote hours that have gone stale.
@@ -422,6 +442,8 @@ public sealed class TripadvisorTravelProvider : ITravelDataProvider
         Name = identity.Name,
         Category = TravelPlaceCategories.ToWireValue(TravelPlaceCategory.General),
         Address = identity.Address,
+        AllowsContentPersistence = true,
+        AllowsIdentityPersistence = true,
         SourceAttribution = Attribution,
     };
 
@@ -448,6 +470,8 @@ public sealed class TripadvisorTravelProvider : ITravelDataProvider
             ImageUrl = place.ImageUrl,
             ProviderUrl = place.ProviderUrl,
             SourceAttribution = place.SourceAttribution,
+            AllowsContentPersistence = place.AllowsContentPersistence,
+            AllowsIdentityPersistence = place.AllowsIdentityPersistence,
             OpeningHours = place.OpeningHours,
             Hours = place.Hours,
             ReviewSummary = place.ReviewSummary,

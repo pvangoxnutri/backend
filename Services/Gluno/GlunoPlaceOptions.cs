@@ -18,8 +18,12 @@ namespace sidequest.backend.Services.Gluno;
 /// to somebody else's search results.
 ///
 /// The message id is the other half: it is already ownership-scoped, already
-/// persisted, and already carries the places in its payload. Nothing new has
-/// to be stored for a recommendation to survive a reload — it always did.
+/// persisted, and already carries either the places themselves or the ids they
+/// were shown under.
+///
+/// WHICH OF THE TWO depends on the provider's terms — see GlunoPlaceRetention.
+/// Nothing about the handle changes: the app sends the same key either way and
+/// never learns which kind of turn it is tapping on.
 /// </summary>
 public static class GlunoPlaceOptions
 {
@@ -59,23 +63,67 @@ public static class GlunoPlaceOptions
     public static GlunoPlaceCard? Resolve(GlunoMessage message, string? optionKey)
     {
         var index = IndexOf(optionKey);
-        if (index < 0 || message.PayloadJson == null) return null;
+        if (index < 0) return null;
 
-        GlunoAssistantPayload? payload;
+        var places = ReadPayload(message)?.Places;
+
+        // Restored, not returned raw: the persistence flags are deliberately
+        // not serialised, so a card straight out of JSON claims it may not be
+        // stored — while sitting in the very payload that stored it.
+        return places != null && index < places.Count
+            ? GlunoPlaceCards.Restored(places[index])
+            : null;
+    }
+
+    /// <summary>
+    /// The identity-only handle a key points at, when the card itself was never
+    /// stored.
+    ///
+    /// MATCHED ON THE KEY, NOT THE POSITION. The reference carries the key it
+    /// was rendered with, so it is compared rather than indexed — a list that
+    /// ever stops being dense would otherwise hand back the wrong place, and
+    /// getting the wrong place is worse than getting none.
+    ///
+    /// Returns null for an unknown key, a message with no references, or a
+    /// payload that cannot be read.
+    /// </summary>
+    public static GlunoPlaceReference? ResolveReference(GlunoMessage message, string? optionKey)
+    {
+        if (IndexOf(optionKey) < 0) return null;
+
+        return ReadPayload(message)?.PlaceRefs
+            .FirstOrDefault(reference => string.Equals(reference.OptionKey, optionKey, StringComparison.Ordinal));
+    }
+
+    /// Every identity-only handle a turn kept, in the order they were shown.
+    public static IReadOnlyList<GlunoPlaceReference> References(GlunoMessage message)
+        => ReadPayload(message)?.PlaceRefs ?? (IReadOnlyList<GlunoPlaceReference>)Array.Empty<GlunoPlaceReference>();
+
+    /// SideQuest's own request behind those handles, or null when the turn kept
+    /// none. Without it the ids cannot be looked up again.
+    public static GlunoPlaceSearchContext? SearchContext(GlunoMessage message)
+    {
+        var payload = ReadPayload(message);
+
+        return payload?.PlaceRefs.Count > 0 && payload.PlaceSearch is { IsUsable: true } search
+            ? search
+            : null;
+    }
+
+    /// Null on anything unreadable. Never throws — this runs on a live turn.
+    private static GlunoAssistantPayload? ReadPayload(GlunoMessage message)
+    {
+        if (message.PayloadJson == null) return null;
 
         try
         {
-            payload = System.Text.Json.JsonSerializer.Deserialize<GlunoAssistantPayload>(
+            return System.Text.Json.JsonSerializer.Deserialize<GlunoAssistantPayload>(
                 message.PayloadJson, GlunoJson.Options);
         }
         catch (System.Text.Json.JsonException)
         {
             return null;
         }
-
-        var places = payload?.Places;
-
-        return places != null && index < places.Count ? places[index] : null;
     }
 
     /// <summary>

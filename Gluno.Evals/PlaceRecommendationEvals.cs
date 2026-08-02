@@ -192,7 +192,7 @@ public class PlaceRecommendationEvals
     {
         var chat = Source("Services", "Gluno", "GlunoChatService.cs");
 
-        var start = chat.IndexOf("public async Task<GlunoTurnResult> AddRecommendedPlaceAsync", StringComparison.Ordinal);
+        var start = chat.IndexOf("private async Task<GlunoTurnResult> AddResolvedPlaceAsync", StringComparison.Ordinal);
         var end = chat.IndexOf("/// The intent an \"add this place\" tap represents", StringComparison.Ordinal);
         var body = chat[start..end];
 
@@ -211,7 +211,7 @@ public class PlaceRecommendationEvals
     {
         var chat = Source("Services", "Gluno", "GlunoChatService.cs");
 
-        var start = chat.IndexOf("public async Task<GlunoTurnResult> AddRecommendedPlaceAsync", StringComparison.Ordinal);
+        var start = chat.IndexOf("private async Task<GlunoTurnResult> AddResolvedPlaceAsync", StringComparison.Ordinal);
         var end = chat.IndexOf("/// The intent an \"add this place\" tap represents", StringComparison.Ordinal);
         var body = chat[start..end];
 
@@ -237,7 +237,7 @@ public class PlaceRecommendationEvals
     {
         var chat = Source("Services", "Gluno", "GlunoChatService.cs");
 
-        var start = chat.IndexOf("public async Task<GlunoTurnResult> AddRecommendedPlaceAsync", StringComparison.Ordinal);
+        var start = chat.IndexOf("private async Task<GlunoTurnResult> AddResolvedPlaceAsync", StringComparison.Ordinal);
         var body = chat[start..(start + 3000)];
 
         // A recommendation can be tapped long after it was shown, and a stale
@@ -250,7 +250,7 @@ public class PlaceRecommendationEvals
     {
         var chat = Source("Services", "Gluno", "GlunoChatService.cs");
 
-        var start = chat.IndexOf("public async Task<GlunoTurnResult> AddRecommendedPlaceAsync", StringComparison.Ordinal);
+        var start = chat.IndexOf("private async Task<GlunoTurnResult> AddResolvedPlaceAsync", StringComparison.Ordinal);
         var body = chat[start..(start + 5000)];
 
         Assert.Contains("TripDateRange.Contains(trip.StartDate, trip.EndDate, chosen.Value)", body);
@@ -261,7 +261,7 @@ public class PlaceRecommendationEvals
     {
         var chat = Source("Services", "Gluno", "GlunoChatService.cs");
 
-        var start = chat.IndexOf("public async Task<GlunoTurnResult> AddRecommendedPlaceAsync", StringComparison.Ordinal);
+        var start = chat.IndexOf("private async Task<GlunoTurnResult> AddResolvedPlaceAsync", StringComparison.Ordinal);
         var body = chat[start..(start + 5000)];
 
         // Guessing a day on a two-week holiday is guessing at the shape of
@@ -276,7 +276,7 @@ public class PlaceRecommendationEvals
     {
         var chat = Source("Services", "Gluno", "GlunoChatService.cs");
 
-        var start = chat.IndexOf("public async Task<GlunoTurnResult> AddRecommendedPlaceAsync", StringComparison.Ordinal);
+        var start = chat.IndexOf("private async Task<GlunoTurnResult> AddResolvedPlaceAsync", StringComparison.Ordinal);
         var body = chat[start..(start + 3000)];
 
         Assert.Contains("AskWhichAdventureAsync(", body);
@@ -287,7 +287,7 @@ public class PlaceRecommendationEvals
     {
         var chat = Source("Services", "Gluno", "GlunoChatService.cs");
 
-        var start = chat.IndexOf("var payload = JsonSerializer.SerializeToElement(new", StringComparison.Ordinal);
+        var start = chat.IndexOf("var livePayload = JsonSerializer.SerializeToElement(new", StringComparison.Ordinal);
         var body = chat[start..(start + 700)];
 
         Assert.True(start > 0);

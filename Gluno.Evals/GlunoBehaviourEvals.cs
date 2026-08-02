@@ -222,6 +222,8 @@ public class GlunoBehaviourEvals
     {
         public string Provider => "flaky";
         public bool IsConfigured => true;
+        public bool AllowsContentPersistence => true;
+        public bool AllowsLocationIdPersistence => true;
 
         public Task<IReadOnlyList<TravelPlace>> SearchPlacesAsync(TravelPlaceQuery query, CancellationToken ct)
             => throw new TimeoutException("upstream timed out");
@@ -234,6 +236,8 @@ public class GlunoBehaviourEvals
     {
         public string Provider { get; } = provider;
         public bool IsConfigured => true;
+        public bool AllowsContentPersistence => true;
+        public bool AllowsLocationIdPersistence => true;
 
         public Task<IReadOnlyList<TravelPlace>> SearchPlacesAsync(TravelPlaceQuery query, CancellationToken ct)
             => Task.FromResult<IReadOnlyList<TravelPlace>>([Place("Fake place", 4.4, 300)]);

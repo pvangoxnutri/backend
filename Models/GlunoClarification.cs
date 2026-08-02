@@ -242,6 +242,41 @@ public class GlunoClarification
     /// stale snapshot from a current one.
     public int ContextVersion { get; set; } = 1;
 
+    // ── Questions about a place that may not be stored ───────────────────
+
+    /// <summary>
+    /// True when this question's real wording could not be written down.
+    ///
+    /// A provider whose terms forbid storing its content forbids it in prose
+    /// too: "Which day should Real Alcázar go on?" is that name, stored. So the
+    /// row holds a neutral version, the live response carries the real one, and
+    /// this flag says the two differ.
+    ///
+    /// HISTORY DOES NOT REBUILD IT. A reopened conversation would otherwise
+    /// show "Which of the places do you mean?" above rows reading "Option 1"
+    /// and "Option 2" — a question nobody can answer, still holding an Apply
+    /// path open. It is dropped from the history instead.
+    /// </summary>
+    public bool ContentSuppressed { get; set; }
+
+    /// <summary>
+    /// The turn that showed the place this question is about, and which of its
+    /// cards.
+    ///
+    /// SERVER-OWNED STATE FOR THE CONTINUATION. Answering "Thursday" has to
+    /// resume adding a specific place, and the place cannot travel through the
+    /// answer: the client sends a clarification id and an option key, and the
+    /// place's own identity lives here where the client cannot see or change
+    /// it. Without this the continuation would have to replay a sentence
+    /// through the model and hope it worked out which place was meant.
+    ///
+    /// Both null on every other kind of question.
+    /// </summary>
+    public Guid? PlaceMessageId { get; set; }
+
+    [MaxLength(64)]
+    public string? PlaceOptionKey { get; set; }
+
     // ── Proposal-conflict state ──────────────────────────────────────────
     //
     // Server-owned, every one of them. The client sends back a clarification

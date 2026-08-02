@@ -41,6 +41,16 @@ public class GlunoStatusDto
     public bool TravelDataAvailable { get; set; }
 
     /// <summary>
+    /// Which place provider is actually live, and what it can do.
+    ///
+    /// BOOLEANS AND A NAME, never a key, a host or a header. The point is to
+    /// make "the provider is switched off" diagnosable from the client without
+    /// reading a server log — the failure it exists for looked exactly like
+    /// "there are no attractions in Sevilla" from every surface.
+    /// </summary>
+    public GlunoTravelDataDto TravelData { get; set; } = new();
+
+    /// <summary>
     /// True when a routing provider can verify travel times.
     ///
     /// A boolean, deliberately: which provider, on which base URL, with which
@@ -766,6 +776,48 @@ public class GlunoConflictDto
 /// name, no provider id, no coordinates, because all three are things the
 /// server already knows and a client could otherwise change.
 /// </summary>
+/// <summary>
+/// What the place-data integration can currently do.
+///
+/// Every field is a boolean or a fixed vocabulary name. No key, no base URL,
+/// no header, no account identifier — the client is told what works, never how
+/// it is wired.
+/// </summary>
+public class GlunoTravelDataDto
+{
+    /// Terra is switched on and has a key and an https host.
+    public bool TerraConfigured { get; set; }
+
+    /// The Content API integration, which retires 2026-08-31.
+    public bool LegacyConfigured { get; set; }
+
+    /// "terra" | "legacy" | null when neither is usable.
+    public string? ActiveProvider { get; set; }
+
+    // ── Capabilities of whichever is active ──────────────────────────────
+
+    /// Free-text place recommendations for a city.
+    public bool RecommendationsSearch { get; set; }
+    public bool Photos { get; set; }
+    public bool Reviews { get; set; }
+    public bool OpeningHours { get; set; }
+
+    /// <summary>
+    /// False when the provider's terms forbid storing its content, which
+    /// changes whether a recommendation survives a reload.
+    /// </summary>
+    public bool ContentPersistence { get; set; }
+
+    /// <summary>
+    /// True when the provider's own place id may be kept.
+    ///
+    /// Separate from the flag above because the permissions are separate. With
+    /// content off and this on, a recommendation does not survive a reload as a
+    /// card but is still addable — the place is fetched again from its id.
+    /// </summary>
+    public bool LocationIdPersistence { get; set; }
+}
+
 public class GlunoAddPlaceDto
 {
     /// <summary>

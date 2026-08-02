@@ -71,6 +71,20 @@ builder.Services
 // A named client rather than a typed one: the provider is a singleton (the
 // registry holds it), and a typed HttpClient captured in a singleton pins one
 // message handler forever.
+// Tripadvisor Terra — the platform replacing the Content API. Registered
+// FIRST so the registry prefers it; see TravelDataRegistry for how the two are
+// kept from both running.
+//
+// No RemoveAllLoggers() here, and that is not an oversight: Terra takes the key
+// as an X-API-Key HEADER, so its request URIs carry no secret. The header is
+// set per request and never logged.
+builder.Services
+    .AddHttpClient(TerraTravelProvider.HttpClientName)
+    .ConfigureHttpClient(client =>
+    {
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("SideQuest/1.0");
+    });
+builder.Services.AddSingleton<ITravelDataProvider, TerraTravelProvider>();
 builder.Services.AddSingleton<ITravelDataProvider, TripadvisorTravelProvider>();
 builder.Services.AddSingleton<ITravelDataRegistry, TravelDataRegistry>();
 // Verified travel times. Same shape as the travel-data registration above, and
@@ -145,6 +159,10 @@ builder.Services.AddScoped<IGlunoClarificationService, GlunoClarificationService
 // Suggestions mid-negotiation. Nothing here writes to an Adventure — a draft
 // is a conversation about a change, not the change.
 builder.Services.AddScoped<IGlunoProposalDraftService, GlunoProposalDraftService>();
+// Fetches a place again from an id, for providers whose terms allow keeping the
+// id and not the content. Scoped rather than singleton: it makes upstream calls
+// on the caller's own cancellation token.
+builder.Services.AddScoped<IGlunoPlaceRehydrator, GlunoPlaceRehydrator>();
 builder.Services.AddScoped<IGlunoChatService, GlunoChatService>();
 // The proposal half: the store records what Gluno suggested, and the apply
 // service is the ONLY thing that turns one into a real change — always behind

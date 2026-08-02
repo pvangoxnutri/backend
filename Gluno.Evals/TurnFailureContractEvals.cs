@@ -47,6 +47,8 @@ public class TurnFailureContractEvals
             liveTravel: null!,
             clarifications: null!,
             contextBuilder: null!,
+            travelProviders: Array.Empty<ITravelDataProvider>(),
+            rehydrator: new UnusedRehydrator(),
             logger: Microsoft.Extensions.Logging.Abstractions.NullLogger<GlunoController>.Instance);
 
         // The endpoint reads the caller from the principal, never from the
@@ -222,7 +224,7 @@ public class TurnFailureContractEvals
             => throw new NotSupportedException();
 
         public Task<GlunoTurnResult> AddRecommendedPlaceAsync(
-            Guid userId, sidequest.backend.Models.GlunoMessage message, GlunoPlaceCard place,
+            Guid userId, sidequest.backend.Models.GlunoMessage message, string optionKey,
             DateOnly? date, string? idempotencyKey, CancellationToken ct)
             => throw new NotSupportedException();
 

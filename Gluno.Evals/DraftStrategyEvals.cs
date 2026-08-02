@@ -712,7 +712,7 @@ public class DraftStrategyEvals
         // On the draft binding, not the type. A day chooser produced by a
         // conflict is an ordinary `day` card, and routing on the type alone
         // would send it through the model and lose the plan it was fixing.
-        Assert.Contains("clarification.DraftId.HasValue", source);
+        Assert.Contains("{ DraftId: not null } => await _chat.ContinueFromDraftAsync", source);
     }
 
     [Fact]

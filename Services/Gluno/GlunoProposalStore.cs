@@ -74,7 +74,20 @@ public sealed class GlunoProposalStore : IGlunoProposalStore
         GlunoConversation conversation, Guid messageId, GlunoProposal proposal, CancellationToken ct,
         Guid? draftId = null, int? draftVersion = null)
     {
-        var snapshot = await BuildSnapshotAsync(proposal.TripId, proposal.Kind, proposal.Payload, ct);
+        // ── What the row holds ────────────────────────────────────────────
+        //
+        // Usually the proposal exactly as built. Where the provider's terms
+        // forbid keeping its content, the caller supplies a second version
+        // carrying the place's identity and the user's own decisions instead —
+        // chosen at the point the proposal was built, never derived here by
+        // stripping fields, because a stripper that misses one stores it.
+        var storedPayload = proposal.PersistedPayload ?? proposal.Payload;
+
+        // Built from the STORED payload, so the snapshot describes what will
+        // actually be applied. It holds only trip dates and activity
+        // signatures — ids, dates and sort order out of the user's own
+        // Adventure — so nothing from a provider reaches it either way.
+        var snapshot = await BuildSnapshotAsync(proposal.TripId, proposal.Kind, storedPayload, ct);
 
         var record = new GlunoProposalRecord
         {
@@ -84,9 +97,9 @@ public sealed class GlunoProposalStore : IGlunoProposalStore
             UserId = conversation.UserId,
             TripId = proposal.TripId,
             ActionType = proposal.ActionName,
-            Summary = proposal.Summary,
+            Summary = proposal.PersistedSummary ?? proposal.Summary,
             PayloadVersion = GlunoProposalPayloadVersions.Current,
-            PayloadJson = proposal.Payload.GetRawText(),
+            PayloadJson = storedPayload.GetRawText(),
             SnapshotJson = JsonSerializer.Serialize(snapshot, GlunoJson.Options),
             DraftId = draftId,
             DraftVersion = draftVersion,

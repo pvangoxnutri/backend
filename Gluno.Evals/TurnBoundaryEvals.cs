@@ -47,6 +47,8 @@ public class TurnBoundaryEvals
             liveTravel: null!,
             clarifications: null!,
             contextBuilder: null!,
+            travelProviders: Array.Empty<ITravelDataProvider>(),
+            rehydrator: new UnusedRehydrator(),
             logger: NullLogger<GlunoController>.Instance);
 
         controller.ControllerContext = new ControllerContext
@@ -199,7 +201,7 @@ public class TurnBoundaryEvals
             => throw new NotSupportedException();
 
         public Task<GlunoTurnResult> AddRecommendedPlaceAsync(
-            Guid userId, sidequest.backend.Models.GlunoMessage message, GlunoPlaceCard place,
+            Guid userId, sidequest.backend.Models.GlunoMessage message, string optionKey,
             DateOnly? date, string? idempotencyKey, CancellationToken ct)
             => throw new NotSupportedException();
 

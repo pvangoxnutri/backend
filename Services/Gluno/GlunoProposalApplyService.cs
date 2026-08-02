@@ -100,17 +100,23 @@ public sealed class GlunoProposalApplyService : IGlunoProposalApplyService
     private readonly AppDbContext _db;
     private readonly IGlunoProposalStore _store;
     private readonly IGlunoFeedbackService _feedback;
+    /// Fills in a place whose content the proposal was not allowed to keep.
+    /// Only ever used by the activity path, and only for a payload that carries
+    /// a reference instead of a title.
+    private readonly IGlunoPlaceRehydrator _rehydrator;
     private readonly ILogger<GlunoProposalApplyService> _logger;
 
     public GlunoProposalApplyService(
         AppDbContext db,
         IGlunoProposalStore store,
         IGlunoFeedbackService feedback,
+        IGlunoPlaceRehydrator rehydrator,
         ILogger<GlunoProposalApplyService> logger)
     {
         _db = db;
         _store = store;
         _feedback = feedback;
+        _rehydrator = rehydrator;
         _logger = logger;
     }
 
@@ -420,6 +426,19 @@ public sealed class GlunoProposalApplyService : IGlunoProposalApplyService
         var trip = await _db.Trips.FindAsync([tripId], ct);
         if (trip == null) return ("trip_missing", "That Adventure no longer exists.");
 
+        // ── A proposal that kept an identity instead of a place ───────────
+        //
+        // Under a provider that does not licence its content for storage, the
+        // pending proposal holds the user's own decisions — the day, the
+        // Adventure, which card they tapped — and an id. The name and the
+        // address that go into the Activity are fetched here, at the moment the
+        // user commits to it, rather than having sat in the database in the
+        // meantime.
+        var (resolved, resolveError) = await ResolvePlacePayloadAsync(userId, payload, ct);
+        if (resolveError != null) return resolveError;
+
+        payload = resolved;
+
         var draft = GlunoActivityDraft.Read(payload);
         if (draft.Error != null) return ("invalid_payload", draft.Error);
 
@@ -429,6 +448,105 @@ public sealed class GlunoProposalApplyService : IGlunoProposalApplyService
         await CreateActivityAsync(trip, userId, draft, changes, ct);
         return null;
     }
+
+    /// <summary>
+    /// Fills in a place-reference payload from the provider, at apply time.
+    ///
+    /// Returns the payload UNCHANGED for every ordinary proposal — the marker
+    /// is a "place" object with a location id, and nothing else writes one.
+    ///
+    /// WHAT IT ADDS is a title and a location label, and deliberately not a
+    /// description: the review snippet behind a recommendation is the
+    /// provider's text about the place, and an Activity records where somebody
+    /// is going rather than what strangers said about it. Ratings, review
+    /// counts and opening hours have no Activity field at all and never had.
+    ///
+    /// A failure here refuses the apply rather than writing a half-known
+    /// Activity. Nothing is saved: the caller treats a returned error as the
+    /// whole operation failing.
+    /// </summary>
+    private async Task<(JsonElement Payload, (string, string)? Error)> ResolvePlacePayloadAsync(
+        Guid userId, JsonElement payload, CancellationToken ct)
+    {
+        if (!payload.TryGetProperty("place", out var reference)
+            || reference.ValueKind != JsonValueKind.Object)
+        {
+            return (payload, null);
+        }
+
+        var messageId = ReadGuid(reference, "messageId");
+        var optionKey = ReadText(reference, "optionKey", 64);
+        var locationId = ReadText(reference, "locationId", 64);
+        var providerId = ReadText(reference, "providerId", 64);
+
+        if (messageId == null || optionKey == null || locationId == null || providerId == null)
+            return (payload, ("invalid_payload", "This suggestion is missing the place it refers to."));
+
+        // Ownership is part of the lookup. A proposal cannot reach a message
+        // outside the conversation its owner had.
+        var message = await _db.GlunoMessages
+            .AsNoTracking()
+            .Where(stored => stored.Id == messageId)
+            .Join(_db.GlunoConversations.Where(conversation => conversation.UserId == userId),
+                stored => stored.ConversationId, conversation => conversation.Id, (stored, _) => stored)
+            .FirstOrDefaultAsync(ct);
+
+        if (message == null)
+            return (payload, ("place_unavailable", "That place could not be found again."));
+
+        var references = GlunoPlaceOptions.References(message);
+        var search = GlunoPlaceOptions.SearchContext(message);
+
+        if (search == null)
+            return (payload, ("place_unavailable", "That place could not be found again."));
+
+        var rehydrated = await _rehydrator.RehydrateAsync(references, search, optionKey, ct);
+
+        if (rehydrated.Status == GlunoRehydrationStatus.Busy)
+        {
+            return (payload, ("place_lookup_busy",
+                "That place could not be fetched just now. Try saving again in a moment."));
+        }
+
+        // Exact id, and both halves of it. Anything else in the fresh response
+        // is a place this user was never shown.
+        if (rehydrated.Status != GlunoRehydrationStatus.Ok
+            || !rehydrated.Places.TryGetValue(optionKey, out var fresh)
+            || !string.Equals(fresh.ProviderPlaceId, locationId, StringComparison.Ordinal)
+            || !string.Equals(fresh.Provider, providerId, StringComparison.Ordinal))
+        {
+            return (payload, ("place_unavailable",
+                "That place could not be found again. Ask Gluno for a fresh suggestion."));
+        }
+
+        // Rebuilt from the stored payload's own fields plus the two the
+        // Activity needs. The date and the category were the user's, and they
+        // carry through untouched.
+        var merged = new Dictionary<string, object?>
+        {
+            ["title"] = fresh.Name,
+            ["locationLabel"] = fresh.Address ?? fresh.Name,
+            ["placeId"] = fresh.ExternalId,
+            ["latitude"] = fresh.Latitude,
+            ["longitude"] = fresh.Longitude,
+        };
+
+        foreach (var property in payload.EnumerateObject())
+        {
+            if (property.NameEquals("place")) continue;
+
+            merged[property.Name] = property.Value.Clone();
+        }
+
+        return (JsonSerializer.SerializeToElement(merged, GlunoJson.Options), null);
+    }
+
+    private static Guid? ReadGuid(JsonElement element, string name)
+        => element.TryGetProperty(name, out var value)
+            && value.ValueKind == JsonValueKind.String
+            && Guid.TryParse(value.GetString(), out var parsed)
+                ? parsed
+                : null;
 
     private async Task<(string, string)?> ApplyDayPlanAsync(
         Guid tripId, Guid userId, JsonElement payload, GlunoApplyChanges changes, CancellationToken ct)

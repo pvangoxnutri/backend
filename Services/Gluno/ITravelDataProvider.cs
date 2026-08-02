@@ -99,6 +99,36 @@ public sealed class TravelPlace
     /// Carried with the data so a caller cannot forget it.
     public required string SourceAttribution { get; init; }
 
+    /// <summary>
+    /// Whether this result's CONTENT may be written into a stored payload —
+    /// the name, the address, the rating, the hours, the snippet.
+    ///
+    /// CARRIED ON THE PLACE, not looked up by provider name, and the reason is
+    /// concrete: Terra and the Content API are both "tripadvisor" and issue the
+    /// same location ids, so a name comparison could not tell them apart even
+    /// if it were an acceptable way to decide. The provider that produced the
+    /// result is the only thing that knows its own terms, so it stamps them on.
+    ///
+    /// Defaults to false. A provider that says nothing about its rights gets
+    /// the careful reading rather than the convenient one.
+    /// </summary>
+    public bool AllowsContentPersistence { get; init; }
+
+    /// <summary>
+    /// Whether this result's IDENTITY may be kept — the location id alone,
+    /// with no presentation text attached to it.
+    ///
+    /// SEPARATE FROM CONTENT ON PURPOSE, because the terms are separate.
+    /// Tripadvisor Terra forbids storing content and permits keeping the
+    /// Location ID; those are two different permissions and collapsing them
+    /// into one flag would force a choice between storing what is not allowed
+    /// and discarding what is.
+    ///
+    /// An id on its own renders nothing. What it buys is the ability to ask the
+    /// provider for the same place again — see <see cref="GlunoPlaceReference"/>.
+    /// </summary>
+    public bool AllowsIdentityPersistence { get; init; }
+
     /// Opening hours exactly as the provider stated them, one line per day.
     /// EMPTY unless the provider actually returned them — never inferred.
     public IReadOnlyList<string> OpeningHours { get; init; } = Array.Empty<string>();
@@ -160,6 +190,32 @@ public sealed class TravelPlaceQuery
 }
 
 /// <summary>
+/// Why a search returned what it returned.
+///
+/// Only ever used to decide what to SAY and whether a retry is worth
+/// suggesting. Never shown, never returned to the app as-is.
+/// </summary>
+public enum TravelSearchStatus
+{
+    /// The provider answered. An empty list here is a real answer.
+    Ok,
+    /// Over a rate limit or a quota. Transient — the same request may work in a
+    /// minute, so this must not be reported as "the place is gone".
+    RateLimited,
+    /// Rejected, timed out, unreachable, or a contract change. Not the user's
+    /// problem and not something a retry loop should hammer.
+    Failed,
+    /// The provider does not report why. Treated as "no information".
+    Unknown,
+}
+
+public sealed class TravelSearchResult
+{
+    public required IReadOnlyList<TravelPlace> Places { get; init; }
+    public required TravelSearchStatus Status { get; init; }
+}
+
+/// <summary>
 /// One source of external travel data.
 ///
 /// Everything vendor-specific lives behind this: endpoints, auth, taxonomy,
@@ -178,7 +234,56 @@ public interface ITravelDataProvider
     /// False when the provider has no credentials or is switched off.
     bool IsConfigured { get; }
 
+    /// <summary>
+    /// Whether this provider's content may be cached or written into a
+    /// conversation's stored payload.
+    ///
+    /// WHY THIS IS A PROVIDER DECISION AND NOT A GLOBAL ONE. Terms differ per
+    /// provider and per contract. Tripadvisor's Terra caching policy says
+    /// "caching, copying, downloading, storing or indexing content is not
+    /// permitted for any content" and carves out only the Location ID — while
+    /// the older Content API integration was built around a search and detail
+    /// cache. One rule for both would either break the terms of one or throw
+    /// away the performance of the other.
+    ///
+    /// FALSE MEANS: no cache entry, and nothing but the identity persisted
+    /// into a message payload. The consequence is real and is not hidden — see
+    /// the note in TerraTravelProvider.
+    /// </summary>
+    bool AllowsContentPersistence { get; }
+
+    /// <summary>
+    /// Whether the provider's own place id may be kept.
+    ///
+    /// Almost always true, and true for both Tripadvisor products — Terra names
+    /// the Location ID as the one thing that may be stored. It is a separate
+    /// question from content because the answers are separate, and because an
+    /// id with no content is what makes a place re-fetchable without keeping
+    /// anything the provider licensed only for the answer.
+    /// </summary>
+    bool AllowsLocationIdPersistence { get; }
+
     Task<IReadOnlyList<TravelPlace>> SearchPlacesAsync(TravelPlaceQuery query, CancellationToken ct);
+
+    /// <summary>
+    /// The same search, plus the reason an empty result was empty.
+    ///
+    /// The plain overload throws that reason away, which is right for a chat
+    /// turn: the answer degrades to prose and carries on. Re-fetching a place
+    /// the user is trying to add needs it — "we are over the rate limit" and
+    /// "that place is no longer in the results" are the same empty list and
+    /// must not become the same sentence.
+    ///
+    /// Defaulted so a provider that cannot say why simply reports
+    /// <see cref="TravelSearchStatus.Unknown"/>, which callers must treat as
+    /// "no information", never as "fine".
+    /// </summary>
+    async Task<TravelSearchResult> SearchPlacesWithStatusAsync(TravelPlaceQuery query, CancellationToken ct)
+        => new()
+        {
+            Places = await SearchPlacesAsync(query, ct),
+            Status = TravelSearchStatus.Unknown,
+        };
 
     /// <param name="providerPlaceId">
     /// The provider's BARE id (namespace already stripped by the registry).
@@ -195,6 +300,18 @@ public interface ITravelDataRegistry
 
     /// Ranked by SideQuest's own scoring — see <see cref="TravelPlaceRanker"/>.
     Task<IReadOnlyList<RankedTravelPlace>> SearchPlacesAsync(TravelPlaceQuery query, CancellationToken ct);
+
+    /// <summary>
+    /// Everything the providers returned, UNRANKED and UNTRIMMED, with the
+    /// reason behind an empty result.
+    ///
+    /// WHY UNRANKED. The ranked overload sorts by SideQuest's score and then
+    /// takes the requested number, which is exactly right for an answer and
+    /// exactly wrong for finding one known id again: the place could come back
+    /// from the provider and still be trimmed off the end before anyone looked
+    /// for it. This is for lookups by id, where relevance is not the question.
+    /// </summary>
+    Task<TravelSearchResult> SearchAllAsync(TravelPlaceQuery query, CancellationToken ct);
 
     /// <param name="externalId">Namespaced id, e.g. "tripadvisor:12345".</param>
     Task<TravelPlace?> GetPlaceDetailsAsync(string externalId, string language, CancellationToken ct);

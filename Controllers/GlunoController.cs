@@ -35,6 +35,8 @@ public class GlunoController : ControllerBase
     private readonly ILiveTravelRegistry _liveTravel;
     private readonly IGlunoClarificationService _clarifications;
     private readonly IGlunoContextBuilder _contextBuilder;
+    private readonly IEnumerable<ITravelDataProvider> _travelProviders;
+    private readonly IGlunoPlaceRehydrator _rehydrator;
     private readonly ILogger<GlunoController> _logger;
 
     public GlunoController(
@@ -48,11 +50,15 @@ public class GlunoController : ControllerBase
         ILiveTravelRegistry liveTravel,
         IGlunoClarificationService clarifications,
         IGlunoContextBuilder contextBuilder,
+        IEnumerable<ITravelDataProvider> travelProviders,
+        IGlunoPlaceRehydrator rehydrator,
         ILogger<GlunoController> logger)
     {
+        _rehydrator = rehydrator;
         _liveTravel = liveTravel;
         _clarifications = clarifications;
         _contextBuilder = contextBuilder;
+        _travelProviders = travelProviders;
         _logger = logger;
         _availability = availability;
         _chat = chat;
@@ -82,6 +88,7 @@ public class GlunoController : ControllerBase
             Reason = _availability.UnavailableReason,
             SystemPromptVersion = GlunoSystemPrompt.Version,
             TravelDataAvailable = _availability.HasTravelData,
+            TravelData = DescribeTravelData(),
             // Whether travel times can be verified at all — a boolean and
             // nothing else. Which provider does it, and on what credentials, is
             // not the mobile app's business and is never in a response body.
@@ -90,6 +97,43 @@ public class GlunoController : ControllerBase
             // boolean, and nothing about which provider or on what key.
             LiveTravelInfoAvailable = _liveTravel.IsAvailable,
         });
+
+    /// <summary>
+    /// Which place provider is live, as booleans.
+    ///
+    /// Reads the registered providers directly rather than a cached flag, so
+    /// this cannot drift from what a search would actually do. Nothing here
+    /// touches a key, a host or a header — the client learns what works, never
+    /// how it is wired.
+    /// </summary>
+    private GlunoTravelDataDto DescribeTravelData()
+    {
+        var terra = _travelProviders.OfType<TerraTravelProvider>().FirstOrDefault();
+        var legacy = _travelProviders.OfType<TripadvisorTravelProvider>().FirstOrDefault();
+
+        var terraOn = terra?.IsConfigured == true;
+        var legacyOn = legacy?.IsConfigured == true;
+
+        return new GlunoTravelDataDto
+        {
+            TerraConfigured = terraOn,
+            LegacyConfigured = legacyOn,
+            // Terra wins wherever both are on — same order the registry uses.
+            ActiveProvider = terraOn ? "terra" : legacyOn ? "legacy" : null,
+            RecommendationsSearch = terraOn && terra!.SupportsRecommendationsSearch,
+            Photos = terraOn ? terra!.SupportsPhotos : legacyOn,
+            Reviews = terraOn ? terra!.SupportsReviews : legacyOn,
+            OpeningHours = terraOn ? terra!.SupportsOpeningHours : legacyOn,
+            ContentPersistence = terraOn
+                ? terra!.AllowsContentPersistence
+                : legacy?.AllowsContentPersistence ?? false,
+            // The other half of the same policy, and the reason a
+            // recommendation stays addable when its content is not kept.
+            LocationIdPersistence = terraOn
+                ? terra!.AllowsLocationIdPersistence
+                : legacy?.AllowsLocationIdPersistence ?? false,
+        };
+    }
 
     /// <summary>
     /// The caller's own conversations. <paramref name="tripId"/> narrows to one
@@ -378,6 +422,25 @@ public class GlunoController : ControllerBase
                     // identically on every tap; a timeout might not.
                     retryable = result.IsRetryable,
                 });
+
+            // ── Anything a send cannot normally produce ───────────────────
+            //
+            // Some errors belong to other endpoints — a place that was not
+            // retained comes from the add route, not from here. Without this
+            // the switch would fall through to the success mapping and
+            // dereference a conversation the failed turn never set, which is a
+            // 500 with no body: nothing for the app to say and nothing to
+            // localise. Being explicit costs one case and removes a whole class
+            // of silent failure.
+            case GlunoTurnError.None:
+                break;
+
+            default:
+                return StatusCode(502, new
+                {
+                    error = result.FailureCode ?? GlunoFailureCodes.AiMalformedResponse,
+                    retryable = false,
+                });
         }
 
         _logger.LogInformation("[GLUNO] message endpoint returning status=200 error=none");
@@ -387,7 +450,9 @@ public class GlunoController : ControllerBase
             Conversation = MapConversation(result.Conversation!),
             UserMessage = MapMessage(result.UserMessage!, Array.Empty<Models.GlunoProposalRecord>()),
             // The records just written carry the ids the app applies against.
-            AssistantMessage = MapMessage(result.AssistantMessage!, result.ProposalRecords),
+            AssistantMessage = MapMessage(
+                result.AssistantMessage!, result.ProposalRecords, livePlaces: result.Places,
+                liveText: result.LiveAssistantText, liveProposals: result.Proposals),
             Clarification = MapClarification(result.Clarification),
         });
     }
@@ -467,10 +532,28 @@ public class GlunoController : ControllerBase
         // `activity_time` cards — but they answer about a draft, so they belong
         // on the draft path too. Routing on the type alone would send them
         // through the model and lose the plan they were fixing.
-        var result = clarification.DraftId.HasValue
-            ? await _chat.ContinueFromDraftAsync(userId, clarification, option, ct)
-            : await _chat.ContinueFromClarificationAsync(
-                userId, clarification, option, dto.IdempotencyKey, ct);
+        //
+        // And a THIRD case, narrower than either: a day chosen for a specific
+        // recommended place. That question was raised by the add flow and knows
+        // exactly what it is placing, so it resumes there directly.
+        var result = clarification switch
+        {
+            { PlaceMessageId: { } placeMessageId, PlaceOptionKey: { } placeOptionKey }
+                when option.EntityType == GlunoClarificationEntityTypes.Date
+                => await AddPlaceOnChosenDayAsync(
+                    userId, clarification, placeMessageId, placeOptionKey, option, dto.IdempotencyKey, ct),
+
+            { DraftId: not null } => await _chat.ContinueFromDraftAsync(userId, clarification, option, ct),
+
+            _ => await _chat.ContinueFromClarificationAsync(
+                userId, clarification, option, dto.IdempotencyKey, ct),
+        };
+
+        if (result.Error == GlunoTurnError.PlaceNotRetained)
+            return Conflict(new { error = "place_not_retained", retryable = false });
+
+        if (result.Error == GlunoTurnError.DuplicateInFlight)
+            return Conflict(new { error = "duplicate_in_flight", retryable = true });
 
         if (result.Error != GlunoTurnError.None)
         {
@@ -485,9 +568,64 @@ public class GlunoController : ControllerBase
         {
             Conversation = MapConversation(result.Conversation!),
             UserMessage = MapMessage(result.UserMessage!, Array.Empty<Models.GlunoProposalRecord>()),
-            AssistantMessage = MapMessage(result.AssistantMessage!, result.ProposalRecords),
+            AssistantMessage = MapMessage(
+                result.AssistantMessage!, result.ProposalRecords, livePlaces: result.Places,
+                liveText: result.LiveAssistantText, liveProposals: result.Proposals),
             Clarification = MapClarification(result.Clarification),
         });
+    }
+
+    /// <summary>
+    /// Resumes "add this place" once the day has been chosen.
+    ///
+    /// NO MODEL ROUND. The ordinary continuation replays the original message
+    /// through the model with the answer supplied, which is right when the
+    /// question was about what the user meant. This question was not: the add
+    /// flow raised it, and it already knew the Adventure and which card was
+    /// tapped. Sending "Real Alcázar" back through a model to work out that the
+    /// user wants Real Alcázar added on Thursday would cost a round and could
+    /// come back with something else.
+    ///
+    /// Every input is SERVER-OWNED. The place comes from the clarification row,
+    /// the day from the option's own value — which the backend wrote when it
+    /// built the row — and membership is re-checked by the add flow itself. The
+    /// client supplied a clarification id and an option key, and neither is a
+    /// place or a date.
+    /// </summary>
+    private async Task<GlunoTurnResult> AddPlaceOnChosenDayAsync(
+        Guid userId,
+        Models.GlunoClarification clarification,
+        Guid placeMessageId,
+        string placeOptionKey,
+        Models.GlunoClarificationOption option,
+        string? idempotencyKey,
+        CancellationToken ct)
+    {
+        if (!DateOnly.TryParseExact(
+                option.Value, "yyyy-MM-dd",
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out var date))
+        {
+            // A day option whose value is not a day. Nothing to guess at.
+            return new GlunoTurnResult { Error = GlunoTurnError.PlaceNotRetained };
+        }
+
+        var message = await _conversations.GetMessageAsync(placeMessageId, userId, ct);
+        if (message == null) return new GlunoTurnResult { Error = GlunoTurnError.PlaceNotRetained };
+
+        var result = await _chat.AddRecommendedPlaceAsync(
+            userId, message, placeOptionKey, date,
+            // Bound to the clarification rather than to the original send, so a
+            // double tap on the day replays the first answer instead of adding
+            // the place twice.
+            idempotencyKey ?? $"clar-{clarification.Id:N}", ct);
+
+        if (result.Error == GlunoTurnError.None && result.AssistantMessage != null)
+        {
+            await _clarifications.RecordContinuationAsync(clarification.Id, result.AssistantMessage.Id, ct);
+        }
+
+        return result;
     }
 
     /// <summary>
@@ -513,6 +651,10 @@ public class GlunoController : ControllerBase
     /// lookup could return different data, and the card would then show
     /// something the user was never recommended.
     ///
+    /// When the turn's provider does not licence its content for storage, the
+    /// payload holds an id instead and the place is fetched again here. Nothing
+    /// from that response is written down — it is rendered and forgotten.
+    ///
     /// <paramref name="optionKey"/> is positional and scoped to the message.
     /// A key from another conversation, or one nobody rendered, resolves to
     /// nothing.
@@ -521,18 +663,51 @@ public class GlunoController : ControllerBase
     public async Task<ActionResult<GlunoPlaceDto>> GetRecommendedPlace(Guid messageId, string optionKey)
     {
         var ct = HttpContext.RequestAborted;
+        var index = GlunoPlaceOptions.IndexOf(optionKey);
 
         // Ownership is the lookup. A message from somebody else's conversation
-        // is simply not found.
+        // is simply not found — and so is its place, which is what stops a key
+        // from one conversation reaching another's results.
         var message = await _conversations.GetMessageAsync(messageId, GetUserId(), ct);
         if (message == null) return NotFound(new { error = "message_not_found", retryable = false });
 
         var place = GlunoPlaceOptions.Resolve(message, optionKey);
-        if (place == null) return NotFound(new { error = "place_not_found", retryable = false });
+        if (place != null) return Ok(MapPlace(place, index));
 
-        var index = GlunoPlaceOptions.IndexOf(optionKey);
+        // ── Nothing stored but an id ──────────────────────────────────────
+        var reference = GlunoPlaceOptions.ResolveReference(message, optionKey);
+        var search = GlunoPlaceOptions.SearchContext(message);
 
-        return Ok(MapPlace(place, index));
+        if (reference == null || search == null)
+            return NotFound(new { error = "place_not_found", retryable = false });
+
+        var rehydrated = await _rehydrator.RehydrateAsync(
+            GlunoPlaceOptions.References(message), search, optionKey, ct);
+
+        // The exact id or nothing. A fresh response is a different list from a
+        // different day, and anything else in it is a place this user was never
+        // shown.
+        if (rehydrated.Status == GlunoRehydrationStatus.Ok
+            && rehydrated.Places.TryGetValue(optionKey, out var fresh)
+            && string.Equals(fresh.ProviderPlaceId, reference.LocationId, StringComparison.Ordinal)
+            && string.Equals(fresh.Provider, reference.ProviderId, StringComparison.Ordinal))
+        {
+            // Mapped straight into the response. Not stored, not cached, not
+            // written back into the message it came from.
+            return Ok(MapPlace(GlunoPlaceCards.From(fresh), index));
+        }
+
+        return rehydrated.Status switch
+        {
+            // Transient, and the only one worth retrying. A rejected key, a
+            // timeout and a changed contract all look the same from here and
+            // none of them are the user's problem.
+            GlunoRehydrationStatus.Busy
+                => StatusCode(503, new { error = "place_lookup_busy", retryable = true }),
+            GlunoRehydrationStatus.NotFound
+                => NotFound(new { error = "place_not_available", retryable = false }),
+            _ => StatusCode(502, new { error = "place_lookup_failed", retryable = true }),
+        };
     }
 
     /// <summary>
@@ -556,11 +731,34 @@ public class GlunoController : ControllerBase
         var message = await _conversations.GetMessageAsync(messageId, userId, ct);
         if (message == null) return NotFound(new { error = "message_not_found", retryable = false });
 
-        var place = GlunoPlaceOptions.Resolve(message, optionKey);
-        if (place == null) return NotFound(new { error = "place_not_found", retryable = false });
-
+        // ── The place, however it has to be obtained ──────────────────────
+        //
+        // The key and the message are the whole request. Whether the place is
+        // read back from this turn's stored card or fetched again from a stored
+        // id depends on the terms the provider gave it under, and neither the
+        // client nor this controller needs to know which — see
+        // GlunoChatService.AddRecommendedPlaceAsync.
+        //
+        // What the client may NOT do is supply the place. A name or a
+        // coordinate travelling from the app is exactly what the option-key
+        // design exists to avoid.
         var result = await _chat.AddRecommendedPlaceAsync(
-            userId, message, place, dto?.Date, dto?.IdempotencyKey, ct);
+            userId, message, optionKey, dto?.Date, dto?.IdempotencyKey, ct);
+
+        if (result.Error == GlunoTurnError.PlaceNotRetained)
+        {
+            // Distinct from an unknown key: this conversation did show places,
+            // it just kept nothing that answers to this one. Older clients see
+            // a code they can render rather than a bare "not found".
+            return Conflict(new { error = "place_not_retained", retryable = false });
+        }
+
+        if (result.Error == GlunoTurnError.DuplicateInFlight)
+        {
+            // The first tap is still working. A second proposal is exactly what
+            // the idempotency key exists to prevent.
+            return Conflict(new { error = "duplicate_in_flight", retryable = true });
+        }
 
         if (result.Error != GlunoTurnError.None)
         {
@@ -575,7 +773,9 @@ public class GlunoController : ControllerBase
         {
             Conversation = MapConversation(result.Conversation!),
             UserMessage = MapMessage(result.UserMessage!, Array.Empty<Models.GlunoProposalRecord>()),
-            AssistantMessage = MapMessage(result.AssistantMessage!, result.ProposalRecords),
+            AssistantMessage = MapMessage(
+                result.AssistantMessage!, result.ProposalRecords, livePlaces: result.Places,
+                liveText: result.LiveAssistantText, liveProposals: result.Proposals),
             Clarification = MapClarification(result.Clarification),
         });
     }
@@ -755,14 +955,51 @@ public class GlunoController : ControllerBase
             .Select(m => MapMessage(
                 m,
                 byMessage.GetValueOrDefault(m.Id, Array.Empty<Models.GlunoProposalRecord>()),
-                clarifications.GetValueOrDefault(m.Id)))
+                Renderable(clarifications.GetValueOrDefault(m.Id))))
             .ToList();
     }
 
+    /// <param name="livePlaces">
+    /// The places THIS turn produced, when the caller has them.
+    ///
+    /// Load-bearing rather than an optimisation. Some providers licence their
+    /// content for the response and not for storage, so the message payload
+    /// may deliberately hold no places — and reading them back from it would
+    /// hand the app an empty list on the very turn that fetched them. The turn
+    /// result is the source for the live answer; the payload is the source for
+    /// history, and the two are allowed to differ.
+    /// </param>
+    /// <summary>
+    /// A stored question, or nothing when it cannot be asked again.
+    ///
+    /// A question whose wording was a provider's content kept only a neutral
+    /// version — "Which of the places do you mean?" over rows reading "Option
+    /// 1" and "Option 2". That is not a question anybody can answer, and
+    /// rendering it would leave a live Apply path under a card with no meaning.
+    /// The history drops it; the user asks again and gets a fresh one.
+    /// </summary>
+    private static Models.GlunoClarification? Renderable(Models.GlunoClarification? clarification)
+        => clarification is { ContentSuppressed: true } ? null : clarification;
+
+    /// <param name="liveText">
+    /// The answer as the user should see it this turn, when it differs from the
+    /// stored one. Same reasoning as <paramref name="livePlaces"/>: a provider
+    /// that does not licence its content for storage does not licence it in
+    /// prose either, so the row holds a neutral line and this holds what was
+    /// actually said. Never derived from the other — see GlunoNeutralText.
+    /// </param>
+    /// <param name="liveProposals">
+    /// The proposals as built, in the same order as the rows. A proposal for a
+    /// place under those terms is STORED as an identity plus the user's own
+    /// choices, so the row alone would render a card with no heading.
+    /// </param>
     private static GlunoMessageDto MapMessage(
         GlunoMessage m,
         IReadOnlyList<Models.GlunoProposalRecord> proposalRecords,
-        Models.GlunoClarification? clarification = null)
+        Models.GlunoClarification? clarification = null,
+        IReadOnlyList<GlunoPlaceCard>? livePlaces = null,
+        string? liveText = null,
+        IReadOnlyList<Services.Gluno.GlunoProposal>? liveProposals = null)
     {
         var (legacyProposals, places, navigations, sources) = ReadPayload(m);
 
@@ -770,20 +1007,27 @@ public class GlunoController : ControllerBase
         // predate proposals becoming rows; those render as read-only history
         // (Guid.Empty id, stale status) because there is nothing to apply.
         var proposals = proposalRecords.Count > 0
-            ? proposalRecords.Select(MapProposalRecord).ToList()
+            ? proposalRecords
+                .Select((record, index) => MapProposalRecord(
+                    record,
+                    liveProposals != null && index < liveProposals.Count ? liveProposals[index] : null))
+                .ToList()
             : legacyProposals;
 
         return new GlunoMessageDto
         {
             Id = m.Id,
             Role = m.Role,
-            Text = m.Text,
+            Text = liveText ?? m.Text,
             // Computed here rather than stored, so the rule lives in exactly
             // one place and a role added later cannot start leaking into the
             // chat.
             IsRenderable = GlunoMessageRoles.IsRenderable(m.Role),
             Proposals = proposals,
-            Places = places,
+            // The live list wins when the caller has one — see livePlaces.
+            Places = livePlaces != null
+                ? livePlaces.Select((place, index) => MapPlace(place, index)).ToList()
+                : places,
             Navigations = navigations,
             Sources = sources,
             // So a reloaded conversation renders its cards again instead of
@@ -793,7 +1037,8 @@ public class GlunoController : ControllerBase
         };
     }
 
-    private static GlunoProposalDto MapProposalRecord(Models.GlunoProposalRecord record)
+    private static GlunoProposalDto MapProposalRecord(
+        Models.GlunoProposalRecord record, Services.Gluno.GlunoProposal? live = null)
     {
         JsonElement payload = default;
         try
@@ -813,8 +1058,10 @@ public class GlunoController : ControllerBase
             Kind = KindForAction(record.ActionType),
             ActionType = record.ActionType,
             TripId = record.TripId ?? Guid.Empty,
-            Summary = record.Summary,
-            Payload = payload,
+            // The version as built wins for the turn that built it; the row is
+            // what everything afterwards reads.
+            Summary = live?.Summary ?? record.Summary,
+            Payload = live?.Payload ?? payload,
             PayloadVersion = record.PayloadVersion,
             Status = record.Status,
             FailureCode = record.FailureCode,

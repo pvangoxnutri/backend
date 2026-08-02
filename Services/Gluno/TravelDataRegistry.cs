@@ -41,7 +41,22 @@ public sealed class TravelDataRegistry : ITravelDataRegistry
     {
         var startedAt = DateTime.UtcNow;
 
-        var configured = _providers.Where(provider => provider.IsConfigured).ToList();
+        // ── One provider per place-id namespace ───────────────────────────
+        //
+        // Terra and the Content API are two products from the same company and
+        // issue the SAME location ids, so both being configured would mean two
+        // upstream calls, two bills and a deduplicated list where each place
+        // came from whichever answered first — with the other's ratings
+        // possibly attached.
+        //
+        // Registration order is the priority, and Terra is registered first:
+        // Content API keys stop working 2026-08-31, so the newer platform wins
+        // wherever both are available.
+        var configured = _providers
+            .Where(provider => provider.IsConfigured)
+            .GroupBy(provider => provider.Provider, StringComparer.Ordinal)
+            .Select(group => group.First())
+            .ToList();
 
         // ── Not configured is not "no results" ────────────────────────────
         //
@@ -135,6 +150,94 @@ public sealed class TravelDataRegistry : ITravelDataRegistry
         }
 
         return ranked;
+    }
+
+    /// <summary>
+    /// Everything the configured providers returned, in their own order.
+    ///
+    /// NOT RANKED AND NOT TRIMMED, unlike the search above. This exists for
+    /// looking a known id back up, where SideQuest's relevance score is beside
+    /// the point and trimming to the requested count could throw away the one
+    /// result the caller came for.
+    ///
+    /// The status is the worst thing that happened: if one provider was rate
+    /// limited and another simply had nothing, the caller must not be told
+    /// "nothing" — it would be the difference between "try again shortly" and
+    /// "that place is gone".
+    /// </summary>
+    public async Task<TravelSearchResult> SearchAllAsync(TravelPlaceQuery query, CancellationToken ct)
+    {
+        var configured = _providers
+            .Where(provider => provider.IsConfigured)
+            .GroupBy(provider => provider.Provider, StringComparer.Ordinal)
+            .Select(group => group.First())
+            .ToList();
+
+        if (configured.Count == 0)
+        {
+            return new TravelSearchResult
+            {
+                Places = Array.Empty<TravelPlace>(),
+                Status = TravelSearchStatus.Failed,
+            };
+        }
+
+        var collected = new List<TravelPlace>();
+        var status = TravelSearchStatus.Ok;
+
+        foreach (var provider in configured)
+        {
+            try
+            {
+                var result = await provider.SearchPlacesWithStatusAsync(query, ct);
+
+                collected.AddRange(result.Places);
+                status = Worse(status, result.Status);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                status = Worse(status, TravelSearchStatus.Failed);
+
+                _logger.LogWarning(
+                    "[GLUNO] travel provider {Provider} lookup failed: {Category}",
+                    provider.Provider, ex.GetType().Name);
+            }
+        }
+
+        return new TravelSearchResult
+        {
+            Places = collected
+                .GroupBy(place => place.ExternalId, StringComparer.Ordinal)
+                .Select(group => group.First())
+                .ToList(),
+            Status = status,
+        };
+    }
+
+    /// <summary>
+    /// The more serious of two statuses.
+    ///
+    /// Rate limited outranks failed: it is the only one that means "later", and
+    /// a caller that hears "failed" would stop suggesting the retry that would
+    /// have worked.
+    /// </summary>
+    private static TravelSearchStatus Worse(TravelSearchStatus current, TravelSearchStatus next)
+    {
+        if (current == TravelSearchStatus.RateLimited || next == TravelSearchStatus.RateLimited)
+            return TravelSearchStatus.RateLimited;
+
+        if (current == TravelSearchStatus.Failed || next == TravelSearchStatus.Failed)
+            return TravelSearchStatus.Failed;
+
+        // Unknown means the provider does not report. It is not evidence of
+        // health, so it never upgrades a status.
+        return current == TravelSearchStatus.Unknown || next == TravelSearchStatus.Unknown
+            ? TravelSearchStatus.Unknown
+            : TravelSearchStatus.Ok;
     }
 
     public async Task<TravelPlace?> GetPlaceDetailsAsync(string externalId, string language, CancellationToken ct)

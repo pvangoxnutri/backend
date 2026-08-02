@@ -161,22 +161,58 @@ public class AvailabilityEvals
     [Fact]
     public void The_status_contract_never_names_a_model_a_provider_or_a_key()
     {
-        foreach (var property in typeof(GlunoStatusDto).GetProperties())
+        // The nested travel-data block is checked by its own test below, with
+        // the same value rules. It is allowed to exist because "which provider
+        // is live" is something the client legitimately needs — the previous
+        // outage was invisible from every surface precisely because nothing
+        // reported it.
+        AssertSafeStatusShape(typeof(GlunoStatusDto), allowNested: typeof(GlunoTravelDataDto));
+    }
+
+    [Fact]
+    public void The_travel_data_block_carries_no_configuration_either()
+    {
+        // Same rules, one level down. A nested type is not an exemption.
+        AssertSafeStatusShape(typeof(GlunoTravelDataDto), allowNested: null);
+    }
+
+    [Fact]
+    public void The_only_provider_name_is_a_fixed_two_value_vocabulary()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "..", "Dtos", "GlunoDtos.cs"));
+
+        var index = source.IndexOf("public string? ActiveProvider", StringComparison.Ordinal);
+        Assert.True(index > 0);
+
+        // "terra" or "legacy" — a name for a code path, not a host, an account
+        // or anything derived from a key.
+        var comment = source[Math.Max(0, index - 200)..index];
+        Assert.Contains("\"terra\" | \"legacy\"", comment);
+    }
+
+    private static void AssertSafeStatusShape(Type type, Type? allowNested)
+    {
+        foreach (var property in type.GetProperties())
         {
             var name = property.Name;
 
             Assert.DoesNotContain("Model", name, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("Key", name, StringComparison.OrdinalIgnoreCase);
-            Assert.DoesNotContain("Provider", name, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("Url", name, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("Host", name, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("Secret", name, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("Token", name, StringComparison.OrdinalIgnoreCase);
 
-            // Booleans, ints and the coarse reason string only — nothing that
-            // could carry a configuration value out.
+            if (property.PropertyType == allowNested) continue;
+
+            // Booleans, ints and coarse strings only — nothing that could carry
+            // a configuration value out.
             Assert.True(
                 property.PropertyType == typeof(bool)
                 || property.PropertyType == typeof(int)
                 || property.PropertyType == typeof(string),
-                $"{name} is {property.PropertyType.Name}; status must stay flat and non-revealing");
+                $"{type.Name}.{name} is {property.PropertyType.Name}; status must stay non-revealing");
         }
     }
 
