@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Diagnostics;
 
 namespace sidequest.backend.Services.Gluno;
@@ -143,22 +144,45 @@ public sealed record GlunoLatencyBudget
         var total = intent switch
         {
             GlunoIntent.SideQuestHelp or GlunoIntent.NavigationRequest
-                => config.GetValue("Gluno:Latency:HelpSeconds", 8),
+                => Seconds(config, "Gluno:Latency:HelpSeconds", 8),
             GlunoIntent.GeneralTravelQuestion or GlunoIntent.PreferenceUpdate
                 or GlunoIntent.ForgetPreference or GlunoIntent.ConfirmationOrRejection
-                => config.GetValue("Gluno:Latency:SimpleSeconds", 12),
+                => Seconds(config, "Gluno:Latency:SimpleSeconds", 12),
             GlunoIntent.PlaceRecommendation or GlunoIntent.DestinationRecommendation
-                => config.GetValue("Gluno:Latency:RecommendationSeconds", 25),
+                => Seconds(config, "Gluno:Latency:RecommendationSeconds", 25),
             GlunoIntent.TripReview
-                => config.GetValue("Gluno:Latency:ReviewSeconds", 20),
+                => Seconds(config, "Gluno:Latency:ReviewSeconds", 20),
             GlunoIntent.BuildFullItinerary
-                => config.GetValue("Gluno:Latency:ItinerarySeconds", 60),
+                => Seconds(config, "Gluno:Latency:ItinerarySeconds", 60),
             GlunoIntent.PlanEmptyDay or GlunoIntent.ImproveExistingDay
-                => config.GetValue("Gluno:Latency:DayPlanSeconds", 45),
-            _ => config.GetValue("Gluno:Latency:SimpleSeconds", 12),
+                => Seconds(config, "Gluno:Latency:DayPlanSeconds", 45),
+            _ => Seconds(config, "Gluno:Latency:SimpleSeconds", 12),
         };
 
-        var totalSpan = TimeSpan.FromSeconds(Math.Clamp(total, 5, 120));
+        var requested = TimeSpan.FromSeconds(Math.Clamp(total, 5, 120));
+
+        // ── The floor that makes the rest of this honest ──────────────────
+        //
+        // A proportional slice of a small budget is not a timeout, it is a
+        // guarantee of failure. "Hej" took the 12-second SimpleSeconds budget,
+        // 55% of which is 6.6 seconds — less time than a reasoning model needs
+        // to answer anything at all. Every such turn was cancelled mid-flight
+        // and reported as ai_timeout, which reads as "the provider was slow"
+        // when the truth is that we never gave it a chance.
+        //
+        // So the model's slice has a floor, and the total grows to contain it.
+        // The budget still shapes what OPTIONAL work a turn may start — that
+        // was always its real job — but it may no longer starve the one call
+        // the answer depends on.
+        var modelFloor = TimeSpan.FromSeconds(Math.Clamp(
+            Seconds(config, "Gluno:Latency:MinModelSeconds", 30), 10, 120));
+
+        var modelSpan = TimeSpan.FromMilliseconds(
+            Math.Max(modelFloor.TotalMilliseconds, requested.TotalMilliseconds * 0.55));
+
+        // A total shorter than the call it contains would have the tracker
+        // reporting negative time remaining before the model even returned.
+        var totalSpan = requested > modelSpan ? requested : modelSpan + Fraction(requested, 0.20);
 
         // Proportions rather than fixed slices, so raising the total raises
         // every stage coherently instead of leaving one starved.
@@ -168,13 +192,31 @@ public sealed record GlunoLatencyBudget
             Context = Fraction(totalSpan, 0.12),
             Providers = Fraction(totalSpan, 0.30),
             Routing = Fraction(totalSpan, 0.20),
-            Model = Fraction(totalSpan, 0.55),
+            Model = modelSpan,
             Review = Fraction(totalSpan, 0.20),
         };
     }
 
     private static TimeSpan Fraction(TimeSpan total, double share)
         => TimeSpan.FromMilliseconds(Math.Max(500, total.TotalMilliseconds * share));
+
+    /// <summary>
+    /// Reads a seconds value that must never throw.
+    ///
+    /// IConfiguration.GetValue&lt;int&gt; throws InvalidOperationException on
+    /// anything it cannot parse — an empty variable, a stray space, "30s". This
+    /// runs while the turn plan is being built, before the model call and
+    /// before the try that used to be the turn's only handler, so a typo in one
+    /// Railway variable took down every Gluno request with no way to tell that
+    /// from a provider outage.
+    ///
+    /// An unreadable value is not a reason to fail a turn. It is a reason to
+    /// use the default and carry on.
+    /// </summary>
+    private static int Seconds(IConfiguration config, string key, int fallback)
+        => int.TryParse(config[key], NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : fallback;
 }
 
 /// <summary>

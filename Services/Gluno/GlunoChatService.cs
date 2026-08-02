@@ -621,7 +621,14 @@ public sealed class GlunoChatService : IGlunoChatService
                     UserMessage = text,
                     Model = plan.Model.Model,
                     MaxOutputTokens = plan.Model.MaxOutputTokens,
-                    Timeout = plan.Latency.Model,
+                    // The SHORTER of the two, and both are now real. The
+                    // latency budget shapes the turn; the model tier's own
+                    // configured timeout is the ceiling. Passing only the
+                    // budget made Gluno:TimeoutSeconds:Primary dead
+                    // configuration — read, documented, and discarded.
+                    Timeout = plan.Latency.Model < plan.Model.Timeout
+                        ? plan.Latency.Model
+                        : plan.Model.Timeout,
                     // Only when the plan says the offered tools are genuinely
                     // independent. Parallelising dependent calls would run them
                     // against data that does not exist yet.
@@ -704,6 +711,26 @@ public sealed class GlunoChatService : IGlunoChatService
         {
             // The provider's own timeout, not the user. This one IS a failure
             // and gets an intent-appropriate fallback.
+            //
+            // The app still sees `ai_timeout` — one code, one sentence. But the
+            // log distinguishes the two very different causes, because "we cut
+            // the model off" and "the model did not answer" need opposite
+            // fixes and were indistinguishable before.
+            var modelAllowance = plan.Latency.Model < plan.Model.Timeout
+                ? plan.Latency.Model
+                : plan.Model.Timeout;
+
+            _logger.LogWarning(
+                "[GLUNO] model timed out cause={Cause} allowanceMs={Allowance} elapsedMs={Elapsed} "
+                + "budgetMs={Budget} policy={Policy} intent={Intent} stage={Stage}",
+                plan.Latency.Model < plan.Model.Timeout ? "turn_budget_exhausted" : "provider_timeout",
+                (long)modelAllowance.TotalMilliseconds,
+                (long)latency.Elapsed.TotalMilliseconds,
+                (long)plan.Latency.Total.TotalMilliseconds,
+                $"{plan.Model.Tier}",
+                intent.PrimaryIntent,
+                latency.LastStage ?? "unknown");
+
             telemetry.FailureCategory = GlunoFailureCodes.AiTimeout;
             telemetry.RecordStages(latency);
             telemetry.Write(_logger);

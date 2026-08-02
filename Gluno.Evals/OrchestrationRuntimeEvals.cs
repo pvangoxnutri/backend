@@ -248,8 +248,16 @@ public class OrchestrationRuntimeEvals
         var itinerary = GlunoLatencyBudget.For(GlunoIntent.BuildFullItinerary, Config());
 
         Assert.True(help.Total < itinerary.Total);
-        // Nobody tolerates four seconds for "where is the packing list".
-        Assert.True(help.Total <= TimeSpan.FromSeconds(10));
+
+        // The OPTIONAL work is what a tight budget buys — how much hydration,
+        // routing and enrichment a cheap turn may start before it answers.
+        //
+        // It is deliberately no longer a claim about the model's own slice.
+        // That slice used to be 55% of this total, which for a help turn meant
+        // 4.4 seconds, and a model cancelled at 4.4 seconds does not produce a
+        // fast answer — it produces ai_timeout. See LatencyBudgetEvals.
+        Assert.True(help.Providers <= TimeSpan.FromSeconds(10));
+        Assert.True(help.Routing < itinerary.Routing);
     }
 
     [Fact]
