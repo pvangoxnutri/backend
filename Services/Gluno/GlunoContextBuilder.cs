@@ -409,12 +409,24 @@ public sealed class GlunoContextBuilder : IGlunoContextBuilder
             })
             .ToList();
 
-        var dayLocationRows = await _db.TripDayLocations
+        // The ENTITIES, not a projection. TripDayLocationService.ResolveTimeline
+        // is the one place that knows what a day's location means — carry
+        // forward from the last anchor, extra stops bound to their own day, the
+        // trip destination as the universal fallback — and it takes the rows.
+        //
+        // Projecting first was how Gluno ended up seeing a stored row per date
+        // and nothing else: the Feed showed Málaga across three days because it
+        // runs this resolver, and Gluno saw one row on one day and could not
+        // say where the trip went.
+        var dayLocationEntities = await _db.TripDayLocations
             .AsNoTracking()
             .Where(d => d.TripId == tripId)
             .OrderBy(d => d.StartDate)
             .ThenBy(d => d.SortIndex)
             .Take(GlunoContextLimits.MaxDayLocations + 1)
+            .ToListAsync(ct);
+
+        var dayLocationRows = dayLocationEntities
             .Select(d => new GlunoDayLocationContext
             {
                 Date = d.StartDate,
@@ -423,7 +435,7 @@ public sealed class GlunoContextBuilder : IGlunoContextBuilder
                 Latitude = d.Latitude,
                 Longitude = d.Longitude,
             })
-            .ToListAsync(ct);
+            .ToList();
 
         if (dayLocationRows.Count > GlunoContextLimits.MaxDayLocations)
         {
@@ -500,6 +512,11 @@ public sealed class GlunoContextBuilder : IGlunoContextBuilder
             MemberCount = memberCount,
             Activities = activities,
             DayLocations = dayLocationRows,
+            // Where the trip goes, in order, from the SAME resolver the Feed
+            // uses. Without this the model had a flat list of rows and no way
+            // to answer "which cities do we visit".
+            Destinations = TripDestinationSummary.Build(
+                trip, dayLocationEntities, activities, Array.Empty<string>()),
             Weather = weather,
             Budget = budget,
             AppliedChanges = appliedChanges,

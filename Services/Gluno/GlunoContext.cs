@@ -238,6 +238,12 @@ public sealed record GlunoTripContext
     public int MemberCount { get; init; }
     public IReadOnlyList<GlunoActivityContext> Activities { get; init; } = Array.Empty<GlunoActivityContext>();
     public IReadOnlyList<GlunoDayLocationContext> DayLocations { get; init; } = Array.Empty<GlunoDayLocationContext>();
+    /// <summary>
+    /// Where the trip actually goes, in order, with dates. Built from the same
+    /// selector the Feed uses so the two can never disagree — see
+    /// TripDestinationSummary.
+    /// </summary>
+    public TripDestinationSummary? Destinations { get; init; }
     public IReadOnlyList<GlunoWeatherContext> Weather { get; init; } = Array.Empty<GlunoWeatherContext>();
     public IReadOnlyList<GlunoBudgetContext> Budget { get; init; } = Array.Empty<GlunoBudgetContext>();
     public IReadOnlyList<GlunoAppliedChangeContext> AppliedChanges { get; init; } = Array.Empty<GlunoAppliedChangeContext>();

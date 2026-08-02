@@ -346,6 +346,24 @@ public sealed class GlunoChatService : IGlunoChatService
                 return new GlunoTurnResult { Error = GlunoTurnError.ConversationNotFound };
             if (existing.ArchivedAt != null)
                 return new GlunoTurnResult { Error = GlunoTurnError.ConversationArchived };
+
+            // The caller opened Gluno from an Adventure but handed us a
+            // conversation belonging to a different scope — usually a global
+            // one left in the client's cache.
+            //
+            // Continuing silently is the worst option available: the app shows
+            // an Adventure scope pill, and the backend answers with no trip
+            // context at all. Gluno then knows nothing about the trip the user
+            // is looking at, and there is no signal anywhere that says why.
+            if (tripId.HasValue && existing.TripId != tripId)
+            {
+                _logger.LogInformation(
+                    "[GLUNO] conversation scope mismatch: requested trip-scoped, conversation is {Scope}",
+                    existing.TripId.HasValue ? "another trip" : "global");
+
+                return new GlunoTurnResult { Error = GlunoTurnError.ConversationNotFound };
+            }
+
             conversation = existing;
         }
         else
@@ -1363,6 +1381,14 @@ public sealed class GlunoChatService : IGlunoChatService
             new GlunoContextSection(
                 GlunoContextPriority.CurrentRequest, "turn",
                 JsonSerializer.Serialize(turnBrief, GlunoJson.Options))
+            { IsCritical = true },
+            // Where the trip GOES, as its own section above everything else
+            // about it. Small, and the one thing whose absence makes Gluno ask
+            // a question the Adventure already answers — so it is never a
+            // casualty of trimming, even when the rest of the trip is.
+            new GlunoContextSection(
+                GlunoContextPriority.RelevantTrip, "destinations",
+                JsonSerializer.Serialize(context.Trip?.Destinations, GlunoJson.Options))
             { IsCritical = true },
             new GlunoContextSection(
                 GlunoContextPriority.RelevantTrip, "context",
