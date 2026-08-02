@@ -152,9 +152,10 @@ public class AdventureScopeEvals
         var source = GlunoScreen();
 
         // The old shape was `tripId ? name : global` — the URL deciding what
-        // the user was told about scope.
-        Assert.DoesNotContain("styles.scopePill, tripId && styles.scopePillScoped", source);
-        Assert.Contains("styles.scopePill, scoped && styles.scopePillScoped", source);
+        // the user was told about scope. The pill is now a picker component,
+        // and `scoped` is what it is handed.
+        Assert.DoesNotContain("styles.scopePill, tripId &&", source);
+        Assert.Contains("tripId={scoped ? tripId : null}", source);
     }
 
     [Fact]
@@ -168,11 +169,100 @@ public class AdventureScopeEvals
     [Fact]
     public void The_pill_claims_nothing_while_the_check_is_running()
     {
+        // Naming an Adventure and then turning out to be a global chat has
+        // already told the user something untrue. The screen passes the
+        // unverified state down; the picker renders "Checking…" for it.
+        Assert.Contains(
+            "checking={tripId != null && !scopeVerified && !scopeLost}", GlunoScreen());
+
+        Assert.Contains(
+            "gluno.scope.checking",
+            Mobile("components", "gluno", "GlunoScopePicker.tsx"));
+    }
+
+    [Fact]
+    public void The_word_Global_never_reaches_the_screen()
+    {
+        var translations = Translations();
+
+        // A developer's word for "no trip selected". It told the user nothing
+        // they wanted to know and implied a mode rather than a capability.
+        foreach (var line in translations.Split('\n'))
+        {
+            if (!line.Contains("'gluno.scope.global'", StringComparison.Ordinal)) continue;
+
+            Assert.DoesNotContain(": 'Global'", line);
+            Assert.DoesNotContain(": 'Globalt", line);
+        }
+
+        Assert.Contains("'gluno.scope.global': 'All Adventures'", translations);
+        Assert.Contains("'gluno.scope.global': 'Alla Adventures'", translations);
+    }
+
+    [Fact]
+    public void The_scope_pill_is_a_real_chooser()
+    {
+        var picker = Mobile("components", "gluno", "GlunoScopePicker.tsx");
+
+        // Not a label. Somebody looking at it had no way to act on what it
+        // said, which is half of why the word was confusing.
+        Assert.Contains("<TouchableOpacity", picker);
+        Assert.Contains("<ModalSheet", picker);
+        Assert.Contains("accessibilityRole=\"button\"", picker);
+    }
+
+    [Fact]
+    public void The_chooser_always_offers_a_way_back_to_all_Adventures()
+    {
+        var picker = Mobile("components", "gluno", "GlunoScopePicker.tsx");
+
+        var allAt = picker.IndexOf("t('gluno.scope.global')", StringComparison.Ordinal);
+        var listAt = picker.IndexOf("ordered.map((trip)", StringComparison.Ordinal);
+
+        Assert.True(allAt > 0 && listAt > 0);
+        // First and always present. Somebody who scoped into a trip needs a
+        // way out, and "all" is a real choice rather than the absence of one.
+        Assert.True(allAt < listAt);
+    }
+
+    [Fact]
+    public void Switching_scope_aborts_the_turn_being_left_behind()
+    {
         var source = GlunoScreen();
 
-        // Naming an Adventure and then turning out to be a global chat has
-        // already told the user something untrue.
-        Assert.Contains("gluno.scope.checking", source);
+        // Its answer would arrive into a conversation it was never about.
+        var index = source.IndexOf("onChange={(choice) =>", StringComparison.Ordinal);
+        var body = source[index..(index + 700)];
+
+        Assert.Contains("abortRef.current?.abort()", body);
+    }
+
+    [Fact]
+    public void Switching_scope_opens_the_other_conversation_rather_than_re_scoping_this_one()
+    {
+        var source = GlunoScreen();
+
+        var index = source.IndexOf("onChange={(choice) =>", StringComparison.Ordinal);
+        var body = source[index..(index + 700)];
+
+        // A route change, so the screen reloads the conversation belonging to
+        // that scope — its own history, its own cache key. Nothing mutates a
+        // conversation from global to trip or between two Adventures.
+        Assert.Contains("router.replace(", body);
+        Assert.Contains("pathname: '/gluno'", body);
+    }
+
+    [Fact]
+    public void The_chooser_shows_no_internal_ids()
+    {
+        var picker = Mobile("components", "gluno", "GlunoScopePicker.tsx");
+
+        var start = picker.IndexOf("function describe(trip: Quest)", StringComparison.Ordinal);
+        var body = picker[start..(start + 600)];
+
+        Assert.True(start > 0);
+        // A person recognises a trip by where and when, not by a guid.
+        Assert.DoesNotContain("trip.id", body);
     }
 
     [Fact]

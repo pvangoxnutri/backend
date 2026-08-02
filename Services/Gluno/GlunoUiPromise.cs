@@ -101,6 +101,55 @@ public static class GlunoUiPromise
     }
 
     /// <summary>
+    /// Ways of explaining WHY data is missing instead of WHAT that means.
+    ///
+    /// "I couldn't fetch current ratings — no providers are responding. This
+    /// is from my own knowledge" tells somebody planning a holiday three
+    /// things they cannot use and one thing that actively undermines the
+    /// answer they are reading.
+    ///
+    /// The useful half of that sentence is "I can't confirm current ratings" —
+    /// how much to trust what follows. Which service was called, whether it
+    /// timed out, and where the remainder came from are internal facts, and
+    /// naming a provider in a failure also attaches its brand to a bad moment
+    /// it had no part in.
+    /// </summary>
+    private static readonly string[] SourceTalk =
+    [
+        // English
+        "no providers", "provider unavailable", "provider failure",
+        "providers are", "the provider", "my own knowledge", "my training data",
+        "training data", "general knowledge", "couldn't fetch live",
+        "could not fetch live", "live data", "the api", "api isn't",
+        "api is not", "the integration", "the backend", "the service isn't",
+        "the service is not", "didn't respond", "did not respond",
+        "tripadvisor didn't", "tripadvisor did not",
+        // Swedish
+        "leverantor", "leverantorer", "ingen leverantor", "inga leverantorer",
+        "min egen kunskap", "egen kunskap", "mina traningsdata", "traningsdata",
+        "allman kunskap", "hamta live", "live-data", "livedata",
+        "apiet", "api:t", "integrationen", "backenden",
+        "tjansten svarar inte", "svarar inte just nu", "appen kan inte hamta",
+        "tekniskt fel", "tripadvisor svarade",
+    ];
+
+    /// <summary>
+    /// True when the text explains where data came from or why it is missing.
+    ///
+    /// Deliberately does NOT fire on somebody asking how SideQuest works — see
+    /// the caller, which only applies this to Gluno's own answers, and on
+    /// sentences rather than whole replies.
+    /// </summary>
+    public static bool ExplainsItsSources(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+
+        var normalised = Normalise(text);
+
+        return SourceTalk.Any(phrase => normalised.Contains(Normalise(phrase), StringComparison.Ordinal));
+    }
+
+    /// <summary>
     /// The text with any promise of a choice removed, sentence by sentence.
     ///
     /// Sentences rather than the whole answer: "Here's what I found. Tap one
@@ -122,6 +171,42 @@ public static class GlunoUiPromise
             .ToList();
 
         return string.Join(' ', kept).Trim();
+    }
+
+    /// <summary>
+    /// Removes sentences that explain sources, and replaces them with one
+    /// short line about what it means for the answer.
+    ///
+    /// REPLACED RATHER THAN DELETED, because the offending sentence usually
+    /// carries the only useful half: "I couldn't fetch current ratings — no
+    /// providers are responding" becomes nothing at all if simply dropped, and
+    /// the user is left with a confident-looking answer and no idea a lookup
+    /// failed. The caution has to survive; only the explanation goes.
+    /// </summary>
+    public static string WithoutSourceTalk(string text, string language)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return string.Empty;
+
+        var sentences = Regex.Split(text, @"(?<=[.!?])\s+");
+
+        var kept = sentences
+            .Where(sentence => !ExplainsItsSources(sentence))
+            .Select(sentence => sentence.Trim())
+            .Where(sentence => sentence.Length > 0)
+            .ToList();
+
+        // Nothing was removed — the answer never mentioned its sources.
+        if (kept.Count == sentences.Length) return text;
+
+        var swedish = string.Equals(language, "sv", StringComparison.OrdinalIgnoreCase);
+
+        var caution = swedish
+            ? "Jag kan inte bekräfta aktuella uppgifter just nu, så kontrollera dem innan ni åker."
+            : "I can't confirm current details just now, so check them before you go.";
+
+        return kept.Count == 0
+            ? caution
+            : $"{string.Join(' ', kept).Trim()}\n\n{caution}";
     }
 
     private static bool ContainsWord(string text, string phrase)

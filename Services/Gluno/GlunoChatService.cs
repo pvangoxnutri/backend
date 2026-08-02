@@ -1068,6 +1068,25 @@ public sealed class GlunoChatService : IGlunoChatService
         // The promise is removed rather than the answer failed: one bad clause
         // must not cost an otherwise good reply. If the whole reply was the
         // promise, a plain question replaces it.
+        // ── Why data is missing is not the user's problem ─────────────────
+        //
+        // "I couldn't fetch current ratings — no providers are responding.
+        // This is from my own knowledge" tells somebody planning a holiday
+        // three things they cannot use and one that undermines the answer they
+        // are reading.
+        //
+        // The caution survives; the explanation goes. Replaced rather than
+        // deleted, because dropping that sentence outright would leave a
+        // confident-looking answer with no hint that a lookup failed.
+        if (GlunoUiPromise.ExplainsItsSources(assistantText))
+        {
+            // The real reason stays in the log and in the failure codes. It
+            // simply never reaches the chat.
+            _logger.LogInformation("[GLUNO] answer explained its sources; caution substituted");
+
+            assistantText = GlunoUiPromise.WithoutSourceTalk(assistantText, context.User.Language);
+        }
+
         if (GlunoUiPromise.PromisesAChoice(assistantText)
             || GlunoUiPromise.ExplainsItsOwnPlumbing(assistantText))
         {
