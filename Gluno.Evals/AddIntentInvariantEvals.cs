@@ -171,10 +171,11 @@ public class AddIntentInvariantEvals
         Assert.DoesNotContain("GlunoPlaceCard", source);
         Assert.DoesNotContain("Guid", source);
 
-        // Eight original branches plus the three the production debug export
-        // forced into existence: the model-free list, the Adventure question,
-        // and the resumed pending action.
-        Assert.Equal(11, GlunoResponseOrigins.All.Count);
+        // Eight original branches plus the five the production debug exports
+        // forced into existence: the model-free list, its follow-up, the
+        // destination question, the Adventure question, and the resumed
+        // pending action.
+        Assert.Equal(13, GlunoResponseOrigins.All.Count);
         Assert.Contains("idempotency_replay", GlunoResponseOrigins.All);
         Assert.Contains("model_turn", GlunoResponseOrigins.All);
         Assert.Contains("direct_place_search", GlunoResponseOrigins.All);

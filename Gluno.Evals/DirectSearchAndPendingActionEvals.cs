@@ -95,15 +95,20 @@ public class DirectSearchAndPendingActionEvals
     [Fact]
     public void The_direct_search_makes_exactly_one_provider_call_and_zero_model_calls()
     {
-        var method = ServiceMethod("private async Task<GlunoTurnResult?> DirectPlaceSearchAsync(");
+        // The search core moved into RunDirectPlaceSearchAsync when the
+        // discovery follow-ups arrived; the invariant did not.
+        var resolver = ServiceMethod("private async Task<GlunoTurnResult?> DirectPlaceSearchAsync(");
+        var core = ServiceMethod("private async Task<GlunoTurnResult> RunDirectPlaceSearchAsync(");
 
-        // Exactly one search call in the whole path.
-        var calls = method.Split("SearchAllAsync").Length - 1;
-        Assert.Equal(1, calls);
+        // Exactly one search call in the whole path — the resolver never
+        // searches, the core searches once.
+        Assert.Equal(0, resolver.Split("SearchAllAsync").Length - 1);
+        Assert.Equal(1, core.Split("SearchAllAsync").Length - 1);
 
-        // And no model anywhere in it.
-        Assert.DoesNotContain("_ai.", method);
-        Assert.Contains("telemetry.ModelSkipped = true;", method);
+        // And no model anywhere in either.
+        Assert.DoesNotContain("_ai.", resolver);
+        Assert.DoesNotContain("_ai.", core);
+        Assert.Contains("telemetry.ModelSkipped = true;", core);
 
         // No parallel legacy call is possible either: the registry keeps one
         // provider per id namespace, and Terra outranks the Content API.
@@ -130,11 +135,11 @@ public class DirectSearchAndPendingActionEvals
     [Fact]
     public void The_direct_answer_carries_structured_places_and_the_ordinary_retention()
     {
-        var method = ServiceMethod("private async Task<GlunoTurnResult?> DirectPlaceSearchAsync(");
+        var method = ServiceMethod("private async Task<GlunoTurnResult> RunDirectPlaceSearchAsync(");
 
         // SideQuest's ranking, the per-turn cap, the sanitiser.
-        Assert.Contains("TravelPlaceRanker.Rank(result.Places, query)", method);
-        Assert.Contains(".Take(MaxPlaceCardsPerTurn)", method);
+        Assert.Contains("TravelPlaceRanker.Rank(fresh, query)", method);
+        Assert.Contains(".Take(Math.Min(limit, MaxPlaceCardsPerTurn))", method);
         Assert.Contains("SanitizePlace(", method);
 
         // The same retention decision as every other place turn — cards or
@@ -163,7 +168,7 @@ public class DirectSearchAndPendingActionEvals
     [Fact]
     public void A_provider_failure_returns_the_structured_error_contract()
     {
-        var method = ServiceMethod("private async Task<GlunoTurnResult?> DirectPlaceSearchAsync(");
+        var method = ServiceMethod("private async Task<GlunoTurnResult> RunDirectPlaceSearchAsync(");
 
         Assert.Contains("Error = GlunoTurnError.ProviderFailed", method);
         Assert.Contains("FailureCode = GlunoFailureCodes.TripadvisorUnavailable", method);
@@ -515,11 +520,15 @@ public class DirectSearchAndPendingActionEvals
     [Fact]
     public void Direct_place_search_stamps_its_origin_on_message_and_result()
     {
-        var method = ServiceMethod("private async Task<GlunoTurnResult?> DirectPlaceSearchAsync(");
+        // The origin travels as a parameter now — the same core serves the
+        // fresh search and the follow-up, each under its own name.
+        var resolver = ServiceMethod("private async Task<GlunoTurnResult?> DirectPlaceSearchAsync(");
+        Assert.Contains("origin: GlunoResponseOrigins.DirectPlaceSearch", resolver);
 
-        Assert.Contains("ResponseOrigin = GlunoResponseOrigins.DirectPlaceSearch,", method);
-        // Both the stored row and the live result carry it.
-        Assert.True(method.Split("GlunoResponseOrigins.DirectPlaceSearch").Length - 1 >= 2);
+        var core = ServiceMethod("private async Task<GlunoTurnResult> RunDirectPlaceSearchAsync(");
+        // Stored row and live result both carry whichever origin ran.
+        Assert.Contains("ResponseOrigin = origin,", core);
+        Assert.True(core.Split("ResponseOrigin = origin,").Length - 1 >= 3);
     }
 
     [Fact]
