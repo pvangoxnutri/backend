@@ -305,7 +305,7 @@ public sealed class TerraTravelProvider : ITravelDataProvider
         JsonDocument? document;
         TerraFailure failure;
 
-        (document, failure) = await SendAsync("/recommendations/search", body, ct);
+        (document, failure) = await SendAsync("/recommendations/search", body, query.RequestId, ct);
 
         if (document == null)
         {
@@ -339,7 +339,7 @@ public sealed class TerraTravelProvider : ITravelDataProvider
             // body. This line is what turns the next "zero results" report
             // into a reading instead of an investigation: it says outright
             // whether Terra sent nothing or sent things this code discarded.
-            LogShape(parsed, Elapsed(startedAt));
+            LogShape(parsed, query.RequestId, Elapsed(startedAt));
 
             if (!parsed.EnvelopeFound)
             {
@@ -427,12 +427,12 @@ public sealed class TerraTravelProvider : ITravelDataProvider
     /// carries rootKind, top-level property NAMES (schema words, never
     /// values), the per-step counts and the discard reasons.
     /// </summary>
-    private void LogShape(TerraParseResult parsed, int elapsedMs)
+    private void LogShape(TerraParseResult parsed, string? requestId, int elapsedMs)
     {
         _logger.LogInformation(
             "[GLUNO] terra response shape envelope={Envelope} topLevel={TopLevel} "
             + "searchResultCount={Raw} mappedCount={Mapped} discardedCount={Discarded} "
-            + "discardReasons={Reasons} in {Elapsed}ms",
+            + "discardReasons={Reasons} requestId={RequestId} in {Elapsed}ms",
             parsed.EnvelopeFound,
             parsed.TopLevelProperties.Count > 0 ? string.Join(',', parsed.TopLevelProperties) : "-",
             parsed.RawCount,
@@ -441,6 +441,7 @@ public sealed class TerraTravelProvider : ITravelDataProvider
             parsed.Discards.Count > 0
                 ? string.Join(',', parsed.Discards.Select(pair => $"{pair.Key}:{pair.Value}"))
                 : "-",
+            requestId ?? "-",
             elapsedMs);
     }
 
@@ -863,7 +864,7 @@ public sealed class TerraTravelProvider : ITravelDataProvider
     /// not its usefulness.
     /// </summary>
     private async Task<(JsonDocument? Document, TerraFailure Failure)> SendAsync(
-        string path, string body, CancellationToken ct)
+        string path, string body, string? requestId, CancellationToken ct)
     {
         try
         {
@@ -884,13 +885,15 @@ public sealed class TerraTravelProvider : ITravelDataProvider
             using var response = await httpClient.SendAsync(
                 request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
 
-            // Transport structure only: a status code, a media type and a
-            // length. Never a header value, never a body.
+            // Transport structure only: a status code, a media type, a length
+            // and SideQuest's own correlation id. Never a header value, never
+            // a body.
             _logger.LogInformation(
-                "[GLUNO] terra transport status={Status} contentType={ContentType} bodyLength={BodyLength}",
+                "[GLUNO] terra transport status={Status} contentType={ContentType} bodyLength={BodyLength} requestId={RequestId}",
                 (int)response.StatusCode,
                 response.Content.Headers.ContentType?.MediaType ?? "-",
-                response.Content.Headers.ContentLength ?? -1);
+                response.Content.Headers.ContentLength ?? -1,
+                requestId ?? "-");
 
             if (!response.IsSuccessStatusCode)
             {
@@ -1010,8 +1013,8 @@ public sealed class TerraTravelProvider : ITravelDataProvider
     {
         _logger.LogInformation(
             "[GLUNO] terra search result={Result} category={Category} raw={Raw} mapped={Mapped} "
-            + "status={Status} in {Elapsed}ms",
-            failure, query.Category, raw, mapped, status, elapsedMs);
+            + "status={Status} requestId={RequestId} in {Elapsed}ms",
+            failure, query.Category, raw, mapped, status, query.RequestId ?? "-", elapsedMs);
 
         if (failure is TerraFailure.Unauthorized or TerraFailure.Forbidden
             or TerraFailure.QuotaExceeded or TerraFailure.ProviderContractChanged)

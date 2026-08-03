@@ -37,6 +37,7 @@ public class GlunoController : ControllerBase
     private readonly IGlunoContextBuilder _contextBuilder;
     private readonly IEnumerable<ITravelDataProvider> _travelProviders;
     private readonly IGlunoPlaceRehydrator _rehydrator;
+    private readonly GlunoRequestDiagnostics _diagnostics;
     private readonly ILogger<GlunoController> _logger;
 
     public GlunoController(
@@ -52,8 +53,10 @@ public class GlunoController : ControllerBase
         IGlunoContextBuilder contextBuilder,
         IEnumerable<ITravelDataProvider> travelProviders,
         IGlunoPlaceRehydrator rehydrator,
+        GlunoRequestDiagnostics diagnostics,
         ILogger<GlunoController> logger)
     {
+        _diagnostics = diagnostics;
         _rehydrator = rehydrator;
         _liveTravel = liveTravel;
         _clarifications = clarifications;
@@ -87,7 +90,15 @@ public class GlunoController : ControllerBase
         // status cannot say, like whether a provider is rate limiting us.
         var retryable = result.FailureCode != null ? result.IsRetryable : GlunoErrors.IsRetryable(code);
 
-        return StatusCode(GlunoErrors.StatusFor(code), GlunoErrors.Body(code, retryable));
+        _diagnostics.ErrorCode ??= code;
+        _diagnostics.ResponseOrigin ??= result.ResponseOrigin;
+
+        // The failure body carries the producing branch and the request id so
+        // the app's debug export can join a red bubble to the backend's own
+        // log lines. Fixed vocabulary and an id — never text.
+        return StatusCode(
+            GlunoErrors.StatusFor(code),
+            GlunoErrors.Body(code, retryable, result.ResponseOrigin, _diagnostics.RequestId));
     }
 
     /// <summary>
@@ -359,7 +370,8 @@ public class GlunoController : ControllerBase
         }
         catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
         {
-            return StatusCode(499, GlunoErrors.Body(GlunoFailureCodes.Cancelled, false));
+            return StatusCode(499, GlunoErrors.Body(
+                GlunoFailureCodes.Cancelled, false, requestId: _diagnostics.RequestId));
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
@@ -367,11 +379,31 @@ public class GlunoController : ControllerBase
             // covers the case where that boundary itself fails, so there is no
             // path at all by which this endpoint answers without the envelope
             // the app depends on.
+            //
+            // A code from the CLOSED LIST, never an ad-hoc string: the app
+            // localises codes, and an invented one renders as the generic
+            // line — which is exactly the symptom this endpoint must never
+            // produce for a failure it could name.
             _logger.LogError(
-                "[GLUNO] escaped type={Category} stage=controller", ex.GetType().Name);
+                "[GLUNO] escaped type={Category} stage=controller requestId={RequestId}",
+                ex.GetType().Name, _diagnostics.RequestId);
 
-            return StatusCode(502, GlunoErrors.Body("unknown", true));
+            _diagnostics.ErrorCode = GlunoFailureCodes.AiMalformedResponse;
+
+            return StatusCode(
+                GlunoErrors.StatusFor(GlunoFailureCodes.AiMalformedResponse),
+                GlunoErrors.Body(
+                    GlunoFailureCodes.AiMalformedResponse, true,
+                    requestId: _diagnostics.RequestId));
         }
+
+        // The one summary line the middleware writes reads these — stamped
+        // here so every exit below, success or failure, reports the same
+        // facts. Ids and codes only.
+        _diagnostics.ConversationId ??= result.Conversation?.Id;
+        _diagnostics.ResponseOrigin ??= result.ResponseOrigin;
+        _diagnostics.ErrorCode ??= result.FailureCode;
+        _diagnostics.Completed = result.Error == GlunoTurnError.None;
 
         // Every exit from here is logged once — the pair of lines is what
         // proves the request completed inside the process rather than being

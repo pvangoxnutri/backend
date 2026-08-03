@@ -195,6 +195,13 @@ public sealed class TravelPlaceQuery
     /// way — a provider that ignores the field must not undo the promise.
     /// </summary>
     public IReadOnlyList<string> ExcludedLocationIds { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// The Gluno request id this search runs for — LOG CORRELATION ONLY. It
+    /// appears in the provider's own log lines so they can be joined to the
+    /// request summary by eye. Never sent upstream, never persisted.
+    /// </summary>
+    public string? RequestId { get; init; }
 }
 
 /// <summary>

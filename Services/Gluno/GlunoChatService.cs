@@ -309,6 +309,10 @@ public sealed class GlunoChatService : IGlunoChatService
     /// Used only by the deterministic refresh below — an ordinary turn reaches
     /// the providers through the action executor.
     private readonly ITravelDataRegistry _travelData;
+    /// The per-request diagnostics the middleware logs — this service stamps
+    /// which branch claimed the turn and what the provider said. Scoped, like
+    /// this service: one instance per HTTP request.
+    private readonly GlunoRequestDiagnostics _diagnostics;
     private readonly ILogger<GlunoChatService> _logger;
 
     /// <summary>
@@ -339,8 +343,10 @@ public sealed class GlunoChatService : IGlunoChatService
         IGlunoProposalDraftService drafts,
         IGlunoPlaceRehydrator rehydrator,
         ITravelDataRegistry travelData,
+        GlunoRequestDiagnostics diagnostics,
         ILogger<GlunoChatService> logger)
     {
+        _diagnostics = diagnostics;
         _rehydrator = rehydrator;
         _travelData = travelData;
         _grounding = grounding;
@@ -404,8 +410,9 @@ public sealed class GlunoChatService : IGlunoChatService
             // Type name only — an exception message can carry a connection
             // string, a request URI, or a row's contents.
             _logger.LogError(
-                "[GLUNO] escaped type={Category} stage={Stage}",
-                ex.GetType().Name, _latency?.LastStage ?? "before_planning");
+                "[GLUNO] escaped type={Category} stage={Stage} requestId={RequestId}",
+                ex.GetType().Name, _latency?.LastStage ?? "before_planning",
+                _diagnostics.RequestId);
 
             // Best effort, and deliberately not allowed to mask the original
             // failure: the claim would otherwise sit in-flight until its
@@ -528,6 +535,11 @@ public sealed class GlunoChatService : IGlunoChatService
         }
 
         var telemetry = new GlunoTurnTelemetry { ConversationId = conversation.Id };
+
+        // For the one summary line the middleware writes. Ids and a fixed
+        // vocabulary only.
+        _diagnostics.ConversationId = conversation.Id;
+        _diagnostics.ScopeType = conversation.TripId != null ? "adventure" : "global";
 
         // ── Usage ceiling ─────────────────────────────────────────────────
         //
@@ -717,6 +729,8 @@ public sealed class GlunoChatService : IGlunoChatService
             if (activeDiscovery.AwaitingDestination
                 && GlunoDiscoveryFollowUps.ParseDestinationAnswer(text) is { } namedDestination)
             {
+                _diagnostics.IntentBranch = "destination_answer";
+
                 var answeredSearch = await RunDirectPlaceSearchAsync(
                     userId, conversation, text, namedDestination,
                     TravelPlaceCategories.Parse(activeDiscovery.Category),
@@ -733,6 +747,8 @@ public sealed class GlunoChatService : IGlunoChatService
                 && !string.IsNullOrWhiteSpace(activeDiscovery.Destination)
                 && GlunoDiscoveryFollowUps.Parse(text) is { } discoveryFollowUp)
             {
+                _diagnostics.IntentBranch = "discovery_followup";
+
                 var followed = await DirectPlaceFollowUpAsync(
                     userId, conversation, text, activeDiscovery, discoveryFollowUp,
                     telemetry, workingState, ct);
@@ -909,6 +925,8 @@ public sealed class GlunoChatService : IGlunoChatService
         // ever add from. See GlunoDirectPlaceSearch.
         if (GlunoDirectPlaceSearch.Parse(text) is { } placeQuery)
         {
+            _diagnostics.IntentBranch = "direct_place_search";
+
             var listed = await DirectPlaceSearchAsync(
                 userId, conversation, text, placeQuery, context, resolvedTripId,
                 answered, telemetry, workingState, ct);
@@ -942,6 +960,11 @@ public sealed class GlunoChatService : IGlunoChatService
         // model tier, the tool allow-list, the budgets, the latency envelope.
         // A tool outside the plan is refused rather than argued with, so the
         // model cannot widen its own budget.
+        //
+        // Every deterministic branch above either returned or stamped its own
+        // name; a turn that reaches the plan is a model turn.
+        _diagnostics.IntentBranch = "model_turn";
+
         var plan = _planner.Build(new GlunoTurnPlanRequest
         {
             Intent = intent,
@@ -3756,6 +3779,58 @@ public sealed class GlunoChatService : IGlunoChatService
         GlunoWorkingState workingState,
         CancellationToken ct)
     {
+        try
+        {
+            return await RunDirectPlaceSearchCoreAsync(
+                userId, conversation, text, near, category, requestedCount,
+                excludeLocationIds, origin, originSource, telemetry, workingState, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // The user pressed stop — the outer boundary reports it as such.
+            throw;
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            // ── This flow never escapes as anything but the place error ───
+            //
+            // Ranking, sanitisation, retention, persistence, the discovery
+            // context: a defect anywhere in here is a failure OF THE PLACE
+            // FLOW, and the app has a sentence for exactly that. Letting it
+            // escape to the outer boundary reported it as a malformed model
+            // answer — a turn that never touched the model — and one step
+            // further out it became a bare 500 the app could only render
+            // generically. Type name only; the message can carry anything.
+            _logger.LogError(
+                "[GLUNO] direct place search escaped type={Category} requestId={RequestId}",
+                ex.GetType().Name, _diagnostics.RequestId);
+
+            telemetry.FailureCategory = GlunoFailureCodes.TripadvisorUnavailable;
+            telemetry.Write(_logger);
+
+            return new GlunoTurnResult
+            {
+                Error = GlunoTurnError.ProviderFailed,
+                FailureCode = GlunoFailureCodes.TripadvisorUnavailable,
+                ResponseOrigin = origin,
+            };
+        }
+    }
+
+    private async Task<GlunoTurnResult> RunDirectPlaceSearchCoreAsync(
+        Guid userId,
+        GlunoConversation conversation,
+        string text,
+        string near,
+        TravelPlaceCategory category,
+        int? requestedCount,
+        IReadOnlyList<string> excludeLocationIds,
+        string origin,
+        string originSource,
+        GlunoTurnTelemetry telemetry,
+        GlunoWorkingState workingState,
+        CancellationToken ct)
+    {
         var language = await LanguageOfAsync(userId, ct);
 
         // ── One search, no model ──────────────────────────────────────────
@@ -3771,15 +3846,20 @@ public sealed class GlunoChatService : IGlunoChatService
             Limit = limit,
             Language = language,
             ExcludedLocationIds = excludeLocationIds,
+            // So the provider's own log lines carry the same id as the
+            // request summary — one join key from controller to provider.
+            RequestId = _diagnostics.RequestId,
         };
 
         var result = await _travelData.SearchAllAsync(query, ct);
 
+        _diagnostics.ProviderStatus = result.Status.ToString();
+
         if (result.Status != TravelSearchStatus.Ok)
         {
             _logger.LogInformation(
-                "[GLUNO] direct place search failed status={Status} category={Category}",
-                result.Status, category);
+                "[GLUNO] direct place search failed status={Status} category={Category} requestId={RequestId}",
+                result.Status, category, _diagnostics.RequestId);
 
             // The thread survives the failure: the destination and category
             // are SideQuest's own, and a retry or a follow-up should not have
@@ -3798,11 +3878,13 @@ public sealed class GlunoChatService : IGlunoChatService
             telemetry.Write(_logger);
 
             // The ordinary structured error contract: a code the app
-            // localises, and an honest retry flag.
+            // localises, an honest retry flag, and the branch that failed so
+            // the error body can name it.
             return new GlunoTurnResult
             {
                 Error = GlunoTurnError.ProviderFailed,
                 FailureCode = GlunoFailureCodes.TripadvisorUnavailable,
+                ResponseOrigin = origin,
             };
         }
 

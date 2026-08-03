@@ -33,14 +33,22 @@ public static class GlunoErrors
     /// Returns object rather than a DTO so it serialises with the same
     /// camelCase settings as every other response, and so nothing can construct
     /// a partial one by leaving a property unset.
+    ///
+    /// `responseOrigin` and `requestId` are diagnostics for the app's debug
+    /// export: which branch produced the failure, and the id that joins it to
+    /// the backend's own log lines. Both are fixed-vocabulary values or ids —
+    /// never text — and both are optional so older call sites keep compiling.
     /// </summary>
-    public static object Body(string code, bool retryable) => new
+    public static object Body(
+        string code, bool retryable, string? responseOrigin = null, string? requestId = null) => new
     {
         code,
         // The earlier field name, same value.
         error = code,
         message = Fallback(code),
         retryable,
+        responseOrigin,
+        requestId,
     };
 
     /// <summary>

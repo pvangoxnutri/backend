@@ -164,6 +164,10 @@ builder.Services.AddScoped<IGlunoProposalDraftService, GlunoProposalDraftService
 // on the caller's own cancellation token.
 builder.Services.AddScoped<IGlunoPlaceRehydrator, GlunoPlaceRehydrator>();
 builder.Services.AddScoped<IGlunoChatService, GlunoChatService>();
+// One instance per HTTP request: the Gluno middleware mints the request id,
+// the controller and service stamp branch facts onto it, and the middleware
+// writes the one summary line whatever happens.
+builder.Services.AddScoped<GlunoRequestDiagnostics>();
 // The proposal half: the store records what Gluno suggested, and the apply
 // service is the ONLY thing that turns one into a real change — always behind
 // an explicit user action, never from the model.
@@ -377,6 +381,81 @@ if (!app.Environment.IsDevelopment())
     app.UseHttpsRedirection();
 }
 app.UseCors("LocalFrontend");
+
+// ── The Gluno error-contract boundary ────────────────────────────────────────
+//
+// THE BUG THIS CLOSES. A production turn failed and the app showed its generic
+// "could not answer" line instead of the provider error. The service layer
+// already maps every exception to the structured envelope — but an exception
+// in the CONTROLLER (mapping the result) or in RESPONSE SERIALIZATION escaped
+// to Kestrel, which answers 500 with an EMPTY body. No code, no retry flag —
+// exactly the shape the app can only render generically.
+//
+// This wraps everything downstream for /api/gluno so no exception can leave
+// without the JSON envelope, stamps the request id on every response, and
+// writes the one per-request summary line whatever the outcome.
+//
+// Type name only in the log — an exception message can carry a connection
+// string, a request URI or a row's contents.
+app.Use(async (ctx, next) =>
+{
+    if (!ctx.Request.Path.StartsWithSegments("/api/gluno"))
+    {
+        await next();
+        return;
+    }
+
+    var glunoDiagnostics = ctx.RequestServices.GetRequiredService<GlunoRequestDiagnostics>();
+    ctx.Response.Headers["X-Gluno-Request-Id"] = glunoDiagnostics.RequestId;
+
+    try
+    {
+        await next();
+    }
+    catch (Exception ex) when (ex is not OutOfMemoryException)
+    {
+        if (ctx.RequestAborted.IsCancellationRequested)
+        {
+            // The caller went away — nobody is reading the body, and a
+            // cancellation must never be dressed up as a server failure.
+            glunoDiagnostics.ErrorCode = GlunoFailureCodes.Cancelled;
+            return;
+        }
+
+        glunoDiagnostics.ErrorCode = GlunoFailureCodes.AiMalformedResponse;
+        app.Logger.LogError(
+            "[GLUNO] request escaped type={Category} requestId={RequestId}",
+            ex.GetType().Name, glunoDiagnostics.RequestId);
+
+        // Headers already on the wire — a second body would corrupt the
+        // response, so the envelope cannot be written. Rethrowing at least
+        // keeps the failure visible to the host instead of half-answering.
+        if (ctx.Response.HasStarted) throw;
+
+        // Existing headers (the request id stamped above, CORS) are KEPT —
+        // only the status, a possibly stale length and the content type
+        // change. Clearing everything here would strip headers other
+        // middleware already negotiated.
+        ctx.Response.StatusCode = GlunoErrors.StatusFor(GlunoFailureCodes.AiMalformedResponse);
+        ctx.Response.Headers.ContentLength = null;
+        ctx.Response.ContentType = "application/json";
+        await ctx.Response.WriteAsync(System.Text.Json.JsonSerializer.Serialize(
+            GlunoErrors.Body(
+                GlunoFailureCodes.AiMalformedResponse,
+                retryable: true,
+                responseOrigin: glunoDiagnostics.ResponseOrigin,
+                requestId: glunoDiagnostics.RequestId)));
+    }
+    finally
+    {
+        // The one line per request, whatever happened. Guarded so the
+        // summary itself can never replace the real outcome with a logging
+        // failure.
+        try { glunoDiagnostics.WriteSummary(app.Logger, ctx.Response.StatusCode); }
+        catch { /* a diagnostics line is never worth a request */ }
+    }
+});
+
 app.UseAuthentication();
 
 // Return 403 immediately for banned users — lets the mobile app kick them out
