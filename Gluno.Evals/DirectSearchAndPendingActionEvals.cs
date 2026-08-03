@@ -98,7 +98,7 @@ public class DirectSearchAndPendingActionEvals
         // The search core moved into RunDirectPlaceSearchAsync when the
         // discovery follow-ups arrived; the invariant did not.
         var resolver = ServiceMethod("private async Task<GlunoTurnResult?> DirectPlaceSearchAsync(");
-        var core = ServiceMethod("private async Task<GlunoTurnResult> RunDirectPlaceSearchAsync(");
+        var core = ServiceMethod("private async Task<GlunoTurnResult> RunDirectPlaceSearchCoreAsync(");
 
         // Exactly one search call in the whole path — the resolver never
         // searches, the core searches once.
@@ -135,7 +135,7 @@ public class DirectSearchAndPendingActionEvals
     [Fact]
     public void The_direct_answer_carries_structured_places_and_the_ordinary_retention()
     {
-        var method = ServiceMethod("private async Task<GlunoTurnResult> RunDirectPlaceSearchAsync(");
+        var method = ServiceMethod("private async Task<GlunoTurnResult> RunDirectPlaceSearchCoreAsync(");
 
         // SideQuest's ranking, the per-turn cap, the sanitiser.
         Assert.Contains("TravelPlaceRanker.Rank(fresh, query)", method);
@@ -168,7 +168,7 @@ public class DirectSearchAndPendingActionEvals
     [Fact]
     public void A_provider_failure_returns_the_structured_error_contract()
     {
-        var method = ServiceMethod("private async Task<GlunoTurnResult> RunDirectPlaceSearchAsync(");
+        var method = ServiceMethod("private async Task<GlunoTurnResult> RunDirectPlaceSearchCoreAsync(");
 
         Assert.Contains("Error = GlunoTurnError.ProviderFailed", method);
         Assert.Contains("FailureCode = GlunoFailureCodes.TripadvisorUnavailable", method);
@@ -525,7 +525,7 @@ public class DirectSearchAndPendingActionEvals
         var resolver = ServiceMethod("private async Task<GlunoTurnResult?> DirectPlaceSearchAsync(");
         Assert.Contains("origin: GlunoResponseOrigins.DirectPlaceSearch", resolver);
 
-        var core = ServiceMethod("private async Task<GlunoTurnResult> RunDirectPlaceSearchAsync(");
+        var core = ServiceMethod("private async Task<GlunoTurnResult> RunDirectPlaceSearchCoreAsync(");
         // Stored row and live result both carry whichever origin ran.
         Assert.Contains("ResponseOrigin = origin,", core);
         Assert.True(core.Split("ResponseOrigin = origin,").Length - 1 >= 3);
@@ -598,7 +598,14 @@ public class DirectSearchAndPendingActionEvals
         // source() answers WHICH TRANSPORT delivered the row — the live flag,
         // never the origin. Reading origin as liveness would relabel every
         // reloaded row as a live response now that history carries origin.
-        Assert.Contains("return message.live ? 'live_response' : 'history_or_cache';", export);
+        //
+        // The live flag WINS over the local row id: a failed turn keeps its
+        // optimistic id, but when a server response actually arrived the
+        // transport fact is live_response — that is what separates "the
+        // backend answered with an error" from "no answer ever came".
+        Assert.Contains("if (message.live) return 'live_response';", export);
+        Assert.Contains("if (message.id.startsWith('local-')) return 'local_optimistic';", export);
+        Assert.Contains("return 'history_or_cache';", export);
         Assert.DoesNotContain("message.responseOrigin ? 'live_response'", export);
 
         // The origin is still printed, separately.

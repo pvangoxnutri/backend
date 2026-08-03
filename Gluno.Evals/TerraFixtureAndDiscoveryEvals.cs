@@ -290,7 +290,7 @@ public class TerraFixtureAndDiscoveryEvals
     [Fact]
     public void The_chat_layer_shows_a_retryable_provider_error_for_every_non_ok()
     {
-        var method = ServiceMethod("private async Task<GlunoTurnResult> RunDirectPlaceSearchAsync(");
+        var method = ServiceMethod("private async Task<GlunoTurnResult> RunDirectPlaceSearchCoreAsync(");
 
         // The strict gate: only a genuine Ok may answer with an empty state.
         Assert.Contains("if (result.Status != TravelSearchStatus.Ok)", method);
@@ -474,14 +474,14 @@ public class TerraFixtureAndDiscoveryEvals
         var provider = Provider();
         Assert.Contains("exclude_location_ids", provider);
 
-        var run = ServiceMethod("private async Task<GlunoTurnResult> RunDirectPlaceSearchAsync(");
+        var run = ServiceMethod("private async Task<GlunoTurnResult> RunDirectPlaceSearchCoreAsync(");
         Assert.Contains("!excludeLocationIds.Contains(place.ProviderPlaceId", run);
     }
 
     [Fact]
     public void A_retry_after_a_provider_failure_reuses_the_discovery_context()
     {
-        var run = ServiceMethod("private async Task<GlunoTurnResult> RunDirectPlaceSearchAsync(");
+        var run = ServiceMethod("private async Task<GlunoTurnResult> RunDirectPlaceSearchCoreAsync(");
 
         // The failure branch SAVES the thread — destination, category and
         // count survive the error — so the retry (a re-send, or a follow-up
@@ -522,7 +522,7 @@ public class TerraFixtureAndDiscoveryEvals
     [Fact]
     public void Discovery_makes_exactly_one_provider_call_and_zero_model_calls()
     {
-        var run = ServiceMethod("private async Task<GlunoTurnResult> RunDirectPlaceSearchAsync(");
+        var run = ServiceMethod("private async Task<GlunoTurnResult> RunDirectPlaceSearchCoreAsync(");
 
         Assert.Equal(1, run.Split("SearchAllAsync").Length - 1);
         Assert.DoesNotContain("_ai.", run);

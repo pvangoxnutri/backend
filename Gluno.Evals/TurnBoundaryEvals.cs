@@ -49,6 +49,7 @@ public class TurnBoundaryEvals
             contextBuilder: null!,
             travelProviders: Array.Empty<ITravelDataProvider>(),
             rehydrator: new UnusedRehydrator(),
+            diagnostics: new GlunoRequestDiagnostics(),
             logger: NullLogger<GlunoController>.Instance);
 
         controller.ControllerContext = new ControllerContext

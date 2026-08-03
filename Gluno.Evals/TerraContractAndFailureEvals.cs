@@ -167,7 +167,11 @@ public class TerraContractAndFailureEvals
         Assert.DoesNotContain("retryable = false,", controller);
         Assert.DoesNotContain("retryable = result.IsRetryable,", controller);
         Assert.Contains("GlunoErrors.Body(", controller);
-        Assert.Contains("StatusCode(GlunoErrors.StatusFor(code), GlunoErrors.Body(code, retryable))", controller);
+        // The same builder, now carrying the failing branch and the request id
+        // so the app's debug export can join the failure to the backend log.
+        Assert.Contains(
+            "GlunoErrors.Body(code, retryable, result.ResponseOrigin, _diagnostics.RequestId)",
+            controller);
     }
 
     // ── 10-13. What the app does with it ─────────────────────────────────

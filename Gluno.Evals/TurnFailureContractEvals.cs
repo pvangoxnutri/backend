@@ -49,6 +49,7 @@ public class TurnFailureContractEvals
             contextBuilder: null!,
             travelProviders: Array.Empty<ITravelDataProvider>(),
             rehydrator: new UnusedRehydrator(),
+            diagnostics: new GlunoRequestDiagnostics(),
             logger: Microsoft.Extensions.Logging.Abstractions.NullLogger<GlunoController>.Instance);
 
         // The endpoint reads the caller from the principal, never from the
@@ -169,13 +170,19 @@ public class TurnFailureContractEvals
         // A failure body is read by a client that shows it to somebody. It may
         // name the problem and nothing else — no conversation text, no provider
         // detail, no configuration.
+        //
+        // responseOrigin and requestId joined the envelope for the debug
+        // export: WHICH BRANCH failed and the id that finds it in the backend
+        // log. Both are fixed vocabulary values or ids — still nothing free.
         foreach (var error in Enum.GetValues<GlunoTurnError>().Where(e => e != GlunoTurnError.None))
         {
             var (_, body) = await SendAsync(Failure(error, GlunoFailureCodes.AiMalformedResponse));
 
             foreach (var property in body.EnumerateObject())
             {
-                Assert.Contains(property.Name, new[] { "code", CodeField, "message", RetryField });
+                Assert.Contains(
+                    property.Name,
+                    new[] { "code", CodeField, "message", RetryField, "responseOrigin", "requestId" });
             }
         }
     }
