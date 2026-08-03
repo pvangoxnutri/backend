@@ -31,6 +31,41 @@ public enum TerraFailure
 }
 
 /// <summary>
+/// Why one search result did not become a place. A fixed vocabulary, logged as
+/// counts — never the item itself.
+///
+/// WHY THIS EXISTS. In production, "Terra returned six places SideQuest threw
+/// away" and "Terra returned nothing" produced the same empty answer, and the
+/// difference is the entire diagnosis: one is our mapping, the other is the
+/// query or the account.
+/// </summary>
+public enum TerraDiscard
+{
+    None,
+    /// The item carries no location object — bookable experiences, or a shape
+    /// change. Counted separately from a mapping bug on purpose.
+    MissingLocation,
+    MissingId,
+    MissingName,
+}
+
+/// <summary>
+/// What one parsed 200 contained, step by step. Pure data, built by
+/// <see cref="TerraTravelProvider.ParseSearchResponse"/> — which is what makes
+/// the response contract testable against a fixture without HTTP.
+/// </summary>
+public sealed record TerraParseResult(
+    bool EnvelopeFound,
+    IReadOnlyList<string> TopLevelProperties,
+    int RawCount,
+    IReadOnlyList<TravelPlace> Places,
+    IReadOnlyDictionary<TerraDiscard, int> Discards)
+{
+    public int MappedCount => Places.Count;
+    public int DiscardedCount => RawCount - Places.Count;
+}
+
+/// <summary>
 /// Tripadvisor Terra — the platform that replaces the Content API.
 ///
 /// WHY A SECOND PROVIDER RATHER THAN AN EDIT. Terra is a different product
@@ -241,6 +276,22 @@ public sealed class TerraTravelProvider : ITravelDataProvider
         // hours and ratings would cost more than the extra latency.
         if (SendResponsePreference) request["response_preference"] = "quality";
 
+        // ── "More" means more ─────────────────────────────────────────────
+        //
+        // Documented as an array of integers. Ids that do not parse are
+        // dropped rather than sent — a malformed id in a filter is a 400 that
+        // costs the whole answer.
+        var excluded = query.ExcludedLocationIds
+            .Select(id => long.TryParse(id, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed)
+                ? (long?)parsed
+                : null)
+            .Where(id => id.HasValue)
+            .Select(id => id!.Value)
+            .Take(50)
+            .ToList();
+
+        if (excluded.Count > 0) request["exclude_location_ids"] = excluded;
+
         // Off until a live call confirms the wire spelling. Switchable by
         // configuration rather than by deploy, because the only way to be sure
         // about an enum is to send one.
@@ -269,48 +320,128 @@ public sealed class TerraTravelProvider : ITravelDataProvider
 
         using (document)
         {
-            var raw = 0;
-            var places = new List<TravelPlace>();
+            TerraParseResult parsed;
 
             try
             {
-                // "search_results", per the published response schema. The
-                // first build read "data" — the usual envelope for this kind of
-                // API and not the one Terra uses — so a perfectly good 200 was
-                // reported as a contract change and mapped to nothing.
-                if (!document.RootElement.TryGetProperty(ResultsProperty, out var data)
-                    || data.ValueKind != JsonValueKind.Array)
-                {
-                    // The envelope is not what the contract says. Distinct from
-                    // an empty result: one is a Tripadvisor change, the other
-                    // is an answer about Sevilla.
-                    Log(TerraFailure.ProviderContractChanged, query, 0, 0, Elapsed(startedAt), null);
-                    return Empty(TravelSearchStatus.Failed);
-                }
-
-                foreach (var item in data.EnumerateArray())
-                {
-                    raw++;
-
-                    var place = MapRecommendation(item, query.Language);
-                    if (place != null) places.Add(place);
-                }
+                parsed = ParseSearchResponse(document.RootElement, query.Language);
             }
             catch (Exception ex) when (ex is JsonException or InvalidOperationException)
             {
-                Log(TerraFailure.MappingFailed, query, raw, 0, Elapsed(startedAt), null);
+                Log(TerraFailure.MappingFailed, query, 0, 0, Elapsed(startedAt), null);
+                return Empty(TravelSearchStatus.Failed);
+            }
+
+            // ── The shape of what came back, as structure only ────────────
+            //
+            // Property NAMES of the response envelope, counts, and the fixed
+            // discard vocabulary. Never a value, never a place name, never a
+            // body. This line is what turns the next "zero results" report
+            // into a reading instead of an investigation: it says outright
+            // whether Terra sent nothing or sent things this code discarded.
+            LogShape(parsed, Elapsed(startedAt));
+
+            if (!parsed.EnvelopeFound)
+            {
+                // The envelope is not what the contract says. Distinct from an
+                // empty result: one is a Tripadvisor change, the other is an
+                // answer about Sevilla.
+                Log(TerraFailure.ProviderContractChanged, query, 0, 0, Elapsed(startedAt), null);
+                return Empty(TravelSearchStatus.Failed);
+            }
+
+            if (parsed.RawCount > 0 && parsed.MappedCount == 0)
+            {
+                // ── Every result was discarded ────────────────────────────
+                //
+                // THIS IS A CONTRACT MISMATCH, NOT AN EMPTY ANSWER. Terra
+                // found places; our reading of them dropped every one. It
+                // used to be reported as Ok-with-nothing, so the user was
+                // told "no suggestions" about a city Terra had just answered
+                // about — and the bug wore an empty city's clothes.
+                Log(TerraFailure.MappingFailed, query, parsed.RawCount, 0, Elapsed(startedAt), null);
                 return Empty(TravelSearchStatus.Failed);
             }
 
             Log(
-                places.Count == 0 ? (raw == 0 ? TerraFailure.EmptyResult : TerraFailure.MappingFailed)
-                    : TerraFailure.None,
-                query, raw, places.Count, Elapsed(startedAt), null);
+                parsed.RawCount == 0 ? TerraFailure.EmptyResult : TerraFailure.None,
+                query, parsed.RawCount, parsed.MappedCount, Elapsed(startedAt), null);
 
-            // Terra answered. An empty list here is a real answer about the
-            // place that was searched, not a failure.
-            return new TravelSearchResult { Places = places, Status = TravelSearchStatus.Ok };
+            // Terra answered. An empty list HERE is a real answer about the
+            // place that was searched — the discard case above never reaches
+            // this line.
+            return new TravelSearchResult { Places = parsed.Places, Status = TravelSearchStatus.Ok };
         }
+    }
+
+    /// <summary>
+    /// One parsed 200 into places plus the exact accounting of what was kept
+    /// and what was dropped and why.
+    ///
+    /// PUBLIC AND PURE so the response contract can be pinned by a fixture
+    /// test — a mock that returns ready-made TravelPlace objects proves
+    /// nothing about this, and this is where the last two production bugs
+    /// lived.
+    /// </summary>
+    public static TerraParseResult ParseSearchResponse(JsonElement root, string language)
+    {
+        var topLevel = root.ValueKind == JsonValueKind.Object
+            ? root.EnumerateObject().Select(property => property.Name).Take(10).ToList()
+            : (List<string>)[];
+
+        if (!root.TryGetProperty(ResultsProperty, out var data)
+            || data.ValueKind != JsonValueKind.Array)
+        {
+            return new TerraParseResult(
+                EnvelopeFound: false, topLevel, 0, Array.Empty<TravelPlace>(),
+                new Dictionary<TerraDiscard, int>());
+        }
+
+        var raw = 0;
+        var places = new List<TravelPlace>();
+        var discards = new Dictionary<TerraDiscard, int>();
+
+        foreach (var item in data.EnumerateArray())
+        {
+            raw++;
+
+            var place = MapRecommendation(item, language, out var discard);
+
+            if (place != null)
+            {
+                places.Add(place);
+            }
+            else
+            {
+                discards[discard] = discards.GetValueOrDefault(discard) + 1;
+            }
+        }
+
+        return new TerraParseResult(EnvelopeFound: true, topLevel, raw, places, discards);
+    }
+
+    /// <summary>
+    /// The structure of a response, without any of its content.
+    ///
+    /// status/contentType/bodyLength arrive via the transport log; this line
+    /// carries rootKind, top-level property NAMES (schema words, never
+    /// values), the per-step counts and the discard reasons.
+    /// </summary>
+    private void LogShape(TerraParseResult parsed, int elapsedMs)
+    {
+        _logger.LogInformation(
+            "[GLUNO] terra response shape envelope={Envelope} topLevel={TopLevel} "
+            + "searchResultCount={Raw} mappedCount={Mapped} discardedCount={Discarded} "
+            + "discardReasons={Reasons} in {Elapsed}ms",
+            parsed.EnvelopeFound,
+            parsed.TopLevelProperties.Count > 0 ? string.Join(',', parsed.TopLevelProperties) : "-",
+            parsed.RawCount,
+            parsed.MappedCount,
+            parsed.DiscardedCount,
+            parsed.Discards.Count > 0
+                ? string.Join(',', parsed.Discards.Select(pair => $"{pair.Key}:{pair.Value}"))
+                : "-",
+            elapsedMs);
     }
 
     private static TravelSearchResult Empty(TravelSearchStatus status)
@@ -395,19 +526,36 @@ public sealed class TerraTravelProvider : ITravelDataProvider
     /// forbidden from inventing ratings, prices and opening hours.
     /// </summary>
     public static TravelPlace? MapRecommendation(JsonElement item, string language)
+        => MapRecommendation(item, language, out _);
+
+    public static TravelPlace? MapRecommendation(
+        JsonElement item, string language, out TerraDiscard discard)
     {
+        discard = TerraDiscard.None;
+
         // "experience" results are bookable tours, not places on a map. Only
         // locations become place cards.
         if (!item.TryGetProperty("location", out var location)
             || location.ValueKind != JsonValueKind.Object)
         {
+            discard = TerraDiscard.MissingLocation;
             return null;
         }
 
         var id = ReadId(location, "id");
         var name = ReadLocalised(location, "names", language);
 
-        if (id == null || string.IsNullOrWhiteSpace(name)) return null;
+        if (id == null)
+        {
+            discard = TerraDiscard.MissingId;
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            discard = TerraDiscard.MissingName;
+            return null;
+        }
 
         var (rating, reviewCount) = ReadRatings(location);
         var (latitude, longitude) = ReadCoordinates(location);
@@ -477,7 +625,11 @@ public sealed class TerraTravelProvider : ITravelDataProvider
         {
             var value = entry.ValueKind == JsonValueKind.String
                 ? entry.GetString()
-                : Text(entry, "value") ?? Text(entry, "address_string") ?? Text(entry, "name");
+                // "formatted" is the documented address shape — the entries in
+                // `addresses` carry street/city/country fields plus one
+                // formatted line, and the formatted line is the card's.
+                : Text(entry, "value") ?? Text(entry, "formatted")
+                    ?? Text(entry, "address_string") ?? Text(entry, "name");
 
             if (string.IsNullOrWhiteSpace(value)) continue;
 
@@ -503,17 +655,35 @@ public sealed class TerraTravelProvider : ITravelDataProvider
             return (null, null);
         }
 
-        double? overall = ratings.TryGetProperty("overall", out var value)
-            && value.ValueKind == JsonValueKind.Number
-                ? value.GetDouble()
-                : null;
+        if (!ratings.TryGetProperty("overall", out var overall)) return (null, null);
 
-        int? count = ratings.TryGetProperty("count", out var countValue)
-            && countValue.ValueKind == JsonValueKind.Number
-                ? countValue.GetInt32()
-                : null;
+        // THE DOCUMENTED SHAPE: overall is an OBJECT — { "rating", "count" }.
+        // The first reading treated it as a number, so every rating quietly
+        // came back null. Non-fatal — a card without a rating still renders —
+        // but "quietly" is the operative word, which is why the fixture test
+        // now pins this.
+        if (overall.ValueKind == JsonValueKind.Object)
+        {
+            int? count = overall.TryGetProperty("count", out var countValue)
+                && countValue.ValueKind == JsonValueKind.Number
+                    ? countValue.GetInt32()
+                    : null;
 
-        return (overall, count);
+            return (Number(overall, "rating"), count);
+        }
+
+        // Tolerated older shape: a bare number with a sibling count.
+        if (overall.ValueKind == JsonValueKind.Number)
+        {
+            int? count = ratings.TryGetProperty("count", out var countValue)
+                && countValue.ValueKind == JsonValueKind.Number
+                    ? countValue.GetInt32()
+                    : null;
+
+            return (overall.GetDouble(), count);
+        }
+
+        return (null, null);
     }
 
     private static (double? Latitude, double? Longitude) ReadCoordinates(JsonElement location)
@@ -548,14 +718,23 @@ public sealed class TerraTravelProvider : ITravelDataProvider
 
         foreach (var category in categories.EnumerateArray())
         {
-            var name = Text(category, "name")?.ToLowerInvariant()
-                ?? ReadLocalised(category, "names", "en")?.ToLowerInvariant();
+            // The documented properties are "top_level_category" (the fixed
+            // "Attraction" / "Accommodation" / "Experience" / "Eat & Drink"
+            // vocabulary) and "display_name". The first reading looked for
+            // "name", which the schema does not have, so every place fell to
+            // "general".
+            var name = (Text(category, "top_level_category")
+                ?? Text(category, "display_name")
+                ?? Text(category, "name")
+                ?? ReadLocalised(category, "names", "en"))?.ToLowerInvariant();
 
             var mapped = name switch
             {
                 not null when name.Contains("restaurant") || name.Contains("food")
+                    || name.Contains("eat") || name.Contains("drink")
                     => TravelPlaceCategory.Restaurant,
                 not null when name.Contains("hotel") || name.Contains("lodging")
+                    || name.Contains("accommodation")
                     => TravelPlaceCategory.Hotel,
                 not null when name.Contains("attraction") || name.Contains("sight")
                     || name.Contains("museum") || name.Contains("landmark")
@@ -579,7 +758,10 @@ public sealed class TerraTravelProvider : ITravelDataProvider
 
         foreach (var category in categories.EnumerateArray())
         {
-            var label = ReadLocalised(category, "names", language) ?? Text(category, "name");
+            var label = Text(category, "display_name")
+                ?? ReadLocalised(category, "names", language)
+                ?? Text(category, "name");
+
             if (!string.IsNullOrWhiteSpace(label)) return label;
         }
 
@@ -638,13 +820,34 @@ public sealed class TerraTravelProvider : ITravelDataProvider
     {
         if (!location.TryGetProperty("urls", out var urls)) return null;
 
-        var raw = urls.ValueKind == JsonValueKind.Object
-            ? Text(urls, "location") ?? Text(urls, "web")
-            : urls.ValueKind == JsonValueKind.Array
-                ? urls.EnumerateArray().Select(entry => Text(entry, "url")).FirstOrDefault(url => url != null)
-                : null;
+        string? raw = null;
 
-        // Only an https Tripadvisor link ever reaches the app.
+        if (urls.ValueKind == JsonValueKind.Object)
+        {
+            // The documented object carries "tripadvisor" (a string or an
+            // object with sub-properties) and "official". Tripadvisor's own
+            // page wins — it is the link the display requirements point at.
+            raw = Text(urls, "tripadvisor");
+
+            if (raw == null
+                && urls.TryGetProperty("tripadvisor", out var tripadvisor)
+                && tripadvisor.ValueKind == JsonValueKind.Object)
+            {
+                raw = Text(tripadvisor, "url")
+                    ?? Text(tripadvisor, "desktop")
+                    ?? Text(tripadvisor, "web");
+            }
+
+            raw ??= Text(urls, "official") ?? Text(urls, "location") ?? Text(urls, "web");
+        }
+        else if (urls.ValueKind == JsonValueKind.Array)
+        {
+            raw = urls.EnumerateArray()
+                .Select(entry => Text(entry, "url"))
+                .FirstOrDefault(url => url != null);
+        }
+
+        // Only an https link ever reaches the app.
         return Uri.TryCreate(raw, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps
             ? raw
             : null;
@@ -680,6 +883,14 @@ public sealed class TerraTravelProvider : ITravelDataProvider
             var httpClient = _httpClientFactory.CreateClient(HttpClientName);
             using var response = await httpClient.SendAsync(
                 request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+
+            // Transport structure only: a status code, a media type and a
+            // length. Never a header value, never a body.
+            _logger.LogInformation(
+                "[GLUNO] terra transport status={Status} contentType={ContentType} bodyLength={BodyLength}",
+                (int)response.StatusCode,
+                response.Content.Headers.ContentType?.MediaType ?? "-",
+                response.Content.Headers.ContentLength ?? -1);
 
             if (!response.IsSuccessStatusCode)
             {
@@ -775,6 +986,10 @@ public sealed class TerraTravelProvider : ITravelDataProvider
         HttpStatusCode.TooManyRequests => TerraFailure.RateLimited,
         HttpStatusCode.PaymentRequired => TerraFailure.QuotaExceeded,
         HttpStatusCode.BadRequest => TerraFailure.InvalidRequest,
+        // Documented for recommendations/search as "geographic location not
+        // found" — the request named a place Terra does not know, which is a
+        // request problem, not an outage.
+        HttpStatusCode.NotFound => TerraFailure.InvalidRequest,
         HttpStatusCode.RequestTimeout or HttpStatusCode.GatewayTimeout => TerraFailure.Timeout,
         _ => TerraFailure.Network,
     };

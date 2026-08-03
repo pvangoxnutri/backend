@@ -702,6 +702,45 @@ public sealed class GlunoChatService : IGlunoChatService
             }
         }
 
+        // ── The active discovery thread ───────────────────────────────────
+        //
+        // "Fler", "Ge mig 5 platser" and "Visa restauranger istället" after a
+        // shown list are about THAT list's destination — resolving them from
+        // the sentence alone re-asks a settled question. The thread also
+        // catches the one-word answer to "which city?". BEFORE the detector
+        // and the ordinary routing, so nothing can reinterpret a follow-up.
+        var activeDiscovery = GlunoDiscoveryContexts.Usable(
+            workingState.Discovery, DateTime.UtcNow);
+
+        if (activeDiscovery != null)
+        {
+            if (activeDiscovery.AwaitingDestination
+                && GlunoDiscoveryFollowUps.ParseDestinationAnswer(text) is { } namedDestination)
+            {
+                var answeredSearch = await RunDirectPlaceSearchAsync(
+                    userId, conversation, text, namedDestination,
+                    TravelPlaceCategories.Parse(activeDiscovery.Category),
+                    activeDiscovery.RequestedCount,
+                    excludeLocationIds: Array.Empty<string>(),
+                    origin: GlunoResponseOrigins.DirectPlaceSearch,
+                    originSource: "user_message",
+                    telemetry, workingState, ct);
+
+                return await CompleteClaimAsync(claim, answeredSearch, ct);
+            }
+
+            if (!activeDiscovery.AwaitingDestination
+                && !string.IsNullOrWhiteSpace(activeDiscovery.Destination)
+                && GlunoDiscoveryFollowUps.Parse(text) is { } discoveryFollowUp)
+            {
+                var followed = await DirectPlaceFollowUpAsync(
+                    userId, conversation, text, activeDiscovery, discoveryFollowUp,
+                    telemetry, workingState, ct);
+
+                return await CompleteClaimAsync(claim, followed, ct);
+            }
+        }
+
         // ── Context, narrowed to what this intent needs ───────────────────
         //
         // canEdit is not known until the trip loads, so the workflow is
@@ -872,7 +911,7 @@ public sealed class GlunoChatService : IGlunoChatService
         {
             var listed = await DirectPlaceSearchAsync(
                 userId, conversation, text, placeQuery, context, resolvedTripId,
-                answered, telemetry, ct);
+                answered, telemetry, workingState, ct);
 
             if (listed != null) return await CompleteClaimAsync(claim, listed, ct);
         }
@@ -2527,7 +2566,10 @@ public sealed class GlunoChatService : IGlunoChatService
             },
             ct);
 
-        if (result.Status is TravelSearchStatus.RateLimited or TravelSearchStatus.Failed)
+        // Anything but a genuine Ok is a provider problem, not an empty city —
+        // Unknown means "no information", which must not read as "nothing
+        // there".
+        if (result.Status != TravelSearchStatus.Ok)
         {
             var busy = result.Status == TravelSearchStatus.RateLimited;
 
@@ -3590,11 +3632,12 @@ public sealed class GlunoChatService : IGlunoChatService
     ///
     /// One provider call, SideQuest's own ranking, a deterministic heading,
     /// structured cards with real option keys, the ordinary retention rules —
-    /// and zero model calls. A provider failure returns the ordinary
-    /// structured error envelope; an empty result is an answer.
+    /// and zero model calls.
     ///
-    /// Returns null when no destination can be settled — the ordinary
-    /// pipeline then runs, which is the safe direction to fail in.
+    /// EVERY MATCHED DISCOVERY QUESTION ENDS STRUCTURED. Places, a destination
+    /// clarification, a provider error, or a verified empty — never a fall
+    /// through to the model, which is how production got a hand-written list
+    /// of Sevilla landmarks nothing could ever add from.
     /// </summary>
     private async Task<GlunoTurnResult?> DirectPlaceSearchAsync(
         Guid userId,
@@ -3605,6 +3648,7 @@ public sealed class GlunoChatService : IGlunoChatService
         Guid? resolvedTripId,
         (string Type, string Value)? answered,
         GlunoTurnTelemetry telemetry,
+        GlunoWorkingState workingState,
         CancellationToken ct)
     {
         var language = context.User.Language;
@@ -3612,8 +3656,8 @@ public sealed class GlunoChatService : IGlunoChatService
         // ── Where ─────────────────────────────────────────────────────────
         //
         // The user's own words first, then the Adventure's route, then a
-        // question with tappable rows. Never a guess: searching the wrong city
-        // is a confident answer about the wrong place.
+        // question. Never a guess: searching the wrong city is a confident
+        // answer about the wrong place.
         var near = placeQuery.Destination;
         var scoped = context;
 
@@ -3645,47 +3689,110 @@ public sealed class GlunoChatService : IGlunoChatService
                 // Global with no Adventure resolved. The Adventures themselves
                 // are the options — never a sentence about switching scope.
                 var choices = TripChoicesFrom(scoped);
-                if (choices.Count == 0) return null;
 
-                var single = GlunoClarificationBuilder.ResolveSingle(choices, text, scoped.Today);
-
-                if (single == null)
+                if (choices.Count > 0)
                 {
-                    return await AskWhichAdventureAsync(
-                        conversation, userId, text, PlaceListIntent(), choices, scoped, ct);
+                    var single = GlunoClarificationBuilder.ResolveSingle(choices, text, scoped.Today);
+
+                    if (single == null)
+                    {
+                        return await AskWhichAdventureAsync(
+                            conversation, userId, text, PlaceListIntent(), choices, scoped, ct);
+                    }
+
+                    var singleContext = await _contextBuilder.BuildAsync(
+                        userId, single.Id, conversation.Id,
+                        new GlunoContextOptions { IncludeTrip = true }, ct);
+
+                    near = singleContext.Trip is { } singleTrip
+                        ? TripDestinationFor(singleTrip, answered)
+                        : null;
                 }
-
-                var singleContext = await _contextBuilder.BuildAsync(
-                    userId, single.Id, conversation.Id,
-                    new GlunoContextOptions { IncludeTrip = true }, ct);
-
-                near = singleContext.Trip is { } singleTrip
-                    ? TripDestinationFor(singleTrip, answered)
-                    : null;
             }
         }
 
-        if (string.IsNullOrWhiteSpace(near)) return null;
+        if (string.IsNullOrWhiteSpace(near))
+        {
+            // ── Nowhere to look, so ask WHERE ─────────────────────────────
+            //
+            // A discovery question never falls to the model — the model would
+            // answer it with a list it made up. The question is one word to
+            // answer, and the thread remembers what was asked for.
+            return await AskDestinationAsync(
+                conversation, userId, text, placeQuery, language, workingState, ct);
+        }
+
+        return await RunDirectPlaceSearchAsync(
+            userId, conversation, text, near, placeQuery.Category,
+            placeQuery.RequestedCount,
+            excludeLocationIds: Array.Empty<string>(),
+            origin: GlunoResponseOrigins.DirectPlaceSearch,
+            originSource: placeQuery.Destination != null ? "user_message" : "trip_route",
+            telemetry, workingState, ct);
+    }
+
+    /// <summary>
+    /// The search itself: one provider call, ranked, sanitised, retained,
+    /// persisted, counted — and the discovery thread updated so "fler" and
+    /// "ge mig 5" mean what they obviously mean.
+    ///
+    /// THE ERROR GATE IS STRICT. Only a genuine Ok answers with an empty
+    /// state; a contract mismatch, a deserialisation failure, a rejected key,
+    /// a rate limit and a timeout are all the structured retryable error.
+    /// "Terra said nothing is there" and "we could not read Terra" must never
+    /// share a sentence.
+    /// </summary>
+    private async Task<GlunoTurnResult> RunDirectPlaceSearchAsync(
+        Guid userId,
+        GlunoConversation conversation,
+        string text,
+        string near,
+        TravelPlaceCategory category,
+        int? requestedCount,
+        IReadOnlyList<string> excludeLocationIds,
+        string origin,
+        string originSource,
+        GlunoTurnTelemetry telemetry,
+        GlunoWorkingState workingState,
+        CancellationToken ct)
+    {
+        var language = await LanguageOfAsync(userId, ct);
 
         // ── One search, no model ──────────────────────────────────────────
         telemetry.ModelSkipped = true;
+
+        var limit = Math.Clamp(requestedCount ?? GlunoPlaceOptions.MaxPlaces, 1, GlunoPlaceOptions.MaxPlaces);
 
         var query = new TravelPlaceQuery
         {
             Query = string.Empty,
             Near = near,
-            Category = placeQuery.Category,
-            Limit = GlunoPlaceOptions.MaxPlaces,
+            Category = category,
+            Limit = limit,
             Language = language,
+            ExcludedLocationIds = excludeLocationIds,
         };
 
         var result = await _travelData.SearchAllAsync(query, ct);
 
-        if (result.Status is TravelSearchStatus.RateLimited or TravelSearchStatus.Failed)
+        if (result.Status != TravelSearchStatus.Ok)
         {
             _logger.LogInformation(
                 "[GLUNO] direct place search failed status={Status} category={Category}",
-                result.Status, placeQuery.Category);
+                result.Status, category);
+
+            // The thread survives the failure: the destination and category
+            // are SideQuest's own, and a retry or a follow-up should not have
+            // to re-resolve them.
+            workingState.Discovery = GlunoDiscoveryContexts.WithLifetime(new GlunoDiscoveryContext
+            {
+                Destination = near,
+                Category = TravelPlaceCategories.ToWireValue(category),
+                Language = language,
+                RequestedCount = requestedCount,
+                ShownLocationIds = workingState.Discovery?.ShownLocationIds ?? [],
+            }, DateTime.UtcNow);
+            await _workingState.SaveAsync(conversation.Id, workingState, ct);
 
             telemetry.FailureCategory = GlunoFailureCodes.TripadvisorUnavailable;
             telemetry.Write(_logger);
@@ -3699,9 +3806,24 @@ public sealed class GlunoChatService : IGlunoChatService
             };
         }
 
-        var places = TravelPlaceRanker.Rank(result.Places, query)
-            .Take(MaxPlaceCardsPerTurn)
-            .Select(ranked => SanitizePlace(GlunoPlaceCards.From(ranked.Place, ranked.Signals), telemetry))
+        // ── Belt and braces on exclusion ──────────────────────────────────
+        //
+        // The provider was ASKED to exclude what was shown; a provider that
+        // ignores the field must not undo the promise.
+        var providerCount = result.Places.Count;
+
+        var fresh = excludeLocationIds.Count == 0
+            ? result.Places
+            : result.Places
+                .Where(place => !excludeLocationIds.Contains(place.ProviderPlaceId, StringComparer.Ordinal))
+                .ToList();
+
+        var ranked = TravelPlaceRanker.Rank(fresh, query)
+            .Take(Math.Min(limit, MaxPlaceCardsPerTurn))
+            .ToList();
+
+        var places = ranked
+            .Select(entry => SanitizePlace(GlunoPlaceCards.From(entry.Place, entry.Signals), telemetry))
             .ToList();
 
         var userMessage = await _conversations.AppendAsync(new GlunoMessage
@@ -3713,15 +3835,32 @@ public sealed class GlunoChatService : IGlunoChatService
 
         if (places.Count == 0)
         {
-            // An empty answer is an answer. Inventing one is the one thing
-            // this path must never do.
+            // A GENUINE empty: the provider answered Ok and had nothing (or
+            // nothing new). Inventing an answer is the one thing this path
+            // must never do.
             var emptyMessage = await _conversations.AppendAsync(new GlunoMessage
             {
                 ConversationId = conversation.Id,
                 Role = GlunoMessageRoles.Assistant,
                 Text = GlunoPlaceFailureText.ForRefresh(busy: false, empty: true, language),
-                ResponseOrigin = GlunoResponseOrigins.DirectPlaceSearch,
+                ResponseOrigin = origin,
             }, ct);
+
+            _logger.LogInformation(
+                "[GLUNO] direct place search empty category={Category} provider={Provider} "
+                + "excluded={Excluded}",
+                category, providerCount, excludeLocationIds.Count);
+
+            workingState.Discovery = GlunoDiscoveryContexts.WithLifetime(new GlunoDiscoveryContext
+            {
+                Destination = near,
+                Category = TravelPlaceCategories.ToWireValue(category),
+                Language = language,
+                LastMessageId = emptyMessage.Id,
+                RequestedCount = requestedCount,
+                ShownLocationIds = workingState.Discovery?.ShownLocationIds ?? [],
+            }, DateTime.UtcNow);
+            await _workingState.SaveAsync(conversation.Id, workingState, ct);
 
             telemetry.Write(_logger);
 
@@ -3730,7 +3869,7 @@ public sealed class GlunoChatService : IGlunoChatService
                 Conversation = conversation,
                 UserMessage = userMessage,
                 AssistantMessage = emptyMessage,
-                ResponseOrigin = GlunoResponseOrigins.DirectPlaceSearch,
+                ResponseOrigin = origin,
             };
         }
 
@@ -3738,11 +3877,11 @@ public sealed class GlunoChatService : IGlunoChatService
         var search = new GlunoPlaceSearchContext
         {
             Near = near,
-            Category = TravelPlaceCategories.ToWireValue(placeQuery.Category),
+            Category = TravelPlaceCategories.ToWireValue(category),
             Query = null,
             Language = language,
-            Limit = GlunoPlaceOptions.MaxPlaces,
-            OriginSource = placeQuery.Destination != null ? "user_message" : "trip_route",
+            Limit = limit,
+            OriginSource = originSource,
             SearchedAtUtc = DateTime.UtcNow,
         };
 
@@ -3762,12 +3901,33 @@ public sealed class GlunoChatService : IGlunoChatService
                     PlaceSearch = retention.Search,
                 },
                 GlunoJson.Options),
-            ResponseOrigin = GlunoResponseOrigins.DirectPlaceSearch,
+            ResponseOrigin = origin,
         }, ct);
 
+        // ── The counts, step by step ──────────────────────────────────────
+        //
+        // provider → after exclusion → ranked/sanitised → returned → stored.
+        // What the provider sent and what the user saw are different numbers
+        // with different explanations, and one line naming both is what keeps
+        // "Terra sent six, we showed none" from ever hiding again.
         _logger.LogInformation(
-            "[GLUNO] direct place search done category={Category} shown={Shown} stored={Stored}",
-            placeQuery.Category, places.Count, retention.Places.Count);
+            "[GLUNO] direct place search done category={Category} provider={Provider} "
+            + "fresh={Fresh} returned={Returned} stored={Stored} excluded={Excluded}",
+            category, providerCount, fresh.Count, places.Count,
+            retention.Places.Count + retention.References.Count, excludeLocationIds.Count);
+
+        // ── The thread continues ──────────────────────────────────────────
+        var discovery = workingState.Discovery ?? new GlunoDiscoveryContext();
+        discovery.Destination = near;
+        discovery.Category = TravelPlaceCategories.ToWireValue(category);
+        discovery.Language = language;
+        discovery.LastMessageId = assistantMessage.Id;
+        discovery.RequestedCount = requestedCount;
+        discovery.AwaitingDestination = false;
+        GlunoDiscoveryContexts.RememberShown(
+            discovery, places.Select(place => place.ProviderPlaceId ?? string.Empty));
+        workingState.Discovery = GlunoDiscoveryContexts.WithLifetime(discovery, DateTime.UtcNow);
+        await _workingState.SaveAsync(conversation.Id, workingState, ct);
 
         telemetry.Write(_logger);
 
@@ -3778,8 +3938,99 @@ public sealed class GlunoChatService : IGlunoChatService
             AssistantMessage = assistantMessage,
             Places = places,
             LiveAssistantText = retention.Reduced ? liveText : null,
-            ResponseOrigin = GlunoResponseOrigins.DirectPlaceSearch,
+            ResponseOrigin = origin,
         };
+    }
+
+    /// <summary>
+    /// "Vilken stad eller plats gäller det?" — the discovery question had no
+    /// destination in it, no Adventure to borrow one from, and no route to
+    /// offer rows for. The thread remembers the category and the count, and
+    /// the next short place-name answer completes the search.
+    /// </summary>
+    private async Task<GlunoTurnResult> AskDestinationAsync(
+        GlunoConversation conversation,
+        Guid userId,
+        string text,
+        GlunoDirectPlaceQuery placeQuery,
+        string language,
+        GlunoWorkingState workingState,
+        CancellationToken ct)
+    {
+        var userMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.User,
+            Text = text,
+        }, ct);
+
+        var question = string.Equals(language, "sv", StringComparison.OrdinalIgnoreCase)
+            ? "Vilken stad eller plats gäller det?"
+            : "Which city or place is this about?";
+
+        var assistantMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.Assistant,
+            Text = question,
+            ResponseOrigin = GlunoResponseOrigins.DestinationClarification,
+        }, ct);
+
+        workingState.Discovery = GlunoDiscoveryContexts.WithLifetime(new GlunoDiscoveryContext
+        {
+            Category = TravelPlaceCategories.ToWireValue(placeQuery.Category),
+            Language = language,
+            RequestedCount = placeQuery.RequestedCount,
+            AwaitingDestination = true,
+        }, DateTime.UtcNow);
+        await _workingState.SaveAsync(conversation.Id, workingState, ct);
+
+        _logger.LogInformation("[GLUNO] discovery destination question asked");
+
+        return new GlunoTurnResult
+        {
+            Conversation = conversation,
+            UserMessage = userMessage,
+            AssistantMessage = assistantMessage,
+            ResponseOrigin = GlunoResponseOrigins.DestinationClarification,
+        };
+    }
+
+    /// <summary>
+    /// "Fler", "ge mig 5", "visa restauranger istället" — answered from the
+    /// stored discovery thread: same destination, already-shown places
+    /// excluded, a switched category kept for the next follow-up too.
+    /// </summary>
+    private async Task<GlunoTurnResult> DirectPlaceFollowUpAsync(
+        Guid userId,
+        GlunoConversation conversation,
+        string text,
+        GlunoDiscoveryContext discovery,
+        GlunoDiscoveryFollowUp followUp,
+        GlunoTurnTelemetry telemetry,
+        GlunoWorkingState workingState,
+        CancellationToken ct)
+    {
+        var category = followUp.SwitchCategory
+            ?? TravelPlaceCategories.Parse(discovery.Category);
+
+        // A switched category starts a fresh list — the shown ids belong to
+        // the old one. "Fler" within the same category avoids repeats.
+        var exclude = followUp.SwitchCategory != null
+            ? Array.Empty<string>()
+            : (IReadOnlyList<string>)discovery.ShownLocationIds;
+
+        _logger.LogInformation(
+            "[GLUNO] discovery follow-up more={More} count={Count} switched={Switched} excluded={Excluded}",
+            followUp.More, followUp.RequestedCount, followUp.SwitchCategory != null, exclude.Count);
+
+        return await RunDirectPlaceSearchAsync(
+            userId, conversation, text, discovery.Destination, category,
+            followUp.RequestedCount ?? discovery.RequestedCount,
+            exclude,
+            origin: GlunoResponseOrigins.DirectPlaceFollowup,
+            originSource: "discovery_followup",
+            telemetry, workingState, ct);
     }
 
     /// <summary>
@@ -3850,7 +4101,7 @@ public sealed class GlunoChatService : IGlunoChatService
             ConversationId = conversation.Id,
             Role = GlunoMessageRoles.Assistant,
             Text = question,
-            ResponseOrigin = GlunoResponseOrigins.Clarification,
+            ResponseOrigin = GlunoResponseOrigins.DestinationClarification,
         }, ct);
 
         var clarification = await _clarifications.CreateAsync(
@@ -3875,7 +4126,7 @@ public sealed class GlunoChatService : IGlunoChatService
             UserMessage = userMessage,
             AssistantMessage = assistantMessage,
             Clarification = clarification,
-            ResponseOrigin = GlunoResponseOrigins.Clarification,
+            ResponseOrigin = GlunoResponseOrigins.DestinationClarification,
         };
     }
 
@@ -3959,7 +4210,8 @@ public sealed class GlunoChatService : IGlunoChatService
 
         var result = await _travelData.SearchAllAsync(query, ct);
 
-        if (result.Status is TravelSearchStatus.RateLimited or TravelSearchStatus.Failed)
+        // Anything but a genuine Ok is a provider problem, not an empty city.
+        if (result.Status != TravelSearchStatus.Ok)
         {
             var status = result.Status == TravelSearchStatus.RateLimited
                 ? GlunoRehydrationStatus.Busy

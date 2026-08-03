@@ -187,6 +187,14 @@ public sealed class TravelPlaceQuery
     public string? PriceLevel { get; init; }
     /// Free-form interests ("art", "kid friendly"), used for ranking only.
     public IReadOnlyList<string> Interests { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// Bare provider location ids the caller has already shown, so "more"
+    /// can mean MORE. Sent upstream when the provider supports exclusion
+    /// (Terra documents exclude_location_ids), and re-filtered locally either
+    /// way — a provider that ignores the field must not undo the promise.
+    /// </summary>
+    public IReadOnlyList<string> ExcludedLocationIds { get; init; } = Array.Empty<string>();
 }
 
 /// <summary>

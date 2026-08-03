@@ -33,6 +33,12 @@ public static class GlunoResponseOrigins
     /// A pure place question answered straight from the provider — structured
     /// cards, real option keys, zero model calls.
     public const string DirectPlaceSearch = "direct_place_search";
+    /// "Fler" / "ge mig 5" / a category switch, answered from the stored
+    /// discovery thread — same contract as the direct search.
+    public const string DirectPlaceFollowup = "direct_place_followup";
+    /// A discovery question that stopped to ask WHERE — a route stop, or a
+    /// bare "which city?".
+    public const string DestinationClarification = "destination_clarification";
     /// "Which Adventure?" with tappable rows, in place of a scope refusal.
     public const string AdventureClarification = "adventure_clarification";
     /// A short yes resumed the conversation's pending action deterministically.
@@ -42,6 +48,7 @@ public static class GlunoResponseOrigins
     [
         ModelTurn, PlaceAdd, PlaceAddRetry, PlaceRefresh,
         Clarification, Proposal, IdempotencyReplay, Direct,
-        DirectPlaceSearch, AdventureClarification, PendingActionResume,
+        DirectPlaceSearch, DirectPlaceFollowup, DestinationClarification,
+        AdventureClarification, PendingActionResume,
     ];
 }

@@ -96,6 +96,13 @@ public sealed class GlunoWorkingState
     /// </summary>
     public GlunoPendingAction? PendingAction { get; set; }
 
+    /// <summary>
+    /// The active place-discovery thread — see <see cref="GlunoDiscoveryContext"/>.
+    /// Null is the ordinary state; additive on the JSON shape like the pending
+    /// action, so old rows read back as "no thread".
+    /// </summary>
+    public GlunoDiscoveryContext? Discovery { get; set; }
+
     public DateTime UpdatedAtUtc { get; set; } = DateTime.UtcNow;
 
     /// <summary>
