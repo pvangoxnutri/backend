@@ -223,7 +223,17 @@ public class PlaceAddRetryEvals
         // With a short list `KeyFor(index)` points at the wrong card — which
         // would have added a place the user never named.
         Assert.Contains("keys[matches[0]]", chat);
-        Assert.DoesNotContain("GlunoPlaceOptions.KeyFor(matches[0])", chat);
+
+        // Scoped to the RE-FETCHED path, where the list can come back short.
+        // The recovery search's list is persisted dense in the same breath,
+        // so its positional key is the reference key by construction.
+        var start = chat.IndexOf(
+            "private async Task<GlunoTurnResult?> AddNamedPlaceAsync(", StringComparison.Ordinal);
+        var end = chat.IndexOf(
+            "private async Task<GlunoTurnResult> PlaceLookupFailedAsync(", StringComparison.Ordinal);
+
+        Assert.True(start > 0 && end > start);
+        Assert.DoesNotContain("GlunoPlaceOptions.KeyFor(matches[0])", chat[start..end]);
     }
 
     // ── 6-13. What a retry reuses ────────────────────────────────────────

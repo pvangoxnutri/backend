@@ -135,9 +135,12 @@ public class ManualFallbackEvals
         var chat = Source("Services", "Gluno", "GlunoChatService.cs");
 
         var start = chat.IndexOf("if (GlunoPlaceOptions.IsAddRequest(text))", StringComparison.Ordinal);
-        var body = chat[start..(start + 1600)];
+        // To the end of the branch rather than a fixed char count — the
+        // deterministic recovery lengthened it without changing the invariant.
+        var end = chat.IndexOf("A pure place question", start, StringComparison.Ordinal);
+        var body = chat[start..end];
 
-        Assert.True(start > 0);
+        Assert.True(start > 0 && end > start);
         // THE BRANCH THAT WAS THE BUG. It used to end at `if (added != null)`
         // and fall through; now an unresolved place asks which one.
         // The router is no longer consulted — it could not recognise a place

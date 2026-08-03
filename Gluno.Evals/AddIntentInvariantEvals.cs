@@ -70,13 +70,19 @@ public class AddIntentInvariantEvals
         var chat = Source("Services", "Gluno", "GlunoChatService.cs");
 
         var start = chat.IndexOf("if (GlunoPlaceOptions.IsAddRequest(text))", StringComparison.Ordinal);
-        var branch = chat[start..(start + 1700)];
+        // The whole add branch, up to the block that follows it — a fixed
+        // char count went stale the first time the branch grew.
+        var end = chat.IndexOf("A pure place question", start, StringComparison.Ordinal);
+        var branch = chat[start..end];
 
-        Assert.True(start > 0);
+        Assert.True(start > 0 && end > start);
 
         // Every exit from the branch is a return. Nothing falls past it into
         // the model when both signals hold.
         Assert.Contains("if (added != null) return added;", branch);
+        // A name with no cards behind it is recovered by SEARCHING the
+        // provider — deterministically — before the ask-which fallback.
+        Assert.Contains("RecoverNamedPlaceAsync(", branch);
         Assert.Contains("return await AskWhichPlaceToAddAsync(conversation, userId, text, ct);", branch);
         Assert.DoesNotContain("_ai.", branch);
         Assert.DoesNotContain("RunTurnAsync", branch);
@@ -165,9 +171,15 @@ public class AddIntentInvariantEvals
         Assert.DoesNotContain("GlunoPlaceCard", source);
         Assert.DoesNotContain("Guid", source);
 
-        Assert.Equal(8, GlunoResponseOrigins.All.Count);
+        // Eight original branches plus the three the production debug export
+        // forced into existence: the model-free list, the Adventure question,
+        // and the resumed pending action.
+        Assert.Equal(11, GlunoResponseOrigins.All.Count);
         Assert.Contains("idempotency_replay", GlunoResponseOrigins.All);
         Assert.Contains("model_turn", GlunoResponseOrigins.All);
+        Assert.Contains("direct_place_search", GlunoResponseOrigins.All);
+        Assert.Contains("adventure_clarification", GlunoResponseOrigins.All);
+        Assert.Contains("pending_action_resume", GlunoResponseOrigins.All);
     }
 
     [Fact]
