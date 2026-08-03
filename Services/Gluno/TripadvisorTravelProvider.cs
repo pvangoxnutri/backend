@@ -82,9 +82,20 @@ public sealed class TripadvisorTravelProvider : ITravelDataProvider
 
     public string Provider => ProviderId;
 
+    /// The implementation within the family — see ITravelDataProvider. This
+    /// is the RETIRING Content API integration; Terra (priority 0) wins the
+    /// family wherever it is enabled.
+    public const string ImplementationId = "legacy";
+    public string Implementation => ImplementationId;
+
+    public int SelectionPriority => 100;
+
     private string? ApiKey => _config["Tripadvisor:ApiKey"];
 
     private string BaseUrl => (_config["Tripadvisor:BaseUrl"] ?? "https://api.content.tripadvisor.com").TrimEnd('/');
+
+    /// The operator's explicit switch, alone — see the Terra counterpart.
+    public bool IsEnabled => _config.GetValue("Tripadvisor:Enabled", false);
 
     /// <summary>
     /// Off unless explicitly switched on AND given a key.
@@ -94,7 +105,7 @@ public sealed class TripadvisorTravelProvider : ITravelDataProvider
     /// deliberately, or not at all.
     /// </summary>
     public bool IsConfigured =>
-        _config.GetValue("Tripadvisor:Enabled", false)
+        IsEnabled
         && !string.IsNullOrWhiteSpace(ApiKey)
         && Uri.TryCreate(BaseUrl, UriKind.Absolute, out var baseUri)
         && baseUri.Scheme == Uri.UriSchemeHttps;

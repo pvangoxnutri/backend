@@ -244,7 +244,39 @@ public sealed class TravelSearchResult
 public interface ITravelDataProvider
 {
     /// Stable id used as <see cref="TravelPlace.Provider"/>.
+    ///
+    /// This is the provider FAMILY — the id namespace. Terra and the legacy
+    /// Content API are two implementations of the same family ("tripadvisor")
+    /// issuing the same location ids, which is exactly why only one of them
+    /// may serve the family at a time.
     string Provider { get; }
+
+    /// <summary>
+    /// Which IMPLEMENTATION of the family this is — "terra", "legacy", …
+    ///
+    /// WHY THIS EXISTS. A production log line showed providerStatus=Unknown,
+    /// and the only way to know WHICH Tripadvisor implementation had answered
+    /// was to know that Unknown can only come from the legacy provider's
+    /// interface default. The implementation is now a first-class fact,
+    /// logged on every call, never inferred from a status value.
+    /// </summary>
+    string Implementation => Provider;
+
+    /// <summary>
+    /// Whether the operator has EXPLICITLY switched this provider on —
+    /// distinct from <see cref="IsConfigured"/>, which also requires working
+    /// credentials. The registry FAILS CLOSED on the difference: an enabled
+    /// implementation with a broken configuration keeps its whole family
+    /// unavailable rather than silently handing the traffic to a sibling.
+    /// </summary>
+    bool IsEnabled => IsConfigured;
+
+    /// <summary>
+    /// Which enabled implementation wins the family — LOWER WINS, and the
+    /// value is fixed per implementation so DI registration order can never
+    /// decide. Terra is 0; the retiring legacy Content API is 100.
+    /// </summary>
+    int SelectionPriority => 100;
 
     /// False when the provider has no credentials or is switched off.
     bool IsConfigured { get; }
@@ -310,8 +342,16 @@ public interface ITravelDataRegistry
 {
     /// False when nothing is configured. Surfaced to Gluno so it can say it
     /// has no source, rather than implying an empty result means "nothing
-    /// exists".
+    /// exists". Reflects the SELECTED providers — a family that failed closed
+    /// counts as unavailable even when a disabled sibling has credentials.
     bool HasConfiguredProvider { get; }
+
+    /// <summary>
+    /// Which implementation currently owns a family ("terra", "legacy", …),
+    /// or null when the family is unserved — the same selection the searches
+    /// use, exposed for diagnostics so nothing has to re-derive the rule.
+    /// </summary>
+    string? SelectedImplementationFor(string family);
 
     /// Ranked by SideQuest's own scoring — see <see cref="TravelPlaceRanker"/>.
     Task<IReadOnlyList<RankedTravelPlace>> SearchPlacesAsync(TravelPlaceQuery query, CancellationToken ct);

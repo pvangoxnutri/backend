@@ -346,6 +346,35 @@ if (app.Environment.IsDevelopment())
         $"{supabaseUrl}/auth/v1", supabaseAudience, projectRef);
 }
 
+// ── Travel provider configuration, at a glance ──────────────────────────────
+//
+// THE BUG THIS OBSERVES. Terra was unconfigured in production and the legacy
+// Content API silently served the tripadvisor family — the only clue was
+// providerStatus=Unknown deep in a request log. This one line makes the
+// selection a startup FACT. Booleans and enum-like ids only: never a key,
+// never a key length, never a URL.
+{
+    var travelProviders = app.Services.GetServices<ITravelDataProvider>().ToList();
+    var terraProvider = travelProviders.OfType<TerraTravelProvider>().FirstOrDefault();
+    var legacyProvider = travelProviders.OfType<TripadvisorTravelProvider>().FirstOrDefault();
+    var travelRegistry = app.Services.GetRequiredService<ITravelDataRegistry>();
+
+    app.Logger.LogInformation(
+        "[GLUNO] travel provider configuration terraRegistered={TerraRegistered} terraEnabled={TerraEnabled} "
+        + "terraApiKeyPresent={TerraApiKeyPresent} terraBaseUrlPresent={TerraBaseUrlPresent} "
+        + "terraConfigured={TerraConfigured} legacyRegistered={LegacyRegistered} legacyEnabled={LegacyEnabled} "
+        + "legacyConfigured={LegacyConfigured} selectedProvider={SelectedProvider}",
+        terraProvider != null,
+        terraProvider?.IsEnabled ?? false,
+        terraProvider?.HasApiKey ?? false,
+        terraProvider?.HasValidBaseUrl ?? false,
+        terraProvider?.IsConfigured ?? false,
+        legacyProvider != null,
+        legacyProvider?.IsEnabled ?? false,
+        legacyProvider?.IsConfigured ?? false,
+        travelRegistry.SelectedImplementationFor(TerraTravelProvider.ProviderId) ?? "none");
+}
+
 // Run pending migrations and ensure uploads directory exists
 using (var scope = app.Services.CreateScope())
 {

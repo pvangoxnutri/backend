@@ -36,6 +36,9 @@ public class GlunoController : ControllerBase
     private readonly IGlunoClarificationService _clarifications;
     private readonly IGlunoContextBuilder _contextBuilder;
     private readonly IEnumerable<ITravelDataProvider> _travelProviders;
+    /// The registry's OWN selection — never re-derived here, so the status
+    /// endpoint cannot drift from what a search would actually do.
+    private readonly ITravelDataRegistry _travelRegistry;
     private readonly IGlunoPlaceRehydrator _rehydrator;
     private readonly GlunoRequestDiagnostics _diagnostics;
     private readonly ILogger<GlunoController> _logger;
@@ -52,10 +55,12 @@ public class GlunoController : ControllerBase
         IGlunoClarificationService clarifications,
         IGlunoContextBuilder contextBuilder,
         IEnumerable<ITravelDataProvider> travelProviders,
+        ITravelDataRegistry travelRegistry,
         IGlunoPlaceRehydrator rehydrator,
         GlunoRequestDiagnostics diagnostics,
         ILogger<GlunoController> logger)
     {
+        _travelRegistry = travelRegistry;
         _diagnostics = diagnostics;
         _rehydrator = rehydrator;
         _liveTravel = liveTravel;
@@ -148,27 +153,34 @@ public class GlunoController : ControllerBase
         var terra = _travelProviders.OfType<TerraTravelProvider>().FirstOrDefault();
         var legacy = _travelProviders.OfType<TripadvisorTravelProvider>().FirstOrDefault();
 
-        var terraOn = terra?.IsConfigured == true;
-        var legacyOn = legacy?.IsConfigured == true;
+        // THE REGISTRY'S selection, not a re-derivation. The old ternary here
+        // said "terra wins wherever both are on" — true, but it could not see
+        // the fail-closed state, so this endpoint would have reported the
+        // legacy provider as active while the registry refused to serve.
+        var selected = _travelRegistry.SelectedImplementationFor(TerraTravelProvider.ProviderId);
+        var terraActive = selected == TerraTravelProvider.ImplementationId;
+        var legacyActive = selected == TripadvisorTravelProvider.ImplementationId;
 
         return new GlunoTravelDataDto
         {
-            TerraConfigured = terraOn,
-            LegacyConfigured = legacyOn,
-            // Terra wins wherever both are on — same order the registry uses.
-            ActiveProvider = terraOn ? "terra" : legacyOn ? "legacy" : null,
-            RecommendationsSearch = terraOn && terra!.SupportsRecommendationsSearch,
-            Photos = terraOn ? terra!.SupportsPhotos : legacyOn,
-            Reviews = terraOn ? terra!.SupportsReviews : legacyOn,
-            OpeningHours = terraOn ? terra!.SupportsOpeningHours : legacyOn,
-            ContentPersistence = terraOn
+            TravelProviderFamily = TerraTravelProvider.ProviderId,
+            TravelProviderImplementation = selected,
+            TerraEnabled = terra?.IsEnabled == true,
+            TerraConfigured = terra?.IsConfigured == true,
+            LegacyConfigured = legacy?.IsConfigured == true,
+            ActiveProvider = selected,
+            RecommendationsSearch = terraActive && terra!.SupportsRecommendationsSearch,
+            Photos = terraActive ? terra!.SupportsPhotos : legacyActive,
+            Reviews = terraActive ? terra!.SupportsReviews : legacyActive,
+            OpeningHours = terraActive ? terra!.SupportsOpeningHours : legacyActive,
+            ContentPersistence = terraActive
                 ? terra!.AllowsContentPersistence
-                : legacy?.AllowsContentPersistence ?? false,
+                : legacyActive && (legacy?.AllowsContentPersistence ?? false),
             // The other half of the same policy, and the reason a
             // recommendation stays addable when its content is not kept.
-            LocationIdPersistence = terraOn
+            LocationIdPersistence = terraActive
                 ? terra!.AllowsLocationIdPersistence
-                : legacy?.AllowsLocationIdPersistence ?? false,
+                : legacyActive && (legacy?.AllowsLocationIdPersistence ?? false),
         };
     }
 

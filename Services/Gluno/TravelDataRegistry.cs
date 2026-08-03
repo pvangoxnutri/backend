@@ -35,28 +35,77 @@ public sealed class TravelDataRegistry : ITravelDataRegistry
         _logger = logger;
     }
 
-    public bool HasConfiguredProvider => _providers.Any(provider => provider.IsConfigured);
+    public bool HasConfiguredProvider => SelectProviders().Count > 0;
+
+    /// <summary>
+    /// ONE implementation per family, deterministically.
+    ///
+    /// THE BUG THIS CLOSES. The old rule was "first CONFIGURED provider in
+    /// registration order" — so when Terra was enabled-but-keyless (or simply
+    /// unconfigured) in production, the legacy Content API silently took the
+    /// whole tripadvisor family, observable only as providerStatus=Unknown in
+    /// a log line. A misconfiguration must be a visible failure, never a
+    /// silent downgrade.
+    ///
+    /// The rule now: within each family, the ENABLED implementation with the
+    /// lowest SelectionPriority owns the family (Terra=0, legacy=100 — fixed
+    /// values, so DI order can never decide). If the owner is enabled but not
+    /// configured, the family FAILS CLOSED: nobody serves it, a warning names
+    /// the implementation, and the caller gets the structured not-configured
+    /// path. A sibling may serve only when the owner is explicitly disabled.
+    /// </summary>
+    private List<ITravelDataProvider> SelectProviders()
+    {
+        var chosen = new List<ITravelDataProvider>();
+
+        foreach (var family in _providers.GroupBy(provider => provider.Provider, StringComparer.Ordinal))
+        {
+            var owner = family
+                .Where(provider => provider.IsEnabled)
+                .OrderBy(provider => provider.SelectionPriority)
+                .FirstOrDefault();
+
+            if (owner == null) continue;
+
+            if (owner.IsConfigured)
+            {
+                chosen.Add(owner);
+                continue;
+            }
+
+            // Enabled but broken — fail closed, and say so. Family and
+            // implementation only; never a key, never a URL.
+            _logger.LogWarning(
+                "[GLUNO] travel provider fail-closed family={Family} implementation={Implementation} "
+                + "reason=enabled_but_not_configured",
+                family.Key, owner.Implementation);
+        }
+
+        return chosen;
+    }
+
+    /// <summary>
+    /// Which implementation currently owns a family, for diagnostics — the
+    /// same selection the searches use, never a parallel guess.
+    /// </summary>
+    public string? SelectedImplementationFor(string family)
+        => SelectProviders()
+            .FirstOrDefault(provider => string.Equals(provider.Provider, family, StringComparison.Ordinal))
+            ?.Implementation;
 
     public async Task<IReadOnlyList<RankedTravelPlace>> SearchPlacesAsync(TravelPlaceQuery query, CancellationToken ct)
     {
         var startedAt = DateTime.UtcNow;
 
-        // ── One provider per place-id namespace ───────────────────────────
+        // ── One implementation per place-id namespace ─────────────────────
         //
         // Terra and the Content API are two products from the same company and
-        // issue the SAME location ids, so both being configured would mean two
+        // issue the SAME location ids, so both serving at once would mean two
         // upstream calls, two bills and a deduplicated list where each place
         // came from whichever answered first — with the other's ratings
-        // possibly attached.
-        //
-        // Registration order is the priority, and Terra is registered first:
-        // Content API keys stop working 2026-08-31, so the newer platform wins
-        // wherever both are available.
-        var configured = _providers
-            .Where(provider => provider.IsConfigured)
-            .GroupBy(provider => provider.Provider, StringComparer.Ordinal)
-            .Select(group => group.First())
-            .ToList();
+        // possibly attached. See SelectProviders for the ownership rule and
+        // the fail-closed guarantee.
+        var configured = SelectProviders();
 
         // ── Not configured is not "no results" ────────────────────────────
         //
@@ -167,11 +216,7 @@ public sealed class TravelDataRegistry : ITravelDataRegistry
     /// </summary>
     public async Task<TravelSearchResult> SearchAllAsync(TravelPlaceQuery query, CancellationToken ct)
     {
-        var configured = _providers
-            .Where(provider => provider.IsConfigured)
-            .GroupBy(provider => provider.Provider, StringComparer.Ordinal)
-            .Select(group => group.First())
-            .ToList();
+        var configured = SelectProviders();
 
         if (configured.Count == 0)
         {
@@ -191,6 +236,16 @@ public sealed class TravelDataRegistry : ITravelDataRegistry
             {
                 var result = await provider.SearchPlacesWithStatusAsync(query, ct);
 
+                // WHICH implementation answered, said outright. Unknown used
+                // to be the only clue that the legacy provider had run — the
+                // identity is a logged fact now, never an inference from a
+                // status value. Family, implementation, enum, id — nothing
+                // else.
+                _logger.LogInformation(
+                    "[GLUNO] travel provider result family={Family} implementation={Implementation} "
+                    + "status={Status} requestId={RequestId}",
+                    provider.Provider, provider.Implementation, result.Status, query.RequestId ?? "-");
+
                 collected.AddRange(result.Places);
                 status = Worse(status, result.Status);
             }
@@ -203,8 +258,8 @@ public sealed class TravelDataRegistry : ITravelDataRegistry
                 status = Worse(status, TravelSearchStatus.Failed);
 
                 _logger.LogWarning(
-                    "[GLUNO] travel provider {Provider} lookup failed: {Category}",
-                    provider.Provider, ex.GetType().Name);
+                    "[GLUNO] travel provider {Provider} implementation={Implementation} lookup failed: {Category}",
+                    provider.Provider, provider.Implementation, ex.GetType().Name);
             }
         }
 
@@ -244,9 +299,12 @@ public sealed class TravelDataRegistry : ITravelDataRegistry
     {
         if (!TravelPlaceIds.TrySplit(externalId, out var providerId, out var providerPlaceId)) return null;
 
-        var provider = _providers.FirstOrDefault(candidate =>
-            candidate.IsConfigured
-            && string.Equals(candidate.Provider, providerId, StringComparison.OrdinalIgnoreCase));
+        // The same ownership rule as the searches: the family's selected
+        // implementation answers, or nobody does. Without this a Terra id
+        // could be re-fetched through the legacy Content API whenever Terra
+        // lost its configuration — the same silent downgrade, one route over.
+        var provider = SelectProviders().FirstOrDefault(candidate =>
+            string.Equals(candidate.Provider, providerId, StringComparison.OrdinalIgnoreCase));
 
         if (provider == null) return null;
 

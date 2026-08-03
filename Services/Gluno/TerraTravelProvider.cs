@@ -119,10 +119,32 @@ public sealed class TerraTravelProvider : ITravelDataProvider
 
     public string Provider => ProviderId;
 
+    /// The implementation within the family — see ITravelDataProvider.
+    public const string ImplementationId = "terra";
+    public string Implementation => ImplementationId;
+
+    /// Terra wins the family wherever it is enabled — lower wins, fixed here
+    /// so DI registration order can never decide.
+    public int SelectionPriority => 0;
+
     private string? ApiKey => _config["TripadvisorTerra:ApiKey"];
 
     private string BaseUrl =>
         (_config["TripadvisorTerra:BaseUrl"] ?? "https://terra.tripadvisor.com/api").TrimEnd('/');
+
+    /// <summary>
+    /// The operator's explicit switch, alone. The registry compares this with
+    /// <see cref="IsConfigured"/> and FAILS CLOSED on the difference: Terra
+    /// switched on with a missing key must never silently become the legacy
+    /// provider answering instead.
+    /// </summary>
+    public bool IsEnabled => _config.GetValue("TripadvisorTerra:Enabled", false);
+
+    /// Booleans for diagnostics — never the values themselves.
+    public bool HasApiKey => !string.IsNullOrWhiteSpace(ApiKey);
+    public bool HasValidBaseUrl =>
+        Uri.TryCreate(BaseUrl, UriKind.Absolute, out var baseUri)
+        && baseUri.Scheme == Uri.UriSchemeHttps;
 
     /// <summary>
     /// Off unless switched on AND given a key AND pointed at an https host.
@@ -131,11 +153,7 @@ public sealed class TerraTravelProvider : ITravelDataProvider
     /// does: deploying this code must not start calling a metered API by
     /// itself.
     /// </summary>
-    public bool IsConfigured =>
-        _config.GetValue("TripadvisorTerra:Enabled", false)
-        && !string.IsNullOrWhiteSpace(ApiKey)
-        && Uri.TryCreate(BaseUrl, UriKind.Absolute, out var baseUri)
-        && baseUri.Scheme == Uri.UriSchemeHttps;
+    public bool IsConfigured => IsEnabled && HasApiKey && HasValidBaseUrl;
 
     /// <summary>
     /// FALSE, and this is a deliberate reading of Tripadvisor's terms.

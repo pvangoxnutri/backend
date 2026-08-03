@@ -842,13 +842,30 @@ public class GlunoConflictDto
 /// </summary>
 public class GlunoTravelDataDto
 {
+    /// The provider FAMILY — the place-id namespace ("tripadvisor").
+    public string? TravelProviderFamily { get; set; }
+
+    /// <summary>
+    /// Which IMPLEMENTATION of the family the registry selected — "terra",
+    /// "legacy", or null when the family is unserved (nothing enabled, or the
+    /// enabled implementation failed closed on a broken configuration).
+    /// The registry's own selection, never a parallel guess.
+    /// </summary>
+    public string? TravelProviderImplementation { get; set; }
+
+    /// The operator's explicit Terra switch, regardless of credentials —
+    /// true beside TerraConfigured=false is exactly the fail-closed state.
+    public bool TerraEnabled { get; set; }
+
     /// Terra is switched on and has a key and an https host.
     public bool TerraConfigured { get; set; }
 
     /// The Content API integration, which retires 2026-08-31.
     public bool LegacyConfigured { get; set; }
 
-    /// "terra" | "legacy" | null when neither is usable.
+    /// "terra" | "legacy" | null when neither is usable. The same value as
+    /// TravelProviderImplementation — kept under the earlier name so existing
+    /// readers keep working.
     public string? ActiveProvider { get; set; }
 
     // ── Capabilities of whichever is active ──────────────────────────────
