@@ -207,8 +207,11 @@ public class TerraContractAndFailureEvals
 
         // A 502 from a proxy carries no JSON at all — it knows nothing about
         // this envelope. That is a failure like any other, not a response to
-        // render field by field.
-        Assert.Contains("if (error.code === undefined) error.code = 'request_failed';", client);
+        // render field by field. The proxy statuses get their own edge_ codes
+        // (with their own copy); everything else contractless stays
+        // request_failed.
+        Assert.Contains("error.code = EDGE_STATUSES.has(response.status)", client);
+        Assert.Contains(": 'request_failed';", client);
         Assert.Contains(
             "if (error.retryable === undefined) error.retryable = response.status >= 500;", client);
         // Reads the current field and the earlier one.

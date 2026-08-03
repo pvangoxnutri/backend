@@ -303,9 +303,12 @@ public class ErrorContractAndRequestIdEvals
         // absorb it.
         Assert.Contains("network_error: 'gluno.error.network'", copy);
 
-        // And the stamp itself exists only where no code could be read.
+        // And the stamp itself exists only where no code could be read — with
+        // the proxy statuses split out under their own names first.
         var gluno = Mobile("lib", "gluno.ts");
-        Assert.Contains("if (error.code === undefined) error.code = 'request_failed';", gluno);
+        Assert.Contains("if (error.code === undefined) {", gluno);
+        Assert.Contains("? `edge_${response.status}`", gluno);
+        Assert.Contains(": 'request_failed';", gluno);
     }
 
     // ── 9–10. The request id follows the flow, and is logged safely ───────
@@ -384,7 +387,12 @@ public class ErrorContractAndRequestIdEvals
 
         foreach (Match block in devBlocks)
         {
-            Assert.DoesNotContain("body", block.Groups[1].Value, StringComparison.OrdinalIgnoreCase);
+            // What would actually leak: reading or serialising the response
+            // body, a token, or message text. bodyLength — a number from a
+            // header — is allowed; the body itself is not.
+            Assert.DoesNotContain(".text()", block.Groups[1].Value, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("JSON.stringify", block.Groups[1].Value, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("await response", block.Groups[1].Value, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("token", block.Groups[1].Value, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("message.text", block.Groups[1].Value, StringComparison.OrdinalIgnoreCase);
         }
@@ -421,7 +429,7 @@ public class ErrorContractAndRequestIdEvals
         // Every log format string added for this round, verbatim.
         var newLines = new[]
         {
-            "[GLUNO] request done requestId={RequestId} conversationId={ConversationId} ",
+            "[GLUNO] request done requestId={RequestId} clientRequestId={ClientRequestId} ",
             "[GLUNO] request escaped type={Category} requestId={RequestId}",
             "[GLUNO] escaped type={Category} stage={Stage} requestId={RequestId}",
             "[GLUNO] direct place search escaped type={Category} requestId={RequestId}",
@@ -442,7 +450,7 @@ public class ErrorContractAndRequestIdEvals
         // vocabulary — no {Message}, no {Query}, no {Header}, no {Url}.
         var allowed = new HashSet<string>
         {
-            "RequestId", "ConversationId", "ScopeType", "IntentBranch",
+            "RequestId", "ClientRequestId", "ConversationId", "ScopeType", "IntentBranch",
             "ResponseOrigin", "HttpStatus", "ErrorCode", "ProviderStatus",
             "Completed", "Elapsed", "Category", "Stage", "Status",
         };
