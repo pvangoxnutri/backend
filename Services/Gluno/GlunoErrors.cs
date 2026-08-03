@@ -85,6 +85,31 @@ public static class GlunoErrors
     };
 
     /// <summary>
+    /// Whether a failure is a HANDLED TURN RESULT, delivered with HTTP 200.
+    ///
+    /// THE BUG THIS CLOSES. tripadvisor_unavailable went to the wire as HTTP
+    /// 502 — semantically "bad gateway" — and Cloudflare, sitting in front of
+    /// the origin, did what an edge is entitled to do with a gateway status:
+    /// replaced the response with its own HTML error page. The JSON envelope,
+    /// the X-Gluno-Request-Id header and the code the app localises all
+    /// vanished, and the user saw the connection-lost line for a failure the
+    /// backend had handled and named.
+    ///
+    /// So the split is: 502 and 504 are GATEWAY statuses that belong to the
+    /// infrastructure between the app and this process, and a failure this
+    /// process has already turned into a renderable turn result must not
+    /// travel under one. The protocol succeeded; the TURN failed — HTTP 200,
+    /// with code/retryable/responseOrigin/requestId describing the outcome.
+    ///
+    /// 503 is deliberately NOT included: gluno_unavailable and
+    /// place_lookup_busy mean the endpoint itself cannot serve, and the app
+    /// re-checks availability when it sees 503 — that flow keeps its status.
+    /// Real 4xx statuses (auth, not-found, conflict, the user's own rate
+    /// limit) stay exactly what they are.
+    /// </summary>
+    public static bool DeliveredAsTurnResult(string code) => StatusFor(code) is 502 or 504;
+
+    /// <summary>
     /// Whether offering "try again" is honest for this code.
     ///
     /// A missing key fails identically on every tap, and a button that never

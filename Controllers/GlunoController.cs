@@ -96,9 +96,16 @@ public class GlunoController : ControllerBase
         // The failure body carries the producing branch and the request id so
         // the app's debug export can join a red bubble to the backend's own
         // log lines. Fixed vocabulary and an id — never text.
-        return StatusCode(
-            GlunoErrors.StatusFor(code),
-            GlunoErrors.Body(code, retryable, result.ResponseOrigin, _diagnostics.RequestId));
+        var body = GlunoErrors.Body(code, retryable, result.ResponseOrigin, _diagnostics.RequestId);
+
+        // A handled turn failure travels as HTTP 200 — the PROTOCOL worked,
+        // the TURN failed. Sending it as 502 handed the response to the edge:
+        // Cloudflare replaced the envelope with its own HTML page, and the
+        // app lost the code, the retry flag and both ids. See
+        // GlunoErrors.DeliveredAsTurnResult for the exact split.
+        return GlunoErrors.DeliveredAsTurnResult(code)
+            ? Ok(body)
+            : StatusCode(GlunoErrors.StatusFor(code), body);
     }
 
     /// <summary>
@@ -390,11 +397,13 @@ public class GlunoController : ControllerBase
 
             _diagnostics.ErrorCode = GlunoFailureCodes.AiMalformedResponse;
 
-            return StatusCode(
-                GlunoErrors.StatusFor(GlunoFailureCodes.AiMalformedResponse),
-                GlunoErrors.Body(
-                    GlunoFailureCodes.AiMalformedResponse, true,
-                    requestId: _diagnostics.RequestId));
+            // HTTP 200, not 502: this catch just BUILT a valid renderable
+            // envelope, and a gateway status would hand it to the edge to
+            // replace. The truly contractless case — an exception that
+            // escapes even this — is the middleware's, and stays 5xx.
+            return Ok(GlunoErrors.Body(
+                GlunoFailureCodes.AiMalformedResponse, true,
+                requestId: _diagnostics.RequestId));
         }
 
         // The one summary line the middleware writes reads these — stamped
