@@ -105,8 +105,13 @@ public class TurnBoundaryEvals
     {
         var (status, body) = await SendAsync(thrown);
 
-        // A 5xx, but a SPEAKING one.
-        Assert.InRange(status, 500, 599);
+        // 200, not 5xx: this catch just BUILT a valid renderable envelope,
+        // and a gateway status hands the response to the edge — Cloudflare
+        // replaced an origin 502 with its own HTML page in production, and
+        // the app lost the code and the retry flag. The envelope carries the
+        // failure; the transport status says it was delivered intact. Only
+        // the middleware's truly contractless case still answers 5xx.
+        Assert.Equal(200, status);
 
         Assert.True(
             body.TryGetProperty(CodeField, out var code),

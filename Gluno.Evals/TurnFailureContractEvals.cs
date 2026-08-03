@@ -110,7 +110,10 @@ public class TurnFailureContractEvals
 
         var (status, body) = await SendAsync(Failure(GlunoTurnError.ProviderFailed, code));
 
-        Assert.Equal(502, status);
+        // 200, not 502: a handled provider failure is a turn result, and a
+        // gateway status handed the response to the edge to replace with
+        // HTML. The envelope carries the outcome.
+        Assert.Equal(200, status);
         Assert.Equal(expectedCode, body.GetProperty(CodeField).GetString());
         Assert.Equal(expectedRetryable, body.GetProperty(RetryField).GetBoolean());
     }
@@ -122,7 +125,7 @@ public class TurnFailureContractEvals
         // what the app renders as the generic line.
         var (status, body) = await SendAsync(Failure(GlunoTurnError.ProviderFailed));
 
-        Assert.Equal(502, status);
+        Assert.Equal(200, status);
         Assert.False(string.IsNullOrWhiteSpace(body.GetProperty(CodeField).GetString()));
     }
 
@@ -197,7 +200,20 @@ public class TurnFailureContractEvals
         {
             var (status, body) = await SendAsync(Failure(error, GlunoFailureCodes.AiMalformedResponse));
 
-            Assert.InRange(status, 400, 599);
+            // Handled turn failures travel as 200 (the envelope carries the
+            // outcome); everything else keeps its real HTTP status.
+            var expected = error switch
+            {
+                GlunoTurnError.Unavailable => 503,
+                GlunoTurnError.EmptyMessage or GlunoTurnError.ConversationArchived => 400,
+                GlunoTurnError.ConversationNotFound => 404,
+                GlunoTurnError.NotTripMember => 403,
+                GlunoTurnError.Cancelled => 499,
+                GlunoTurnError.DuplicateInFlight => 409,
+                GlunoTurnError.UsageLimitReached => 429,
+                _ => 200,
+            };
+            Assert.Equal(expected, status);
 
             foreach (var field in new[] { "code", "message", RetryField })
             {

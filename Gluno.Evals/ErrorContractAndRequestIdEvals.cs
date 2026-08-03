@@ -467,14 +467,25 @@ public class ErrorContractAndRequestIdEvals
     // ── The status the failure travels under ──────────────────────────────
 
     [Fact]
-    public void The_place_error_is_a_retryable_502()
+    public void The_place_error_is_a_retryable_turn_result_not_a_gateway_status()
     {
+        // StatusFor still CLASSIFIES these as the provider tier (502) — that
+        // classification is what DeliveredAsTurnResult keys on — but a
+        // handled failure is DELIVERED as HTTP 200, because a 502 from the
+        // origin is a gateway status Cloudflare replaced with its own HTML
+        // page in production, envelope and headers gone.
         Assert.Equal(502, GlunoErrors.StatusFor("tripadvisor_unavailable"));
+        Assert.True(GlunoErrors.DeliveredAsTurnResult("tripadvisor_unavailable"));
         Assert.True(GlunoFailureCodes.IsRetryable("tripadvisor_unavailable"));
 
-        // And the boundary code the middleware answers with is retryable too —
-        // a serialization defect on one turn says nothing about the next.
-        Assert.Equal(502, GlunoErrors.StatusFor(GlunoFailureCodes.AiMalformedResponse));
+        Assert.True(GlunoErrors.DeliveredAsTurnResult(GlunoFailureCodes.AiMalformedResponse));
         Assert.True(GlunoFailureCodes.IsRetryable(GlunoFailureCodes.AiMalformedResponse));
+
+        // The availability tier keeps its semantics — the app re-checks
+        // status on 503 — and the real 4xx tiers stay what they are.
+        Assert.False(GlunoErrors.DeliveredAsTurnResult("gluno_unavailable"));
+        Assert.False(GlunoErrors.DeliveredAsTurnResult("conversation_not_found"));
+        Assert.False(GlunoErrors.DeliveredAsTurnResult(GlunoFailureCodes.UserUsageLimit));
+        Assert.False(GlunoErrors.DeliveredAsTurnResult(GlunoFailureCodes.Cancelled));
     }
 }
