@@ -22,6 +22,28 @@ public sealed class GlunoRequestDiagnostics
     /// Short and unguessable enough to join logs by; never used for auth.
     public string RequestId { get; } = Guid.NewGuid().ToString("N")[..12];
 
+    /// <summary>
+    /// The id the DEVICE minted before its request left it, when one arrived
+    /// and passed validation. "-" otherwise.
+    ///
+    /// WHY IT EXISTS. An edge 502 never carries the server's request id — the
+    /// proxy answered before this process could. The client id was logged on
+    /// the device before anything failed, so echoing and logging it here is
+    /// the only correlation that survives that failure mode. Opaque, logged
+    /// as-is, never trusted for authorization or anything else.
+    /// </summary>
+    public string ClientRequestId { get; set; } = "-";
+
+    /// <summary>
+    /// Whether a client-supplied id is safe to echo and log: short, and
+    /// nothing but unreserved id characters. Anything else is ignored rather
+    /// than sanitised — an id that needs cleaning is not an id.
+    /// </summary>
+    public static bool IsValidClientRequestId(string? candidate)
+        => !string.IsNullOrEmpty(candidate)
+            && candidate.Length is >= 4 and <= 64
+            && candidate.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_');
+
     /// SideQuest's own conversation id — an id this backend minted, never
     /// provider data.
     public Guid? ConversationId { get; set; }
@@ -57,11 +79,13 @@ public sealed class GlunoRequestDiagnostics
     /// </summary>
     public void WriteSummary(ILogger logger, int httpStatus)
         => logger.LogInformation(
-            "[GLUNO] request done requestId={RequestId} conversationId={ConversationId} "
+            "[GLUNO] request done requestId={RequestId} clientRequestId={ClientRequestId} "
+            + "conversationId={ConversationId} "
             + "scopeType={ScopeType} intentBranch={IntentBranch} responseOrigin={ResponseOrigin} "
             + "httpStatus={HttpStatus} errorCode={ErrorCode} providerStatus={ProviderStatus} "
             + "completed={Completed} in {Elapsed}ms",
             RequestId,
+            ClientRequestId,
             ConversationId?.ToString() ?? "-",
             ScopeType,
             IntentBranch,

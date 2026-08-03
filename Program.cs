@@ -408,6 +408,17 @@ app.Use(async (ctx, next) =>
     var glunoDiagnostics = ctx.RequestServices.GetRequiredService<GlunoRequestDiagnostics>();
     ctx.Response.Headers["X-Gluno-Request-Id"] = glunoDiagnostics.RequestId;
 
+    // The device's own correlation id, echoed back and logged when it looks
+    // like an id and IGNORED otherwise — never trusted for anything beyond
+    // joining log lines. It is the one id that survives an edge failure,
+    // because the device logged it before the request left.
+    var clientRequestId = ctx.Request.Headers["X-Gluno-Client-Request-Id"].ToString();
+    if (GlunoRequestDiagnostics.IsValidClientRequestId(clientRequestId))
+    {
+        glunoDiagnostics.ClientRequestId = clientRequestId;
+        ctx.Response.Headers["X-Gluno-Client-Request-Id"] = clientRequestId;
+    }
+
     try
     {
         await next();
