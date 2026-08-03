@@ -659,10 +659,14 @@ public class TerraProviderEvals
             "Controllers", "GlunoController.cs"));
 
         // The previous outage was invisible from every surface. This is what
-        // makes "the provider is switched off" diagnosable without a log.
-        Assert.Contains("ActiveProvider = terraOn ? \"terra\" : legacyOn ? \"legacy\" : null", controller);
-        Assert.Contains("TerraConfigured = terraOn", controller);
-        Assert.Contains("LegacyConfigured = legacyOn", controller);
+        // makes "the provider is switched off" diagnosable without a log —
+        // and the value now comes from the REGISTRY'S own selection, so the
+        // endpoint cannot report an implementation the searches would refuse
+        // (the fail-closed state).
+        Assert.Contains("_travelRegistry.SelectedImplementationFor(TerraTravelProvider.ProviderId)", controller);
+        Assert.Contains("ActiveProvider = selected", controller);
+        Assert.Contains("TerraConfigured = terra?.IsConfigured == true", controller);
+        Assert.Contains("LegacyConfigured = legacy?.IsConfigured == true", controller);
     }
 
     [Fact]

@@ -345,18 +345,25 @@ public class TerraContractAndFailureEvals
     {
         var registry = Source("Services", "Gluno", "TravelDataRegistry.cs");
 
-        // Both products answer to "tripadvisor" and issue the same ids, so one
-        // per provider NAME is what stops two upstream calls and two bills.
-        // Both search paths dedupe, so neither can quietly start fanning out.
+        // Both products answer to "tripadvisor" and issue the same ids, so ONE
+        // implementation per family is what stops two upstream calls and two
+        // bills. The rule lives in SelectProviders — enabled owner by fixed
+        // priority, fail closed on a broken owner — and both search paths go
+        // through it, so neither can quietly start fanning out.
         foreach (var method in new[] { "> SearchPlacesAsync(", "> SearchAllAsync(" })
         {
             var start = registry.IndexOf(method, StringComparison.Ordinal);
-            var body = registry[start..(start + 1800)];
+            var body = registry[start..(start + 1200)];
 
             Assert.True(start > 0, method);
-            Assert.Contains(".GroupBy(provider => provider.Provider, StringComparer.Ordinal)", body);
-            Assert.Contains(".Select(group => group.First())", body);
+            Assert.Contains("var configured = SelectProviders();", body);
         }
+
+        var rule = registry.IndexOf("private List<ITravelDataProvider> SelectProviders()", StringComparison.Ordinal);
+        Assert.True(rule > 0);
+        var ruleBody = registry[rule..(rule + 1600)];
+        Assert.Contains(".GroupBy(provider => provider.Provider, StringComparer.Ordinal)", ruleBody);
+        Assert.Contains(".OrderBy(provider => provider.SelectionPriority)", ruleBody);
     }
 
     [Fact]

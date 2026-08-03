@@ -52,6 +52,7 @@ public class TurnStatusSemanticsEvals
             clarifications: null!,
             contextBuilder: null!,
             travelProviders: Array.Empty<ITravelDataProvider>(),
+            travelRegistry: new TravelDataRegistry([], Microsoft.Extensions.Logging.Abstractions.NullLogger<TravelDataRegistry>.Instance),
             rehydrator: new UnusedRehydrator(),
             diagnostics: new GlunoRequestDiagnostics(),
             logger: Microsoft.Extensions.Logging.Abstractions.NullLogger<GlunoController>.Instance);

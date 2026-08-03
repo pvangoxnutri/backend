@@ -825,8 +825,8 @@ Assert.Equal(
         var controller = Source("Controllers", "GlunoController.cs");
         var terra = Source("Services", "Gluno", "TerraTravelProvider.cs");
 
-        Assert.Contains("ContentPersistence = terraOn", controller);
-        Assert.Contains("LocationIdPersistence = terraOn", controller);
+        Assert.Contains("ContentPersistence = terraActive", controller);
+        Assert.Contains("LocationIdPersistence = terraActive", controller);
 
         Assert.Contains("public bool AllowsContentPersistence => ContentMayBeStored;", terra);
         Assert.Contains("public bool AllowsLocationIdPersistence => LocationIdMayBeStored;", terra);
