@@ -136,6 +136,10 @@ public static class GlunoPlaceOptions
     private static readonly string[] AddWords =
     [
         "lagg till", "lagg in", "boka in", "ta med", "add ", "put ", "include",
+        // "Skapa Real Alcázar" is the add flow said with a different verb. In
+        // production it slipped past this list, reached the model, and the
+        // model answered a place-add with advice about typing "lägg till".
+        "skapa ", "create ",
     ];
 
     public static bool IsAddRequest(string? message)

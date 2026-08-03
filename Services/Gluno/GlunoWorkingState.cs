@@ -88,6 +88,14 @@ public sealed class GlunoWorkingState
 
     public GlunoRecentMentions Recent { get; set; } = new();
 
+    /// <summary>
+    /// The one action this conversation has offered and not resolved — see
+    /// <see cref="GlunoPendingAction"/>. Null is the ordinary state. Additive
+    /// on the JSON shape, so rows written before it existed read back as
+    /// "nothing pending" rather than forcing a version bump.
+    /// </summary>
+    public GlunoPendingAction? PendingAction { get; set; }
+
     public DateTime UpdatedAtUtc { get; set; } = DateTime.UtcNow;
 
     /// <summary>

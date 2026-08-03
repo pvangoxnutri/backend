@@ -68,5 +68,17 @@ public class GlunoMessage
     public int? InputTokens { get; set; }
     public int? OutputTokens { get; set; }
 
+    /// <summary>
+    /// Which internal path produced an assistant turn — one of
+    /// <see cref="Services.Gluno.GlunoResponseOrigins"/>, or null for user
+    /// rows and rows written before this existed.
+    ///
+    /// SIDEQUEST'S OWN METADATA: a fixed vocabulary naming a code branch.
+    /// Never user text, never provider content, never rendered — it exists so
+    /// a reloaded conversation's debug export can still say which path wrote
+    /// each line instead of guessing.
+    /// </summary>
+    public string? ResponseOrigin { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }

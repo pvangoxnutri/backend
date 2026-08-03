@@ -274,6 +274,16 @@ public class GlunoMessageDto
     /// The compact "Sources" row: where the non-place facts in this turn came
     /// from. Place attribution rides on the place cards themselves.
     public List<GlunoSourceDto> Sources { get; set; } = new();
+
+    /// <summary>
+    /// Which internal path produced this turn — a fixed vocabulary value from
+    /// GlunoResponseOrigins, or null for user rows and rows that predate it.
+    ///
+    /// SideQuest's own diagnostic metadata: it survives into history so a
+    /// debug export can name the branch after a reload. Never rendered.
+    /// </summary>
+    public string? ResponseOrigin { get; set; }
+
     public DateTime CreatedAt { get; set; }
 }
 

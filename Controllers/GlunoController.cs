@@ -1097,6 +1097,10 @@ public class GlunoController : ControllerBase
             // So a reloaded conversation renders its cards again instead of
             // showing a question with nothing under it.
             Clarification = MapClarification(clarification),
+            // The producing branch, preserved into history. SideQuest's own
+            // fixed vocabulary — allowed metadata under every provider's
+            // terms, because it names our code and nothing else.
+            ResponseOrigin = m.ResponseOrigin,
             CreatedAt = m.CreatedAt,
         };
     }

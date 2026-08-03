@@ -56,6 +56,43 @@ public static class GlunoNeutralText
             : $"Here are some new suggestions in {destination}:";
     }
 
+    /// <summary>
+    /// The heading over a model-free place list. The destination is SideQuest's
+    /// own resolved geography — the user's words or their Adventure — never a
+    /// provider's name for anything.
+    /// </summary>
+    public static string PlaceList(string? destination, string? language)
+    {
+        var swedish = Swedish(language);
+
+        if (string.IsNullOrWhiteSpace(destination))
+        {
+            return swedish ? "Här är förslag:" : "Here are some suggestions:";
+        }
+
+        return swedish
+            ? $"Här är förslag i {destination}:"
+            : $"Here are suggestions in {destination}:";
+    }
+
+    /// The heading when a named place was not found but the search returned
+    /// alternatives worth showing.
+    public static string NoExactMatch(string? destination, string? language)
+    {
+        var swedish = Swedish(language);
+
+        if (string.IsNullOrWhiteSpace(destination))
+        {
+            return swedish
+                ? "Jag hittade inte just den platsen — här är vad jag hittade:"
+                : "I couldn't find that exact place — here's what I found:";
+        }
+
+        return swedish
+            ? $"Jag hittade inte just den platsen — här är vad jag hittade i {destination}:"
+            : $"I couldn't find that exact place — here's what I found in {destination}:";
+    }
+
     /// The stand-in for a place's name inside a sentence.
     public static string ThePlace(string? language) => Swedish(language) ? "platsen" : "the place";
 

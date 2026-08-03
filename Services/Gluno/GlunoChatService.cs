@@ -88,7 +88,9 @@ public sealed class GlunoTurnResult
 {
     public GlunoTurnError Error { get; init; }
     public GlunoConversation? Conversation { get; init; }
-    public GlunoMessage? UserMessage { get; init; }
+    /// Settable: the pending-action resolver persists the user's short "ja"
+    /// itself and attaches it to a result built by a button-shaped path.
+    public GlunoMessage? UserMessage { get; set; }
     public GlunoMessage? AssistantMessage { get; init; }
     public IReadOnlyList<GlunoProposal> Proposals { get; init; } = Array.Empty<GlunoProposal>();
     /// The persisted rows — these carry the ids the app applies against.
@@ -134,8 +136,12 @@ public sealed class GlunoTurnResult
     /// carrying text, ids or provider data. It exists so the next report can
     /// name the branch instead of guessing between the model, the history, the
     /// cache and an idempotency replay.
+    ///
+    /// Settable: when the pending-action resolver dispatches into a reused
+    /// path, the control flow's entry point — pending_action_resume — is the
+    /// diagnostic fact, and it is stamped over the inner path's own value.
     /// </summary>
-    public string? ResponseOrigin { get; init; }
+    public string? ResponseOrigin { get; set; }
 
     /// <summary>
     /// A stable code from <see cref="GlunoFailureCodes"/> when something went
@@ -644,6 +650,58 @@ public sealed class GlunoChatService : IGlunoChatService
             adventureResolution.Candidates.Count,
             resolvedTripId != null);
 
+        // ── A short yes resumes what was offered ──────────────────────────
+        //
+        // "Ja det blir bra" after an offer is an answer to the offer, and in
+        // production it went to the model instead — which reinterpreted the
+        // whole conversation and refused because the chat was not scoped to an
+        // Adventure. The order here is the contract: the pending action first,
+        // then an open clarification, then a waiting proposal, and only when
+        // none of them exists does a short yes reach ordinary routing.
+        string? responseOriginOverride = null;
+
+        if (GlunoFollowUps.IsResumptive(text))
+        {
+            var pendingAction = GlunoPendingActions.Usable(
+                workingState.PendingAction, DateTime.UtcNow);
+
+            if (pendingAction != null)
+            {
+                var resume = await ResumePendingActionAsync(
+                    userId, conversation, workingState, pendingAction, text,
+                    scopeTripId, answered, ct);
+
+                if (resume.Result != null)
+                {
+                    return await CompleteClaimAsync(claim, resume.Result, ct);
+                }
+
+                if (resume.PlanIntent != null)
+                {
+                    // The yes settled everything. The turn continues through
+                    // the ordinary pipeline with a STATED intent — the model
+                    // executes a settled instruction; it does not reinterpret
+                    // the conversation.
+                    intent = resume.PlanIntent;
+                    resolvedTripId = resume.TripId;
+                    responseOriginOverride = GlunoResponseOrigins.PendingActionResume;
+
+                    telemetry.Intent = intent.PrimaryIntent.ToString();
+                    telemetry.Scope = intent.Scope.ToString();
+                }
+            }
+            else
+            {
+                var reshown = await ReshowPendingWorkAsync(
+                    conversation, userId, workingState, text, ct);
+
+                if (reshown != null)
+                {
+                    return await CompleteClaimAsync(claim, reshown, ct);
+                }
+            }
+        }
+
         // ── Context, narrowed to what this intent needs ───────────────────
         //
         // canEdit is not known until the trip loads, so the workflow is
@@ -764,6 +822,23 @@ public sealed class GlunoChatService : IGlunoChatService
             var added = await AddNamedPlaceAsync(userId, conversation, text, ct);
             if (added != null) return added;
 
+            // ── Deterministic recovery for a name with no cards behind it ─
+            //
+            // The name may only ever have appeared in the model's own prose —
+            // no places, no option keys, no stored references. Model text is
+            // not a place identity, so the provider is SEARCHED for the words
+            // the user typed, and only a verified result continues into the
+            // Adventure/day/proposal flow. No model round on any branch.
+            var candidate = GlunoPlaceNameRecovery.ExtractCandidate(text);
+
+            if (candidate != null)
+            {
+                var recovered = await RecoverNamedPlaceAsync(
+                    userId, conversation, text, candidate, intent, context, resolvedTripId, ct);
+
+                if (recovered != null) return await CompleteClaimAsync(claim, recovered, ct);
+            }
+
             // ── When no place could be resolved ───────────────────────────
             //
             // THIS BRANCH IS THE PRODUCTION BUG. It used to fall through to the
@@ -783,6 +858,23 @@ public sealed class GlunoChatService : IGlunoChatService
             {
                 return await AskWhichPlaceToAddAsync(conversation, userId, text, ct);
             }
+        }
+
+        // ── A pure place question ─────────────────────────────────────────
+        //
+        // "Platser i Sevilla" answered straight from the provider: one search,
+        // a deterministic heading, structured cards with real option keys, and
+        // zero model calls. The intent router cannot gate this — its markers
+        // score category words, and the production message contained none, so
+        // it classified Unclear and the model wrote a prose list nothing could
+        // ever add from. See GlunoDirectPlaceSearch.
+        if (GlunoDirectPlaceSearch.Parse(text) is { } placeQuery)
+        {
+            var listed = await DirectPlaceSearchAsync(
+                userId, conversation, text, placeQuery, context, resolvedTripId,
+                answered, telemetry, ct);
+
+            if (listed != null) return await CompleteClaimAsync(claim, listed, ct);
         }
 
         // ── "Give me something I can tap" ─────────────────────────────────
@@ -927,6 +1019,7 @@ public sealed class GlunoChatService : IGlunoChatService
                 ConversationId = conversation.Id,
                 Role = GlunoMessageRoles.Assistant,
                 Text = direct.Text,
+                ResponseOrigin = GlunoResponseOrigins.Direct,
                 PayloadJson = direct.Navigations.Count > 0
                     ? JsonSerializer.Serialize(
                         new GlunoAssistantPayload { Navigations = direct.Navigations.ToList() }, GlunoJson.Options)
@@ -947,6 +1040,7 @@ public sealed class GlunoChatService : IGlunoChatService
                 UserMessage = userMessage,
                 AssistantMessage = directMessage,
                 Navigations = direct.Navigations,
+                ResponseOrigin = GlunoResponseOrigins.Direct,
             };
         }
 
@@ -1402,6 +1496,33 @@ public sealed class GlunoChatService : IGlunoChatService
             }
         }
 
+        // ── A promise must be resumable ───────────────────────────────────
+        //
+        // "Vill du ha den som dagsplan?" is a claim that a yes will do
+        // something, and that is only true when the server holds state a yes
+        // can resume. A day-plan offer the resolver can back — the Adventure
+        // is known, or the user's own Adventures can be asked about — becomes
+        // a pending action below. Any other unbacked offer does not ship.
+        // Response building, not the prompt: this is a check, not a request.
+        var backDayPlanOffer = false;
+
+        if (proposals.Count == 0 && GlunoActionOffer.ContainsOffer(assistantText))
+        {
+            if (GlunoActionOffer.IsDayPlanOffer(assistantText)
+                && (resolvedTripId != null || context.Trips.Count > 0))
+            {
+                backDayPlanOffer = true;
+            }
+            else
+            {
+                // Codes only — the sentence is the model's.
+                _logger.LogInformation(
+                    "[GLUNO] unbacked action offer removed intent={Intent}", intent.PrimaryIntent);
+
+                assistantText = GlunoActionOffer.Strip(assistantText, context.User.Language);
+            }
+        }
+
         // ── What may be kept ──────────────────────────────────────────────
         //
         // Some providers licence their content for the response and not for
@@ -1443,6 +1564,7 @@ public sealed class GlunoChatService : IGlunoChatService
             ConversationId = conversation.Id,
             Role = GlunoMessageRoles.Assistant,
             Text = persistedText,
+            ResponseOrigin = responseOriginOverride ?? GlunoResponseOrigins.ModelTurn,
             // Places live in the message payload; PROPOSALS do not. A proposal
             // needs an identity that can be claimed exactly once and a status
             // two devices agree on, so it becomes its own row below.
@@ -1472,6 +1594,30 @@ public sealed class GlunoChatService : IGlunoChatService
         var records = await CreateProposalsAsync(conversation, assistantMessage.Id, proposals, ct);
 
         latency.Reached("proposals_persisted");
+
+        // ── The offer's structured twin ───────────────────────────────────
+        //
+        // Every field server-derived: the Adventure from the deterministic
+        // resolver, the date from the router, the message id from the row just
+        // written. When the turn made no offer, any previous one ENDS here —
+        // an ordinary answer supersedes it, and a stale yes must not resume
+        // something from three questions ago.
+        var newPendingAction = backDayPlanOffer
+            ? GlunoPendingActions.WithLifetime(new GlunoPendingAction
+            {
+                Type = GlunoPendingActionTypes.PlanDay,
+                OriginMessageId = assistantMessage.Id,
+                AdventureId = resolvedTripId,
+                Destination = context.Trip?.Destination,
+                Date = intent.ReferencedDate,
+            }, DateTime.UtcNow)
+            : null;
+
+        if (newPendingAction != null || workingState.PendingAction != null)
+        {
+            workingState.PendingAction = newPendingAction;
+            await _workingState.SaveAsync(conversation.Id, workingState, ct);
+        }
 
         // ── Working memory ────────────────────────────────────────────────
         //
@@ -1522,7 +1668,7 @@ public sealed class GlunoChatService : IGlunoChatService
             ProposalRecords = records,
             Places = visiblePlaces,
             Navigations = visibleNavigations,
-            ResponseOrigin = GlunoResponseOrigins.ModelTurn,
+            ResponseOrigin = responseOriginOverride ?? GlunoResponseOrigins.ModelTurn,
             // Null unless the two differ, so the ordinary turn is unchanged.
             LiveAssistantText = ReferenceEquals(persistedText, assistantText) ? null : assistantText,
         };
@@ -2155,6 +2301,7 @@ public sealed class GlunoChatService : IGlunoChatService
             ConversationId = conversation.Id,
             Role = GlunoMessageRoles.Assistant,
             Text = identityOnly ? GlunoNeutralText.WhichPlaceQuestion(language) : question,
+            ResponseOrigin = GlunoResponseOrigins.Clarification,
         }, ct);
 
         var shown = candidates.Take(GlunoClarificationBuilder.MaxOptions).ToList();
@@ -2218,6 +2365,7 @@ public sealed class GlunoChatService : IGlunoChatService
             Clarification = identityOnly
                 ? LiveView(clarification, question, live.Select(option => option.Label).ToList())
                 : clarification,
+            ResponseOrigin = GlunoResponseOrigins.Clarification,
         };
     }
 
@@ -2458,6 +2606,7 @@ public sealed class GlunoChatService : IGlunoChatService
         {
             ConversationId = conversation.Id,
             Role = GlunoMessageRoles.Assistant,
+            ResponseOrigin = GlunoResponseOrigins.PlaceRefresh,
             // Neutral when the content may not be kept — same rule, same
             // reason, and the destination is SideQuest's own either way.
             Text = retention.Reduced
@@ -2769,6 +2918,7 @@ public sealed class GlunoChatService : IGlunoChatService
             ConversationId = conversation.Id,
             Role = GlunoMessageRoles.Assistant,
             Text = identityOnly ? GlunoNeutralText.PlaceProposed(language) : liveText,
+            ResponseOrigin = GlunoResponseOrigins.Proposal,
         }, ct);
 
         var records = await CreateProposalsAsync(conversation, assistantMessage.Id, [proposal], ct);
@@ -2869,6 +3019,7 @@ public sealed class GlunoChatService : IGlunoChatService
             ConversationId = conversation.Id,
             Role = GlunoMessageRoles.Assistant,
             Text = storedQuestion,
+            ResponseOrigin = GlunoResponseOrigins.Clarification,
         }, ct);
 
         var clarification = await _clarifications.CreateAsync(
@@ -2962,7 +3113,29 @@ public sealed class GlunoChatService : IGlunoChatService
             ConversationId = conversation.Id,
             Role = GlunoMessageRoles.Assistant,
             Text = text,
+            ResponseOrigin = GlunoResponseOrigins.PlaceAdd,
         }, ct);
+
+        // ── The action's durable twin ─────────────────────────────────────
+        //
+        // The live GlunoTurnAction is the button; this is what "nudå?" resumes
+        // when the user answers in words instead. Written unconditionally: a
+        // failure with no way forward must also END any previous offer, or a
+        // stale yes resumes something from before the failure.
+        var state = await _workingState.LoadAsync(conversation.Id, ct);
+
+        state.PendingAction = action == null
+            ? null
+            : GlunoPendingActions.WithLifetime(new GlunoPendingAction
+            {
+                Type = action.Type,
+                OriginMessageId = action.MessageId,
+                OptionKey = action.OptionKey,
+                Date = action.Date?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                IdempotencyKey = action.IdempotencyKey,
+            }, DateTime.UtcNow);
+
+        await _workingState.SaveAsync(conversation.Id, state, ct);
 
         return new GlunoTurnResult
         {
@@ -2973,6 +3146,919 @@ public sealed class GlunoChatService : IGlunoChatService
             // a reload simply does not offer it rather than offering a button
             // whose context has gone.
             Action = action,
+            ResponseOrigin = GlunoResponseOrigins.PlaceAdd,
+        };
+    }
+
+    /// <summary>
+    /// Settles the turn's own idempotency claim for a deterministic result.
+    ///
+    /// The model path completes its claim inline; the deterministic paths
+    /// return early, and a claim left in flight would block the same key for
+    /// its whole timeout. Failures release the claim so the user's own retry
+    /// works at once.
+    /// </summary>
+    private async Task<GlunoTurnResult> CompleteClaimAsync(
+        GlunoIdempotencyCheck claim, GlunoTurnResult result, CancellationToken ct)
+    {
+        if (claim.Existing == null) return result;
+
+        if (result.Error == GlunoTurnError.None && result.AssistantMessage != null)
+        {
+            await _idempotency.CompleteAsync(claim.Existing.Id, result.AssistantMessage.Id, ct);
+        }
+        else if (result.Error != GlunoTurnError.None)
+        {
+            await _idempotency.FailAsync(
+                claim.Existing.Id, result.FailureCode ?? GlunoFailureCodes.AiMalformedResponse, ct);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// What resuming the pending action produced.
+    ///
+    /// Either a finished result, or a STATED intent for the ordinary pipeline
+    /// to execute — the two are mutually exclusive, and both null means the
+    /// action was unusable and ordinary routing should continue.
+    /// </summary>
+    private sealed record PendingActionResume(
+        GlunoTurnResult? Result, GlunoIntentResult? PlanIntent, Guid? TripId)
+    {
+        public static readonly PendingActionResume None = new(null, null, null);
+    }
+
+    /// <summary>
+    /// Resumes the conversation's pending action from a short yes.
+    ///
+    /// DETERMINISTIC ON EVERY BRANCH. The action's own server-derived fields
+    /// decide what happens: a retryable add re-runs from its stored ids, a
+    /// suggestions offer re-runs the stored search, and a day-plan offer walks
+    /// Adventure → day → the planning pipeline, asking with tappable rows at
+    /// each gap. The model is never asked what the yes meant.
+    /// </summary>
+    private async Task<PendingActionResume> ResumePendingActionAsync(
+        Guid userId,
+        GlunoConversation conversation,
+        GlunoWorkingState workingState,
+        GlunoPendingAction action,
+        string text,
+        Guid? scopeTripId,
+        (string Type, string Value)? answered,
+        CancellationToken ct)
+    {
+        _logger.LogInformation(
+            "[GLUNO] pending action resume type={Type} hasAdventure={HasAdventure}",
+            action.Type, action.AdventureId != null);
+
+        switch (action.Type)
+        {
+            // ── The failed add, resumed from its own ids ──────────────────
+            case GlunoPendingActionTypes.RetryPlaceAdd
+                when action.OriginMessageId is { } retryMessageId && action.OptionKey != null:
+            {
+                var message = await _conversations.GetMessageAsync(retryMessageId, userId, ct);
+                if (message == null) break;
+
+                await ClearPendingActionAsync(conversation.Id, workingState, ct);
+
+                var userMessage = await _conversations.AppendAsync(new GlunoMessage
+                {
+                    ConversationId = conversation.Id,
+                    Role = GlunoMessageRoles.User,
+                    Text = text,
+                }, ct);
+
+                var date = ParseIsoDate(action.Date);
+
+                var result = await AddRecommendedPlaceAsync(
+                    userId, message, action.OptionKey, date,
+                    // The ORIGINAL key when one exists, so a failure, a "nudå?"
+                    // and a slow success cannot mint two proposals.
+                    action.IdempotencyKey ?? $"resume-{retryMessageId:N}-{action.OptionKey}",
+                    ct);
+
+                if (result.Error == GlunoTurnError.None) result.UserMessage = userMessage;
+                result.ResponseOrigin = GlunoResponseOrigins.PendingActionResume;
+
+                return new PendingActionResume(result, null, null);
+            }
+
+            // ── The fresh-shortlist offer ─────────────────────────────────
+            case GlunoPendingActionTypes.ShowNewPlaceSuggestions
+                when action.OriginMessageId is { } refreshMessageId:
+            {
+                var message = await _conversations.GetMessageAsync(refreshMessageId, userId, ct);
+                if (message == null) break;
+
+                await ClearPendingActionAsync(conversation.Id, workingState, ct);
+
+                var userMessage = await _conversations.AppendAsync(new GlunoMessage
+                {
+                    ConversationId = conversation.Id,
+                    Role = GlunoMessageRoles.User,
+                    Text = text,
+                }, ct);
+
+                var result = await RefreshPlaceSuggestionsAsync(
+                    userId, message, $"resume-refresh-{refreshMessageId:N}", ct);
+
+                if (result.Error == GlunoTurnError.None) result.UserMessage = userMessage;
+                result.ResponseOrigin = GlunoResponseOrigins.PendingActionResume;
+
+                return new PendingActionResume(result, null, null);
+            }
+
+            // ── The offered day plan ──────────────────────────────────────
+            case GlunoPendingActionTypes.PlanDay:
+            {
+                // A clarification tapped on the way here supplies the trip;
+                // the action itself remembers one resolved earlier.
+                var tripId = scopeTripId ?? action.AdventureId;
+
+                if (tripId == null)
+                {
+                    var globalContext = await _contextBuilder.BuildAsync(
+                        userId, null, conversation.Id,
+                        new GlunoContextOptions { IncludeTrip = false }, ct);
+
+                    var choices = TripChoicesFrom(globalContext);
+
+                    if (choices.Count == 0)
+                    {
+                        await ClearPendingActionAsync(conversation.Id, workingState, ct);
+
+                        return new PendingActionResume(
+                            await PlaceAddStoppedAsync(
+                                conversation,
+                                string.Equals(globalContext.User.Language, "sv", StringComparison.OrdinalIgnoreCase)
+                                    ? "Jag hittar inga tillgängliga Adventures just nu."
+                                    : "I can't find any Adventures available right now.",
+                                ct),
+                            null, null);
+                    }
+
+                    var single = GlunoClarificationBuilder.ResolveSingle(
+                        choices, text, globalContext.Today);
+
+                    if (single == null)
+                    {
+                        // The action stays pending: the Adventure answer will
+                        // replay this same yes with the choice attached.
+                        return new PendingActionResume(
+                            await AskWhichAdventureAsync(
+                                conversation, userId, text, PlanDayIntent(null),
+                                choices, globalContext, ct),
+                            null, null);
+                    }
+
+                    tripId = single.Id;
+                }
+
+                // Membership NOW — an offer can be answered long after it was
+                // made, and a stale yes must not be an access path.
+                if (!await _db.TripMembers.AnyAsync(
+                    member => member.TripId == tripId && member.UserId == userId, ct))
+                {
+                    await ClearPendingActionAsync(conversation.Id, workingState, ct);
+
+                    var language = await LanguageOfAsync(userId, ct);
+
+                    return new PendingActionResume(
+                        await PlaceAddStoppedAsync(
+                            conversation,
+                            string.Equals(language, "sv", StringComparison.OrdinalIgnoreCase)
+                                ? "Du har inte längre tillgång till den resan."
+                                : "You no longer have access to that Adventure.",
+                            ct),
+                        null, null);
+                }
+
+                var context = await _contextBuilder.BuildAsync(
+                    userId, tripId, conversation.Id,
+                    new GlunoContextOptions { IncludeTrip = true }, ct);
+
+                if (context.Trip is not { } trip)
+                {
+                    await ClearPendingActionAsync(conversation.Id, workingState, ct);
+
+                    return new PendingActionResume(
+                        await PlaceAddStoppedAsync(
+                            conversation,
+                            string.Equals(context.User.Language, "sv", StringComparison.OrdinalIgnoreCase)
+                                ? "Jag kan inte läsa den resan just nu."
+                                : "I can't read that Adventure right now.",
+                            ct),
+                        null, null);
+                }
+
+                var date = ParseIsoDate(action.Date)
+                    ?? (answered is { Type: GlunoClarificationTypes.Day } day
+                        ? ParseIsoDate(day.Value)
+                        : null)
+                    ?? OnlySensibleDay(trip, context.Route);
+
+                if (date == null)
+                {
+                    // Remember the Adventure on the ACTION — never on the
+                    // conversation, whose scope stays global — and ask which
+                    // day with tappable rows.
+                    action.AdventureId = tripId;
+                    workingState.PendingAction = action;
+                    await _workingState.SaveAsync(conversation.Id, workingState, ct);
+
+                    return new PendingActionResume(
+                        await AskPlanDayAsync(conversation, userId, text, trip, context, ct),
+                        null, null);
+                }
+
+                if (!TripDateRange.Contains(trip.StartDate, trip.EndDate, date.Value))
+                {
+                    await ClearPendingActionAsync(conversation.Id, workingState, ct);
+
+                    return new PendingActionResume(
+                        await PlaceAddStoppedAsync(
+                            conversation,
+                            string.Equals(context.User.Language, "sv", StringComparison.OrdinalIgnoreCase)
+                                ? "Den dagen ligger utanför resan."
+                                : "That day is outside the Adventure.",
+                            ct),
+                        null, null);
+                }
+
+                // Everything is settled. The resolution is remembered on the
+                // ACTION — the pipeline may still stop at a legitimate
+                // question (pace, budget), whose answer replays this same yes
+                // and must land back here with nothing lost. The completed
+                // turn's own working-state write is what finally clears it.
+                action.AdventureId = tripId;
+                action.Date = date.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                workingState.PendingAction = action;
+                await _workingState.SaveAsync(conversation.Id, workingState, ct);
+
+                return new PendingActionResume(null, PlanDayIntent(date), tripId);
+            }
+        }
+
+        // Unusable — missing ids, an unknown type. Cleared so it cannot keep
+        // capturing yeses, and the ordinary turn continues.
+        await ClearPendingActionAsync(conversation.Id, workingState, ct);
+        return PendingActionResume.None;
+    }
+
+    private async Task ClearPendingActionAsync(
+        Guid conversationId, GlunoWorkingState workingState, CancellationToken ct)
+    {
+        workingState.PendingAction = null;
+        await _workingState.SaveAsync(conversationId, workingState, ct);
+    }
+
+    private static DateOnly? ParseIsoDate(string? value)
+        => DateOnly.TryParseExact(
+            value, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var date)
+            ? date
+            : null;
+
+    /// <summary>
+    /// The stated intent a resumed day-plan offer executes as. Stated rather
+    /// than classified — the yes settled what it means, and running a router
+    /// over "ja det blir bra" is how it reached the model in production.
+    /// </summary>
+    private static GlunoIntentResult PlanDayIntent(DateOnly? date) => new()
+    {
+        PrimaryIntent = GlunoIntent.PlanEmptyDay,
+        Confidence = 1.0,
+        Scope = date != null ? GlunoIntentScope.Day : GlunoIntentScope.Trip,
+        ReferencedDate = date?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+        RequiresCurrentData = true,
+        RequiresExternalSearch = true,
+        ExpectsProposal = true,
+        RequiresClarification = false,
+    };
+
+    /// "Which day?" for a resumed day plan. The rows are the Adventure's own
+    /// days and cities; the continuation replays the yes with the day attached.
+    private async Task<GlunoTurnResult> AskPlanDayAsync(
+        GlunoConversation conversation,
+        Guid userId,
+        string text,
+        GlunoTripContext trip,
+        GlunoContext context,
+        CancellationToken ct)
+    {
+        var language = context.User.Language;
+
+        var options = GlunoClarificationBuilder.DayOptions(
+            trip.Destinations ?? EmptyDestinations(trip), CandidateDays(trip), language);
+
+        if (options.Count == 0)
+        {
+            return await PlaceAddStoppedAsync(
+                conversation,
+                string.Equals(language, "sv", StringComparison.OrdinalIgnoreCase)
+                    ? "Jag hittar ingen dag på resan som passar."
+                    : "I can't find a day on the trip that fits.",
+                ct);
+        }
+
+        var userMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.User,
+            Text = text,
+        }, ct);
+
+        var question = GlunoClarificationBuilder.QuestionFor(GlunoClarificationTypes.Day, language);
+
+        var assistantMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.Assistant,
+            Text = question,
+            ResponseOrigin = GlunoResponseOrigins.Clarification,
+        }, ct);
+
+        var clarification = await _clarifications.CreateAsync(
+            new GlunoClarification
+            {
+                ConversationId = conversation.Id,
+                UserId = userId,
+                TripId = conversation.TripId,
+                OriginalUserMessageId = userMessage.Id,
+                MessageId = assistantMessage.Id,
+                Type = GlunoClarificationTypes.Day,
+                Question = question,
+                OriginalIntent = GlunoIntent.PlanEmptyDay.ToString(),
+                AllowFreeText = false,
+                // NO PlaceMessageId: this day belongs to the pending action,
+                // not to a recommended place, so the ordinary continuation
+                // replays the yes and the resolver picks it up with the day
+                // attached.
+            },
+            options,
+            ct);
+
+        return new GlunoTurnResult
+        {
+            Conversation = conversation,
+            UserMessage = userMessage,
+            AssistantMessage = assistantMessage,
+            Clarification = clarification,
+            ResponseOrigin = GlunoResponseOrigins.Clarification,
+        };
+    }
+
+    /// <summary>
+    /// Priorities two and four for a short yes with no pending action: an open
+    /// clarification is re-shown as it stands, and a waiting proposal is named
+    /// rather than re-derived. Null lets ordinary routing continue.
+    /// </summary>
+    private async Task<GlunoTurnResult?> ReshowPendingWorkAsync(
+        GlunoConversation conversation,
+        Guid userId,
+        GlunoWorkingState workingState,
+        string text,
+        CancellationToken ct)
+    {
+        // ── An open question is re-shown, never reinterpreted ─────────────
+        var pending = await _clarifications.GetForConversationAsync(conversation.Id, userId, ct);
+
+        if (pending is { Options.Count: > 0 } && pending.IsAnswerable)
+        {
+            var message = pending.MessageId is { } existing
+                ? await _conversations.GetMessageAsync(existing, userId, ct)
+                : null;
+
+            // Without its message the response contract cannot be met — the
+            // ordinary turn is the safe direction to fail in.
+            if (message != null)
+            {
+                _logger.LogInformation(
+                    "[GLUNO] resumptive text re-shows clarification type={Type}", pending.Type);
+
+                return new GlunoTurnResult
+                {
+                    Conversation = conversation,
+                    UserMessage = message,
+                    AssistantMessage = message,
+                    Clarification = pending,
+                    ResponseOrigin = GlunoResponseOrigins.Clarification,
+                };
+            }
+        }
+
+        // ── A waiting proposal is pointed at, deterministically ───────────
+        var waiting = workingState.Recent.Proposals
+            .FirstOrDefault(proposal => proposal.Status == GlunoProposalStatuses.Pending);
+
+        if (waiting != null)
+        {
+            var language = await LanguageOfAsync(userId, ct);
+
+            var userMessage = await _conversations.AppendAsync(new GlunoMessage
+            {
+                ConversationId = conversation.Id,
+                Role = GlunoMessageRoles.User,
+                Text = text,
+            }, ct);
+
+            var assistantMessage = await _conversations.AppendAsync(new GlunoMessage
+            {
+                ConversationId = conversation.Id,
+                Role = GlunoMessageRoles.Assistant,
+                Text = string.Equals(language, "sv", StringComparison.OrdinalIgnoreCase)
+                    ? $"Förslaget ligger kvar och väntar på dig: {waiting.Summary}. Godkänn det på kortet ovan."
+                    : $"The suggestion is still waiting for you: {waiting.Summary}. Accept it on the card above.",
+                ResponseOrigin = GlunoResponseOrigins.Direct,
+            }, ct);
+
+            return new GlunoTurnResult
+            {
+                Conversation = conversation,
+                UserMessage = userMessage,
+                AssistantMessage = assistantMessage,
+                ResponseOrigin = GlunoResponseOrigins.Direct,
+            };
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The model-free place list.
+    ///
+    /// One provider call, SideQuest's own ranking, a deterministic heading,
+    /// structured cards with real option keys, the ordinary retention rules —
+    /// and zero model calls. A provider failure returns the ordinary
+    /// structured error envelope; an empty result is an answer.
+    ///
+    /// Returns null when no destination can be settled — the ordinary
+    /// pipeline then runs, which is the safe direction to fail in.
+    /// </summary>
+    private async Task<GlunoTurnResult?> DirectPlaceSearchAsync(
+        Guid userId,
+        GlunoConversation conversation,
+        string text,
+        GlunoDirectPlaceQuery placeQuery,
+        GlunoContext context,
+        Guid? resolvedTripId,
+        (string Type, string Value)? answered,
+        GlunoTurnTelemetry telemetry,
+        CancellationToken ct)
+    {
+        var language = context.User.Language;
+
+        // ── Where ─────────────────────────────────────────────────────────
+        //
+        // The user's own words first, then the Adventure's route, then a
+        // question with tappable rows. Never a guess: searching the wrong city
+        // is a confident answer about the wrong place.
+        var near = placeQuery.Destination;
+        var scoped = context;
+
+        if (near == null)
+        {
+            if (resolvedTripId != null && scoped.Trip == null)
+            {
+                scoped = await _contextBuilder.BuildAsync(
+                    userId, resolvedTripId, conversation.Id,
+                    new GlunoContextOptions { IncludeTrip = true }, ct);
+            }
+
+            if (scoped.Trip is { } trip)
+            {
+                near = TripDestinationFor(trip, answered);
+
+                if (near == null && conversation.TripId != null && scoped.Route != null)
+                {
+                    var stops = GlunoClarificationBuilder.RouteStopOptions(scoped.Route, language);
+
+                    if (stops.Count > 1)
+                    {
+                        return await AskRouteStopAsync(conversation, userId, text, stops, language, ct);
+                    }
+                }
+            }
+            else
+            {
+                // Global with no Adventure resolved. The Adventures themselves
+                // are the options — never a sentence about switching scope.
+                var choices = TripChoicesFrom(scoped);
+                if (choices.Count == 0) return null;
+
+                var single = GlunoClarificationBuilder.ResolveSingle(choices, text, scoped.Today);
+
+                if (single == null)
+                {
+                    return await AskWhichAdventureAsync(
+                        conversation, userId, text, PlaceListIntent(), choices, scoped, ct);
+                }
+
+                var singleContext = await _contextBuilder.BuildAsync(
+                    userId, single.Id, conversation.Id,
+                    new GlunoContextOptions { IncludeTrip = true }, ct);
+
+                near = singleContext.Trip is { } singleTrip
+                    ? TripDestinationFor(singleTrip, answered)
+                    : null;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(near)) return null;
+
+        // ── One search, no model ──────────────────────────────────────────
+        telemetry.ModelSkipped = true;
+
+        var query = new TravelPlaceQuery
+        {
+            Query = string.Empty,
+            Near = near,
+            Category = placeQuery.Category,
+            Limit = GlunoPlaceOptions.MaxPlaces,
+            Language = language,
+        };
+
+        var result = await _travelData.SearchAllAsync(query, ct);
+
+        if (result.Status is TravelSearchStatus.RateLimited or TravelSearchStatus.Failed)
+        {
+            _logger.LogInformation(
+                "[GLUNO] direct place search failed status={Status} category={Category}",
+                result.Status, placeQuery.Category);
+
+            telemetry.FailureCategory = GlunoFailureCodes.TripadvisorUnavailable;
+            telemetry.Write(_logger);
+
+            // The ordinary structured error contract: a code the app
+            // localises, and an honest retry flag.
+            return new GlunoTurnResult
+            {
+                Error = GlunoTurnError.ProviderFailed,
+                FailureCode = GlunoFailureCodes.TripadvisorUnavailable,
+            };
+        }
+
+        var places = TravelPlaceRanker.Rank(result.Places, query)
+            .Take(MaxPlaceCardsPerTurn)
+            .Select(ranked => SanitizePlace(GlunoPlaceCards.From(ranked.Place, ranked.Signals), telemetry))
+            .ToList();
+
+        var userMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.User,
+            Text = text,
+        }, ct);
+
+        if (places.Count == 0)
+        {
+            // An empty answer is an answer. Inventing one is the one thing
+            // this path must never do.
+            var emptyMessage = await _conversations.AppendAsync(new GlunoMessage
+            {
+                ConversationId = conversation.Id,
+                Role = GlunoMessageRoles.Assistant,
+                Text = GlunoPlaceFailureText.ForRefresh(busy: false, empty: true, language),
+                ResponseOrigin = GlunoResponseOrigins.DirectPlaceSearch,
+            }, ct);
+
+            telemetry.Write(_logger);
+
+            return new GlunoTurnResult
+            {
+                Conversation = conversation,
+                UserMessage = userMessage,
+                AssistantMessage = emptyMessage,
+                ResponseOrigin = GlunoResponseOrigins.DirectPlaceSearch,
+            };
+        }
+
+        // ── The ordinary retention rules ──────────────────────────────────
+        var search = new GlunoPlaceSearchContext
+        {
+            Near = near,
+            Category = TravelPlaceCategories.ToWireValue(placeQuery.Category),
+            Query = null,
+            Language = language,
+            Limit = GlunoPlaceOptions.MaxPlaces,
+            OriginSource = placeQuery.Destination != null ? "user_message" : "trip_route",
+            SearchedAtUtc = DateTime.UtcNow,
+        };
+
+        var retention = GlunoPlaceRetention.Decide(places, search);
+        var liveText = GlunoNeutralText.PlaceList(near, language);
+
+        var assistantMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.Assistant,
+            Text = retention.Reduced ? GlunoNeutralText.PlaceAnswer(language) : liveText,
+            PayloadJson = JsonSerializer.Serialize(
+                new GlunoAssistantPayload
+                {
+                    Places = retention.Places.ToList(),
+                    PlaceRefs = retention.References.ToList(),
+                    PlaceSearch = retention.Search,
+                },
+                GlunoJson.Options),
+            ResponseOrigin = GlunoResponseOrigins.DirectPlaceSearch,
+        }, ct);
+
+        _logger.LogInformation(
+            "[GLUNO] direct place search done category={Category} shown={Shown} stored={Stored}",
+            placeQuery.Category, places.Count, retention.Places.Count);
+
+        telemetry.Write(_logger);
+
+        return new GlunoTurnResult
+        {
+            Conversation = conversation,
+            UserMessage = userMessage,
+            AssistantMessage = assistantMessage,
+            Places = places,
+            LiveAssistantText = retention.Reduced ? liveText : null,
+            ResponseOrigin = GlunoResponseOrigins.DirectPlaceSearch,
+        };
+    }
+
+    /// <summary>
+    /// The one place a trip answers "where" with, or null when it is a real
+    /// choice. A single stop answers itself; several fall back to the trip's
+    /// own destination label; an answered route-stop question wins outright.
+    /// </summary>
+    private static string? TripDestinationFor(
+        GlunoTripContext trip, (string Type, string Value)? answered)
+    {
+        if (answered is { Type: GlunoClarificationTypes.RouteStop } stopAnswer
+            && trip.Destinations != null)
+        {
+            var chosen = trip.Destinations.Stops.FirstOrDefault(stop =>
+                string.CompareOrdinal(stop.From, stopAnswer.Value) <= 0
+                && string.CompareOrdinal(stop.To, stopAnswer.Value) >= 0);
+
+            if (chosen != null) return chosen.Label;
+        }
+
+        var labels = (trip.Destinations?.Stops ?? Array.Empty<TripStop>())
+            .Select(stop => stop.Label)
+            .Where(label => !string.IsNullOrWhiteSpace(label))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (labels.Count == 1) return labels[0];
+
+        return string.IsNullOrWhiteSpace(trip.Destination) ? null : trip.Destination;
+    }
+
+    /// The stated intent behind a pure place question. Stated, not classified
+    /// — the text already proved what it is.
+    private static GlunoIntentResult PlaceListIntent() => new()
+    {
+        PrimaryIntent = GlunoIntent.PlaceRecommendation,
+        Confidence = 1.0,
+        Scope = GlunoIntentScope.Trip,
+        RequiresCurrentData = true,
+        RequiresExternalSearch = true,
+        ExpectsProposal = false,
+        RequiresClarification = false,
+    };
+
+    /// "Which part of the trip?" — rows from the resolved route, the
+    /// continuation replays the question with the stop's date attached.
+    private async Task<GlunoTurnResult> AskRouteStopAsync(
+        GlunoConversation conversation,
+        Guid userId,
+        string text,
+        IReadOnlyList<GlunoOptionDraft> options,
+        string language,
+        CancellationToken ct)
+    {
+        var userMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.User,
+            Text = text,
+        }, ct);
+
+        var question = string.Equals(language, "sv", StringComparison.OrdinalIgnoreCase)
+            ? "Vilken del av resan gäller det?"
+            : "Which part of the trip is this about?";
+
+        var assistantMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.Assistant,
+            Text = question,
+            ResponseOrigin = GlunoResponseOrigins.Clarification,
+        }, ct);
+
+        var clarification = await _clarifications.CreateAsync(
+            new GlunoClarification
+            {
+                ConversationId = conversation.Id,
+                UserId = userId,
+                TripId = conversation.TripId,
+                OriginalUserMessageId = userMessage.Id,
+                MessageId = assistantMessage.Id,
+                Type = GlunoClarificationTypes.RouteStop,
+                Question = question,
+                OriginalIntent = GlunoIntent.PlaceRecommendation.ToString(),
+                AllowFreeText = false,
+            },
+            options,
+            ct);
+
+        return new GlunoTurnResult
+        {
+            Conversation = conversation,
+            UserMessage = userMessage,
+            AssistantMessage = assistantMessage,
+            Clarification = clarification,
+            ResponseOrigin = GlunoResponseOrigins.Clarification,
+        };
+    }
+
+    /// <summary>
+    /// The recovery search for a named place with no cards behind it.
+    ///
+    /// The extracted words go to the provider as a QUERY; the identity comes
+    /// from whichever verified result matches, by the same matcher the
+    /// shown-list path uses. The shortlist is persisted as its own turn first,
+    /// so everything downstream — the day question, the proposal, a retry —
+    /// hangs off real stored references exactly like any other list.
+    ///
+    /// Null lets the ordinary flow continue; every non-null return is
+    /// deterministic and model-free.
+    /// </summary>
+    private async Task<GlunoTurnResult?> RecoverNamedPlaceAsync(
+        Guid userId,
+        GlunoConversation conversation,
+        string text,
+        string candidate,
+        GlunoIntentResult intent,
+        GlunoContext context,
+        Guid? resolvedTripId,
+        CancellationToken ct)
+    {
+        var language = context.User.Language;
+        var telemetry = new GlunoTurnTelemetry { ConversationId = conversation.Id };
+
+        // ── Where to look ─────────────────────────────────────────────────
+        var scoped = context;
+
+        if (resolvedTripId != null && scoped.Trip == null)
+        {
+            scoped = await _contextBuilder.BuildAsync(
+                userId, resolvedTripId, conversation.Id,
+                new GlunoContextOptions { IncludeTrip = true }, ct);
+        }
+
+        string? near = null;
+
+        if (scoped.Trip is { } trip)
+        {
+            near = TripDestinationFor(trip, answered: null);
+        }
+        else
+        {
+            var choices = TripChoicesFrom(scoped);
+            if (choices.Count == 0) return null;
+
+            var single = GlunoClarificationBuilder.ResolveSingle(choices, text, scoped.Today);
+
+            if (single == null)
+            {
+                // The Adventures are the options. The tapped answer replays
+                // this same sentence with the trip attached, and the recovery
+                // runs again with a destination.
+                return await AskWhichAdventureAsync(
+                    conversation, userId, text, AddActivityIntent(), choices, scoped, ct);
+            }
+
+            var singleContext = await _contextBuilder.BuildAsync(
+                userId, single.Id, conversation.Id,
+                new GlunoContextOptions { IncludeTrip = true }, ct);
+
+            near = singleContext.Trip is { } singleTrip
+                ? TripDestinationFor(singleTrip, answered: null)
+                : null;
+        }
+
+        if (string.IsNullOrWhiteSpace(near)) return null;
+
+        // ── One search, no model ──────────────────────────────────────────
+        var query = new TravelPlaceQuery
+        {
+            Query = candidate,
+            Near = near,
+            Category = TravelPlaceCategory.General,
+            Limit = GlunoPlaceOptions.MaxPlaces,
+            Language = language,
+        };
+
+        var result = await _travelData.SearchAllAsync(query, ct);
+
+        if (result.Status is TravelSearchStatus.RateLimited or TravelSearchStatus.Failed)
+        {
+            var status = result.Status == TravelSearchStatus.RateLimited
+                ? GlunoRehydrationStatus.Busy
+                : GlunoRehydrationStatus.Unavailable;
+
+            _logger.LogInformation(
+                "[GLUNO] place recovery search failed status={Status}", result.Status);
+
+            return await PlaceAddStoppedAsync(
+                conversation, GlunoPlaceFailureText.For(status, language), ct);
+        }
+
+        var places = TravelPlaceRanker.Rank(result.Places, query)
+            .Take(MaxPlaceCardsPerTurn)
+            .Select(ranked => SanitizePlace(GlunoPlaceCards.From(ranked.Place, ranked.Signals), telemetry))
+            .ToList();
+
+        if (places.Count == 0)
+        {
+            return await PlaceAddStoppedAsync(
+                conversation,
+                GlunoPlaceFailureText.For(GlunoRehydrationStatus.NotFound, language),
+                ct);
+        }
+
+        // ── The shortlist becomes a real turn ─────────────────────────────
+        //
+        // Persisted BEFORE anything acts on it, so the day question, the
+        // proposal identity and any retry all point at stored references —
+        // and so the follow-up "lägg till X" resolves against this list like
+        // any other.
+        var search = new GlunoPlaceSearchContext
+        {
+            Near = near,
+            Category = TravelPlaceCategories.ToWireValue(TravelPlaceCategory.General),
+            Query = GlunoPlaceSearchContexts.Sanitise(candidate),
+            Language = language,
+            Limit = GlunoPlaceOptions.MaxPlaces,
+            OriginSource = "place_add_recovery",
+            SearchedAtUtc = DateTime.UtcNow,
+        };
+
+        var retention = GlunoPlaceRetention.Decide(places, search);
+
+        var listMessage = await _conversations.AppendAsync(new GlunoMessage
+        {
+            ConversationId = conversation.Id,
+            Role = GlunoMessageRoles.Assistant,
+            Text = retention.Reduced
+                ? GlunoNeutralText.PlaceAnswer(language)
+                : GlunoNeutralText.PlaceList(near, language),
+            PayloadJson = JsonSerializer.Serialize(
+                new GlunoAssistantPayload
+                {
+                    Places = retention.Places.ToList(),
+                    PlaceRefs = retention.References.ToList(),
+                    PlaceSearch = retention.Search,
+                },
+                GlunoJson.Options),
+            ResponseOrigin = GlunoResponseOrigins.PlaceAdd,
+        }, ct);
+
+        // ── Verified match, by the same matcher as the shown list ─────────
+        //
+        // Ordinals are meaningless against a list the user has not seen, so
+        // only NAMES match here.
+        var matches = GlunoPlaceOptions.Match(places, text, allowOrdinals: false);
+
+        _logger.LogInformation(
+            "[GLUNO] place recovery search done found={Found} matches={Matches}",
+            places.Count, matches.Count);
+
+        if (matches.Count == 1)
+        {
+            // The day the sentence named survives into the add flow.
+            var date = ParseIsoDate(intent.ReferencedDate);
+
+            return await AddResolvedPlaceAsync(
+                userId, conversation, places[matches[0]], listMessage.Id,
+                GlunoPlaceOptions.KeyFor(matches[0]), date, ct);
+        }
+
+        if (matches.Count > 1)
+        {
+            return await AskWhichPlaceAsync(
+                conversation, userId, text, matches.Select(index => places[index]).ToList(), ct);
+        }
+
+        // Nothing matched the words. The verified list IS the honest answer —
+        // structured suggestions, never a model apology.
+        var liveText = GlunoNeutralText.NoExactMatch(near, language);
+
+        return new GlunoTurnResult
+        {
+            Conversation = conversation,
+            UserMessage = listMessage,
+            AssistantMessage = listMessage,
+            Places = places,
+            LiveAssistantText = liveText,
             ResponseOrigin = GlunoResponseOrigins.PlaceAdd,
         };
     }
@@ -3288,6 +4374,7 @@ public sealed class GlunoChatService : IGlunoChatService
             ConversationId = conversation.Id,
             Role = GlunoMessageRoles.Assistant,
             Text = question,
+            ResponseOrigin = GlunoResponseOrigins.Clarification,
         }, ct);
 
         var clarification = await _clarifications.CreateAsync(
@@ -3316,6 +4403,7 @@ public sealed class GlunoChatService : IGlunoChatService
             UserMessage = userMessage,
             AssistantMessage = assistantMessage,
             Clarification = clarification,
+            ResponseOrigin = GlunoResponseOrigins.Clarification,
         };
     }
 
@@ -4548,6 +5636,7 @@ public sealed class GlunoChatService : IGlunoChatService
             ConversationId = conversation.Id,
             Role = GlunoMessageRoles.Assistant,
             Text = question,
+            ResponseOrigin = GlunoResponseOrigins.AdventureClarification,
         }, ct);
 
         var clarification = await _clarifications.CreateAsync(
@@ -4574,6 +5663,7 @@ public sealed class GlunoChatService : IGlunoChatService
             UserMessage = userMessage,
             AssistantMessage = assistantMessage,
             Clarification = clarification,
+            ResponseOrigin = GlunoResponseOrigins.AdventureClarification,
         };
     }
 

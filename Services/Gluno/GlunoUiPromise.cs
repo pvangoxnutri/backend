@@ -82,6 +82,21 @@ public static class GlunoUiPromise
         "jag kan bara skriva text", "inte kopplat till", "inte kopplad till",
         "samtalet maste kopplas", "jag kan inte oppna ett adventure",
         "jag kan inte oppna nagot adventure", "samtalet ar inte",
+        // ── Scope refusals ────────────────────────────────────────────────
+        //
+        // THE PRODUCTION SENTENCE: "förslag som ändrar planen kan jag bara
+        // förbereda när samtalet ligger på Semester 2026 — och just nu gör det
+        // inte det". Where the conversation "lies" is SideQuest plumbing, and
+        // asking the user to move it is asking them to do the backend's job —
+        // the deterministic paths resolve the Adventure or ask with tappable
+        // rows. A model sentence refusing by scope is replaced by exactly that
+        // question.
+        "nar samtalet ligger pa", "samtalet ligger pa", "samtalet ligger inte",
+        "byt till adventuret", "byta till adventuret", "byt scope",
+        "oppna adventuret och", "kan jag bara forbereda nar",
+        "when the conversation is on", "the conversation is on the",
+        "conversation isn't on", "conversation is not on",
+        "switch to the adventure", "open the adventure and",
     ];
 
     /// <summary>

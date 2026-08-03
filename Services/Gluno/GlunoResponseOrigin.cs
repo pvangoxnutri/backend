@@ -30,10 +30,18 @@ public static class GlunoResponseOrigins
     public const string IdempotencyReplay = "idempotency_replay";
     /// Answered without a model from data SideQuest already had.
     public const string Direct = "direct";
+    /// A pure place question answered straight from the provider — structured
+    /// cards, real option keys, zero model calls.
+    public const string DirectPlaceSearch = "direct_place_search";
+    /// "Which Adventure?" with tappable rows, in place of a scope refusal.
+    public const string AdventureClarification = "adventure_clarification";
+    /// A short yes resumed the conversation's pending action deterministically.
+    public const string PendingActionResume = "pending_action_resume";
 
     public static readonly IReadOnlyList<string> All =
     [
         ModelTurn, PlaceAdd, PlaceAddRetry, PlaceRefresh,
         Clarification, Proposal, IdempotencyReplay, Direct,
+        DirectPlaceSearch, AdventureClarification, PendingActionResume,
     ];
 }
