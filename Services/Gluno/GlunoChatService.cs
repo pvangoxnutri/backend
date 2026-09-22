@@ -2512,6 +2512,34 @@ public sealed class GlunoChatService : IGlunoChatService
     }
 
     /// <summary>
+    /// Every provider location id this conversation has already put on screen.
+    ///
+    /// Read from the stored place REFERENCES rather than the card payloads:
+    /// references are what survives retention, so a turn whose cards were not
+    /// kept still counts as shown. Bare ids — the same shape
+    /// TravelPlaceQuery.ExcludedLocationIds is documented to take.
+    /// </summary>
+    private async Task<IReadOnlyList<string>> AlreadyShownLocationIdsAsync(
+        Guid conversationId, CancellationToken ct)
+    {
+        var messages = await _db.GlunoMessages
+            .AsNoTracking()
+            .Where(stored => stored.ConversationId == conversationId)
+            .ToListAsync(ct);
+
+        var ids = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var reference in messages.SelectMany(GlunoPlaceOptions.References))
+        {
+            if (!string.IsNullOrWhiteSpace(reference.LocationId) && seen.Add(reference.LocationId))
+                ids.Add(reference.LocationId);
+        }
+
+        return ids;
+    }
+
+    /// <summary>
     /// Runs the same recommendation search again and offers what it finds now.
     ///
     /// WHEN THIS IS THE RIGHT ANSWER. A place the user tried to add is no
@@ -2576,18 +2604,35 @@ public sealed class GlunoChatService : IGlunoChatService
 
         var language = await LanguageOfAsync(userId, ct);
 
-        var result = await _travelData.SearchAllAsync(
-            new TravelPlaceQuery
-            {
-                // Replayed from the stored context, exactly as the rehydrator
-                // does — the same fields the original search used.
-                Query = search.Query ?? string.Empty,
-                Near = search.Near,
-                Category = TravelPlaceCategories.Parse(search.Category),
-                Limit = search.Limit,
-                Language = search.Language,
-            },
-            ct);
+        // ── What "new" has to mean ────────────────────────────────────────
+        //
+        // THE BUG THIS CLOSES. This replayed the stored search verbatim, so
+        // the provider returned the same city, the same category and the same
+        // ranking — the same places. The button said "show new suggestions"
+        // and re-rendered the list already on screen, which reads to a user as
+        // nothing happening at all.
+        //
+        // Everything this conversation has ALREADY shown is excluded, not just
+        // the message the button hangs off. A second press must not hand back
+        // the first press's list, and each refresh writes its own message with
+        // its own references, so one message's worth is never the full picture.
+        var excluded = await AlreadyShownLocationIdsAsync(conversation.Id, ct);
+
+        var refreshQuery = new TravelPlaceQuery
+        {
+            // Replayed from the stored context, exactly as the rehydrator
+            // does — the same fields the original search used.
+            Query = search.Query ?? string.Empty,
+            Near = search.Near,
+            Category = TravelPlaceCategories.Parse(search.Category),
+            Limit = search.Limit,
+            Language = search.Language,
+            ExcludedLocationIds = excluded,
+            // One join key from controller to provider, same as direct search.
+            RequestId = _diagnostics.RequestId,
+        };
+
+        var result = await _travelData.SearchAllAsync(refreshQuery, ct);
 
         // Anything but a genuine Ok is a provider problem, not an empty city —
         // Unknown means "no information", which must not read as "nothing
@@ -2619,14 +2664,17 @@ public sealed class GlunoChatService : IGlunoChatService
         // SideQuest's own ranking, then the same per-turn cap the chat uses.
         var telemetry = new GlunoTurnTelemetry { ConversationId = conversation.Id };
 
-        var places = TravelPlaceRanker.Rank(result.Places, new TravelPlaceQuery
-            {
-                Query = search.Query ?? string.Empty,
-                Near = search.Near,
-                Category = TravelPlaceCategories.Parse(search.Category),
-                Limit = search.Limit,
-                Language = search.Language,
-            })
+        // Re-filtered HERE as well as upstream. A provider that does not
+        // support exclusion still answers with everything, and the promise the
+        // button makes is this layer's to keep — the same belt-and-braces rule
+        // direct search already applies.
+        var unseen = excluded.Count == 0
+            ? result.Places
+            : result.Places
+                .Where(place => !excluded.Contains(place.ProviderPlaceId, StringComparer.Ordinal))
+                .ToList();
+
+        var places = TravelPlaceRanker.Rank(unseen, refreshQuery)
             .Take(MaxPlaceCardsPerTurn)
             .Select(ranked =>
             {
