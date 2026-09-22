@@ -323,9 +323,86 @@ public class PlaceRefreshEvals
         // A new list each time, not a retry of one attempt. Reusing the key
         // would replay the first list instead of searching.
         var start = screen.IndexOf("if (action.type === 'show_new_place_suggestions')", StringComparison.Ordinal);
-        var body = screen[start..(start + 900)];
+        // Widened past the handler's failure branch: the key is still made
+        // inside this handler, there is simply a guarded try around it now.
+        var body = screen[start..(start + 1800)];
 
         Assert.Contains("createGlunoIdempotencyKey()", body);
+    }
+
+    // ── "New" has to mean new ────────────────────────────────────────────
+
+    [Fact]
+    public void Refresh_excludes_everything_the_conversation_already_showed()
+    {
+        var refresh = Refresh();
+
+        // THE BUG. The stored search was replayed verbatim, so the provider
+        // returned the same city, category and ranking — the same places. The
+        // button said "new" and re-rendered what was already on screen.
+        Assert.Contains("AlreadyShownLocationIdsAsync(conversation.Id, ct)", refresh);
+        Assert.Contains("ExcludedLocationIds = excluded,", refresh);
+    }
+
+    [Fact]
+    public void Exclusions_are_gathered_across_the_whole_conversation()
+    {
+        var chat = Chat();
+
+        // Each refresh writes its OWN message with its own references, so one
+        // message's worth is never the full picture: a second press must not
+        // hand back the first press's list.
+        Assert.Contains("private async Task<IReadOnlyList<string>> AlreadyShownLocationIdsAsync(", chat);
+
+        Assert.Contains("stored.ConversationId == conversationId", chat);
+        Assert.Contains("messages.SelectMany(GlunoPlaceOptions.References)", chat);
+    }
+
+    [Fact]
+    public void Exclusions_are_re_filtered_locally_as_well_as_upstream()
+    {
+        var refresh = Refresh();
+
+        // A provider that does not support exclusion still answers with
+        // everything. The promise the button makes is this layer's to keep —
+        // the same belt-and-braces rule direct search already applies.
+        Assert.Contains("!excluded.Contains(place.ProviderPlaceId, StringComparer.Ordinal)", refresh);
+    }
+
+    // ── A failed press is never silent ───────────────────────────────────
+
+    [Fact]
+    public void A_failed_refresh_is_named_rather_than_thrown_away()
+    {
+        var screen = Mobile("app", "gluno.tsx");
+
+        var start = screen.IndexOf("if (action.type === 'show_new_place_suggestions')", StringComparison.Ordinal);
+        var body = screen[start..(start + 2600)];
+
+        // THE SILENT NO-OP. Every failure here threw straight through the
+        // handler: the row's finally cleared its spinner, the rejection went
+        // unhandled, and the screen showed nothing at all.
+        Assert.Contains("} catch (error) {", body);
+        Assert.Contains("failureCode: failure.code,", body);
+
+        // 503 is also what a restarting backend answers, so the screen re-asks
+        // rather than latching to "unavailable" over one request.
+        Assert.Contains("if (failure.status === 503) void checkStatus();", body);
+    }
+
+    [Fact]
+    public void A_failed_action_can_be_rendered_on_the_assistant_row()
+    {
+        var row = Mobile("components", "gluno", "GlunoMessageRow.tsx");
+
+        // Failure copy used to exist only in the user branch, so a failed
+        // "show new suggestions" had nowhere to render — which is exactly how
+        // a named failure still reached the user as a no-op.
+        var start = row.IndexOf("{message.failed ? (", StringComparison.Ordinal);
+        Assert.True(start > 0);
+
+        Assert.Contains("actionErrorText", row);
+        Assert.Contains("FAILURE_COPY[message.failureCode]", row);
     }
 
     [Fact]
@@ -335,7 +412,9 @@ public class PlaceRefreshEvals
 
         // The old block keeps its text but loses its button — offering to fetch
         // again something already on screen is worse than offering nothing.
-        Assert.Contains("? { ...row, action: undefined }", screen);
+        // The failure fields are cleared with it: this press succeeded, so a
+        // stale error line under a spent button describes nothing.
+        Assert.Contains("? { ...row, action: undefined, failed: false, failureCode: undefined,", screen);
     }
 
     [Fact]
@@ -397,7 +476,7 @@ public class PlaceRefreshEvals
         {
             var text = GlunoPlaceFailureText.ForRefresh(busy, empty, language);
 
-            foreach (var banned in new[] { "Skriv", "Casas", "Pilatos", "Terra", "Tripadvisor", "429" })
+            foreach (var banned in new[] { "Skriv", "Casas", "Pilatos", "Terra", "places", "429" })
             {
                 Assert.DoesNotContain(banned, text, StringComparison.OrdinalIgnoreCase);
             }

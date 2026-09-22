@@ -202,8 +202,13 @@ public class ScopeSwitchEvals
 
         // An add started in one Adventure must never append its answer to
         // another's list.
+        //
+        // TWO actions capture the scope (add, refresh) and THREE places check
+        // it again: each action's success path, plus the refresh's failure
+        // path. A late failure is just as capable of writing into the wrong
+        // Adventure as a late success, so the catch carries the same guard.
         Assert.Equal(2, screen.Split("const startedIn = stateScope.current;").Length - 1);
-        Assert.Equal(2, screen.Split("if (stateScope.current !== startedIn) return;").Length - 1);
+        Assert.Equal(3, screen.Split("if (stateScope.current !== startedIn) return;").Length - 1);
     }
 
     // ── 14-17. Cache keys ────────────────────────────────────────────────
