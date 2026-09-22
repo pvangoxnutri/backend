@@ -49,6 +49,13 @@ public static class GlunoClarificationBuilder
     /// trimmed and a free-text escape is offered instead.
     public const int MaxOptions = 5;
 
+    /// <summary>
+    /// The ceiling on day rows. High enough that no real Adventure reaches it
+    /// - a trip longer than this is a date-parsing accident, not a holiday -
+    /// and low enough that such an accident cannot render thousands of rows.
+    /// </summary>
+    public const int MaxDayOptions = 60;
+
     // ── Adventure ────────────────────────────────────────────────────────
 
     /// <summary>
@@ -192,7 +199,14 @@ public static class GlunoClarificationBuilder
     {
         var swedish = IsSwedish(language);
 
-        return candidates.OrderBy(date => date).Take(MaxOptions).Select((date, index) =>
+        // EVERY DAY OF THE TRIP, not the first five. MaxOptions is a shortlist
+        // cap for things there can be arbitrarily many of - trips, places,
+        // search hits - where showing five of forty is a reasonable summary.
+        // Days are not that: a trip has exactly as many days as it has, the
+        // user knows which one they want, and truncating at five made day six
+        // onward simply unselectable. The cap that remains is a guard against
+        // corrupt date data, not an editorial choice.
+        return candidates.OrderBy(date => date).Take(MaxDayOptions).Select((date, index) =>
         {
             var iso = date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
 

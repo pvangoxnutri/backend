@@ -249,6 +249,71 @@ public static class GlunoPlaceOptions
             .Any(word => char.IsUpper(word[0]) && word.Length >= 2);
     }
 
+    /// <summary>
+    /// Which SHOWN POSITION a sentence points at, from the stored references
+    /// alone.
+    ///
+    /// WHY THIS EXISTS SEPARATELY FROM <see cref="Match"/>. Match needs cards,
+    /// and a provider whose terms forbid caching content has none stored — so
+    /// working out that "add the first one" means the first card meant
+    /// re-fetching all five places from the provider FIRST, purely to count
+    /// them. A position is not content. The references are kept in the order
+    /// the user was shown them, so the ordinal answers itself.
+    ///
+    /// Names are deliberately NOT handled here: matching "the cathedral"
+    /// needs the name, the name is content, and content is exactly what this
+    /// path does not have. That match belongs to whoever does hold the cards.
+    ///
+    /// Returns the option key, or null when the sentence names no position or
+    /// names one the list does not have.
+    /// </summary>
+    public static string? ResolveOrdinalKey(
+        IReadOnlyList<GlunoPlaceReference> references, string? message)
+    {
+        if (references.Count == 0 || string.IsNullOrWhiteSpace(message)) return null;
+
+        var text = Normalise(message);
+
+        // "the last one" — resolved against what is actually there, which is
+        // the whole reason it is a separate word from a number.
+        if (LastWords.Any(word => ContainsWord(text, word)))
+            return references[^1].OptionKey;
+
+        // Words: "first", "andra", "third".
+        for (var ordinal = 0; ordinal < Ordinals.Length; ordinal++)
+        {
+            if (!Ordinals[ordinal].Any(word => ContainsWord(text, word))) continue;
+
+            return ordinal < references.Count ? references[ordinal].OptionKey : null;
+        }
+
+        // Digits: "number 2", "#2", "nr 3", "option 4". Counted from one, like
+        // the words are, and only where a digit is a POSITION — a bare "2" in
+        // "add 2 cafes" is a quantity and must not resolve to anything.
+        foreach (var marker in PositionMarkers)
+        {
+            var at = text.IndexOf(marker, StringComparison.Ordinal);
+            if (at < 0) continue;
+
+            var rest = text[(at + marker.Length)..].TrimStart();
+            var digits = new string(rest.TakeWhile(char.IsDigit).ToArray());
+
+            if (digits.Length == 0 || !int.TryParse(digits, out var position)) continue;
+
+            return position >= 1 && position <= references.Count
+                ? references[position - 1].OptionKey
+                : null;
+        }
+
+        return null;
+    }
+
+    /// Words that mean "the one at the end", in both languages.
+    private static readonly string[] LastWords = ["last", "sista", "sista_one"];
+
+    /// Prefixes after which a digit is a POSITION rather than a quantity.
+    private static readonly string[] PositionMarkers = ["number ", "nummer ", "nr ", "no ", "option ", "#"];
+
     private static readonly string[][] Ordinals =
     [
         ["forsta", "first"],

@@ -2048,6 +2048,23 @@ public sealed class GlunoChatService : IGlunoChatService
 
             if (places.Count == 0)
             {
+                // ── A position answers itself ─────────────────────────────
+                //
+                // "add the first one" is about WHERE a card sat, and the
+                // references are stored in the order the user saw them. Going
+                // to the provider to count them was the expensive way to learn
+                // something already written down — and, when that lookup came
+                // back short or failed, the reason a place the user was
+                // looking at reported itself as unavailable.
+                //
+                // Identity only. The add below still fetches the real place by
+                // id, because persisting one needs its details; nothing here
+                // reads or keeps provider content.
+                var ordinalKey = GlunoPlaceOptions.ResolveOrdinalKey(GlunoPlaceOptions.References(message), text);
+
+                if (ordinalKey != null)
+                    return await AddRecommendedPlaceAsync(userId, message, ordinalKey, null, null, ct);
+
                 var refetched = await RefetchShownPlacesAsync(message, ct);
 
                 // ── The production failure ────────────────────────────────

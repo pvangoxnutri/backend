@@ -213,7 +213,43 @@ public sealed class GlunoPlaceRehydrator : IGlunoPlaceRehydrator
             return GlunoRehydration.Empty(GlunoRehydrationStatus.Unavailable);
         }
 
+        // ── Ask for the place, not for the search ─────────────────────────
+        //
+        // THE BUG THIS CLOSES. Rehydration re-ran the original TEXT SEARCH and
+        // kept whatever ids it recognised. A place the user was shown sixty
+        // seconds ago is not guaranteed to come back from the same query — the
+        // provider reranks, the result set drifts, and anything past the limit
+        // simply is not there. The user then saw "I couldn't fetch that place
+        // again" about a place that had never gone anywhere.
+        //
+        // The provider contract has answered by id the whole time
+        // (GetPlaceDetailsAsync, already used by the day planner). An id is
+        // also the one thing the terms allow us to have kept, so looking one
+        // up is exactly what a stored reference is FOR.
+        //
+        // The search-based path below is still the fallback: a provider whose
+        // details endpoint fails for one id can still surface it in a list.
+        var byId = await LookUpByIdAsync(references, context, ct);
+
+        if (Satisfies(byId.Matched, requiredOptionKey))
+        {
+            Log(context, byId.Status, byId.Matched.Count, references.Count,
+                calls: byId.Calls, fallback: false);
+
+            return new GlunoRehydration
+            {
+                Status = GlunoRehydrationStatus.Ok,
+                Places = byId.Matched,
+                ProviderCalls = byId.Calls,
+            };
+        }
+
         var first = await LookUpAsync(references, context, context.Limit, ct);
+
+        // Anything the id lookup DID find is kept: the two paths answer about
+        // the same references, and a merged list is still only ids this user
+        // was shown.
+        foreach (var (key, place) in byId.Matched) first.Matched.TryAdd(key, place);
 
         if (Satisfies(first.Matched, requiredOptionKey))
         {
@@ -289,6 +325,71 @@ public sealed class GlunoPlaceRehydrator : IGlunoPlaceRehydrator
     /// </summary>
     private static bool Satisfies(IReadOnlyDictionary<string, TravelPlace> matched, string? requiredOptionKey)
         => requiredOptionKey != null ? matched.ContainsKey(requiredOptionKey) : matched.Count > 0;
+
+    /// <summary>
+    /// Each stored reference fetched by its own id.
+    ///
+    /// ONE CALL PER REFERENCE, which is the honest cost of asking about five
+    /// specific places rather than asking a question and hoping they come
+    /// back. Bounded by MaxPlaceCardsPerTurn upstream, so it is a handful.
+    ///
+    /// A null answer is "this provider does not have that id today" and is
+    /// simply absent from the result; an exception is a provider problem and
+    /// stops the sweep, because asking the next id would fail the same way.
+    /// </summary>
+    private async Task<(Dictionary<string, TravelPlace> Matched, TravelSearchStatus Status, int Calls)>
+        LookUpByIdAsync(
+            IReadOnlyList<GlunoPlaceReference> references,
+            GlunoPlaceSearchContext context,
+            CancellationToken ct)
+    {
+        var matched = new Dictionary<string, TravelPlace>(StringComparer.Ordinal);
+        var calls = 0;
+
+        foreach (var reference in references)
+        {
+            if (string.IsNullOrWhiteSpace(reference.LocationId)
+                || string.IsNullOrWhiteSpace(reference.ProviderId))
+            {
+                continue;
+            }
+
+            var externalId = TravelPlaceIds.Namespaced(reference.ProviderId, reference.LocationId);
+
+            TravelPlace? place;
+
+            try
+            {
+                calls++;
+                place = await _travelData.GetPlaceDetailsAsync(externalId, context.Language, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogInformation(
+                    "[GLUNO] rehydrate by id failed provider={Provider} error={Error}",
+                    reference.ProviderId, ex.GetType().Name);
+
+                // The provider is the problem, not this id. Let the search
+                // fallback decide the status rather than guessing here.
+                return (matched, TravelSearchStatus.Failed, calls);
+            }
+
+            // The provider must still be the one the reference was issued by.
+            // The registry enforces family ownership, and this keeps the same
+            // promise the search path makes about provider agreement.
+            if (place != null
+                && string.Equals(place.Provider, reference.ProviderId, StringComparison.Ordinal))
+            {
+                matched[reference.OptionKey] = place;
+            }
+        }
+
+        return (matched, TravelSearchStatus.Ok, calls);
+    }
 
     private async Task<(Dictionary<string, TravelPlace> Matched, TravelSearchStatus Status)> LookUpAsync(
         IReadOnlyList<GlunoPlaceReference> references,

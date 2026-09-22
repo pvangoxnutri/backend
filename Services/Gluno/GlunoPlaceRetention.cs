@@ -27,8 +27,15 @@ public sealed class GlunoPlaceRetention
     /// Identity-only handles. Empty whenever <see cref="Places"/> is not.
     public required IReadOnlyList<GlunoPlaceReference> References { get; init; }
 
-    /// The request behind <see cref="References"/>. Null when there are none —
-    /// a search context with nothing to look up is dead weight.
+    /// <summary>
+    /// The request that produced this turn's places.
+    ///
+    /// TWO CONSUMERS, not one. Rehydration uses it to look the references up
+    /// again — which is why it reads as "the request behind References" — but
+    /// refresh uses it to repeat the SEARCH and offer a new shortlist, and
+    /// that is worth doing whether the cards were stored or not. Null only
+    /// when there was no usable request to record.
+    /// </summary>
     public GlunoPlaceSearchContext? Search { get; init; }
 
     /// True when something the user was shown is not being stored in full.
@@ -70,6 +77,15 @@ public sealed class GlunoPlaceRetention
             {
                 Places = shown,
                 References = Array.Empty<GlunoPlaceReference>(),
+                // KEPT EVEN THOUGH THERE ARE NO REFERENCES. The search context
+                // was documented as "the request behind References", so this
+                // branch left it null - nothing to look up, nothing to look it
+                // up with. But refresh uses it for a different job: repeating
+                // the SEARCH to offer a new shortlist. With it null, "show new
+                // suggestions" answered place_not_retained on a turn whose
+                // cards had been stored in full, which is the one case where
+                // everything needed was present.
+                Search = search is { IsUsable: true } ? search : null,
                 Reduced = false,
             };
         }
