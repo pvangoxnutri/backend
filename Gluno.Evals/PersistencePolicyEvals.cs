@@ -629,8 +629,18 @@ Assert.Equal(
 
         Assert.Equal(2, retention.Places.Count);
         Assert.Empty(retention.References);
-        Assert.Null(retention.Search);
         Assert.False(retention.Reduced);
+
+        // The search context is kept HERE TOO, though there are no references
+        // to look up with it. Refresh uses it for a different job -- repeating
+        // the search to offer a new shortlist -- and with it null "show new
+        // suggestions" answered place_not_retained on a turn whose cards had
+        // been stored in full.
+        //
+        // Nothing about the provider terms changes: this is SideQuest own
+        // request (destination, category, its own search words), not provider
+        // content, and the references branch has always stored it.
+        Assert.NotNull(retention.Search);
 
         // And it still resolves to a full card, with no upstream call.
         var message = MessageWith(retention);
@@ -869,7 +879,7 @@ Assert.Equal(
         var chat = Source("Services", "Gluno", "GlunoChatService.cs");
 
         var start = chat.IndexOf("private async Task<GlunoTurnResult?> AddNamedPlaceAsync", StringComparison.Ordinal);
-        var body = chat[start..(start + 4200)];
+        var body = chat[start..(start + 5600)];
 
         Assert.True(start > 0);
         // "Add the first one" and "add Real Alcázar" both end at the option key
@@ -878,6 +888,11 @@ Assert.Equal(
         // list can be short, and a positional key would point elsewhere.
         Assert.Contains("keys[matches[0]]", body);
         Assert.Contains("RefetchShownPlacesAsync(message, ct)", body);
+
+        // A position is not content. It resolves from the stored references
+        // before any refetch, so identifying "the first one" costs nothing
+        // upstream and reads no provider data.
+        Assert.Contains("GlunoPlaceOptions.ResolveOrdinalKey(", body);
     }
 
     [Fact]

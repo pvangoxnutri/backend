@@ -172,7 +172,7 @@ public class ManualFallbackEvals
 
         var start = chat.IndexOf(
             "private async Task<GlunoTurnResult?> AddNamedPlaceAsync", StringComparison.Ordinal);
-        var body = chat[start..(start + 4200)];
+        var body = chat[start..(start + 5600)];
 
         // A name and an ordinal are the same lookup against the same shortlist,
         // and both end at the option key rather than at a described place.
@@ -181,6 +181,9 @@ public class ManualFallbackEvals
         // After a reload the names are gone, so the list is fetched again from
         // the ids that were kept.
         Assert.Contains("RefetchShownPlacesAsync(message, ct)", body);
+        // The ordinal shortcut resolves ahead of the refetch: a POSITION is
+        // written down in the references and never needs a provider call.
+        Assert.Contains("GlunoPlaceOptions.ResolveOrdinalKey(", body);
     }
 
     [Fact]

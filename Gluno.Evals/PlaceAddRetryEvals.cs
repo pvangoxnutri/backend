@@ -39,6 +39,156 @@ public class PlaceAddRetryEvals
 
     private static string Chat() => Source("Services", "Gluno", "GlunoChatService.cs");
 
+    // ── Rehydration asks for the place, not for the search ───────────────
+
+    [Fact]
+    public void A_stored_reference_is_looked_up_by_its_own_id_first()
+    {
+        var rehydrator = Source("Services", "Gluno", "GlunoPlaceRehydrator.cs");
+
+        // THE BUG. Rehydration re-ran the original TEXT SEARCH and kept
+        // whatever ids it recognised. A place shown a minute ago is not
+        // guaranteed to come back from the same query -- the provider reranks
+        // and anything past the limit is simply not there -- so the user was
+        // told "I could not fetch that place again" about a place that had
+        // never gone anywhere.
+        var byId = rehydrator.IndexOf("LookUpByIdAsync(references, context, ct)", StringComparison.Ordinal);
+        var bySearch = rehydrator.IndexOf("LookUpAsync(references, context, context.Limit, ct)", StringComparison.Ordinal);
+
+        Assert.True(byId > 0, "rehydration must be able to look a reference up by id");
+        Assert.True(bySearch > 0, "the search path stays as the fallback");
+        Assert.True(byId < bySearch, "the id lookup must run BEFORE the search fallback");
+
+        // The id is the one thing the provider terms allow keeping, so looking
+        // one up is exactly what a stored reference is for.
+        Assert.Contains("GetPlaceDetailsAsync(externalId, context.Language, ct)", rehydrator);
+    }
+
+    [Fact]
+    public void An_id_lookup_result_survives_the_search_fallback()
+    {
+        var rehydrator = Source("Services", "Gluno", "GlunoPlaceRehydrator.cs");
+
+        // Both paths answer about the same references. Throwing the id
+        // lookup away because the search also ran would lose exactly the
+        // places the search could not find -- the ones that needed it.
+        Assert.Contains("foreach (var (key, place) in byId.Matched) first.Matched.TryAdd(key, place);", rehydrator);
+    }
+
+    [Fact]
+    public void An_id_lookup_requires_the_provider_that_issued_the_reference()
+    {
+        var rehydrator = Source("Services", "Gluno", "GlunoPlaceRehydrator.cs");
+
+        // The same promise the search path makes: a Terra id must not be
+        // re-fetched through a different implementation.
+        Assert.Contains("string.Equals(place.Provider, reference.ProviderId, StringComparison.Ordinal)", rehydrator);
+    }
+
+    [Fact]
+    public void A_stored_turn_can_always_be_refreshed()
+    {
+        var retention = Source("Services", "Gluno", "GlunoPlaceRetention.cs");
+
+        // Refresh needs the SEARCH, not the references. Keeping the context
+        // only on the reference branch meant a turn whose cards were stored in
+        // full -- the case where everything needed was present -- answered
+        // place_not_retained when the user asked for new suggestions.
+        var cards = retention.IndexOf("Places = shown,", StringComparison.Ordinal);
+        Assert.True(cards > 0);
+
+        var branch = retention[cards..(cards + 900)];
+        Assert.Contains("Search = search is { IsUsable: true } ? search : null,", branch);
+    }
+
+    // ── A position resolves without touching the provider ────────────────
+
+    private static IReadOnlyList<GlunoPlaceReference> Refs(int count)
+        => Enumerable.Range(0, count).Select(index => new GlunoPlaceReference
+        {
+            OptionKey = GlunoPlaceOptions.KeyFor(index),
+            ProviderId = "google",
+            LocationId = $"loc-{index}",
+        }).ToList();
+
+    [Theory]
+    [InlineData("add first one to my trip", "place-0")]
+    [InlineData("ok add the first suggestion", "place-0")]
+    [InlineData("add second one", "place-1")]
+    [InlineData("lagg till den andra", "place-1")]
+    [InlineData("add the third one", "place-2")]
+    [InlineData("add number 2", "place-1")]
+    [InlineData("add nr 3", "place-2")]
+    [InlineData("add #4", "place-3")]
+    [InlineData("add the last one", "place-4")]
+    public void An_ordinal_resolves_to_the_key_it_was_shown_under(string message, string expected)
+        => Assert.Equal(expected, GlunoPlaceOptions.ResolveOrdinalKey(Refs(5), message));
+
+    [Theory]
+    [InlineData("add number 9")]          // past the end of the list
+    [InlineData("add the cathedral")]     // a NAME - content this path never has
+    [InlineData("add 2 cafes")]           // a quantity, not a position
+    [InlineData("")]
+    public void A_sentence_with_no_usable_position_resolves_to_nothing(string message)
+        => Assert.Null(GlunoPlaceOptions.ResolveOrdinalKey(Refs(5), message));
+
+    [Fact]
+    public void Last_one_follows_the_length_of_the_actual_list()
+    {
+        Assert.Equal("place-2", GlunoPlaceOptions.ResolveOrdinalKey(Refs(3), "add the last one"));
+        Assert.Equal("place-0", GlunoPlaceOptions.ResolveOrdinalKey(Refs(1), "add the last one"));
+    }
+
+    [Fact]
+    public void Resolving_a_position_needs_no_cards_at_all()
+    {
+        // The whole point: a provider whose terms forbid caching content has
+        // no stored cards, and counting them upstream was the old cost of
+        // understanding "the first one".
+        var options = Source("Services", "Gluno", "GlunoPlaceOptions.cs");
+
+        var start = options.IndexOf("public static string? ResolveOrdinalKey(", StringComparison.Ordinal);
+        Assert.True(start > 0);
+
+        var body = options[start..(start + 2400)];
+
+        Assert.DoesNotContain("GlunoPlaceCard", body);
+        Assert.DoesNotContain("SearchAllAsync", body);
+        Assert.DoesNotContain("Rehydrat", body);
+        Assert.DoesNotContain(".Name", body);
+    }
+
+    // ── Every day of the trip is selectable ──────────────────────────────
+
+    [Fact]
+    public void Day_options_are_not_truncated_to_the_shortlist_cap()
+    {
+        var builder = Source("Services", "Gluno", "GlunoClarificationBuilder.cs");
+
+        // MaxOptions is a shortlist cap for things there can be arbitrarily
+        // many of. A trip has exactly as many days as it has, and truncating
+        // at five made day six onward unselectable.
+        Assert.Contains("Take(MaxDayOptions)", builder);
+        Assert.DoesNotContain("candidates.OrderBy(date => date).Take(MaxOptions)", builder);
+        Assert.True(GlunoClarificationBuilder.MaxDayOptions > GlunoClarificationBuilder.MaxOptions);
+    }
+
+    [Fact]
+    public void Every_day_between_the_trip_dates_is_a_candidate()
+    {
+        var chat = Chat();
+
+        // Built from the ADVENTURE dates, never from what the suggestions
+        // happened to cover: a recommended day may lead, but it must not
+        // narrow what the user can choose.
+        var start = chat.IndexOf("IEnumerable<DateOnly> CandidateDays(", StringComparison.Ordinal);
+        Assert.True(start > 0);
+
+        var body = chat[start..(start + 400)];
+        Assert.Contains("date = trip.StartDate; date <= end; date = date.AddDays(1)", body);
+    }
+
+
     private static readonly Guid Message = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
     // ── 1. The action ────────────────────────────────────────────────────

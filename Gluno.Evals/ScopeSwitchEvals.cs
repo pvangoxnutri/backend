@@ -47,7 +47,7 @@ public class ScopeSwitchEvals
         // One press handler, one state flag. No parent Pressable wrapping it
         // and no backdrop handler that could open it again.
         Assert.Equal(1, picker.Split("onPress={() => setOpen(true)}").Length - 1);
-        Assert.Contains("const [open, setOpen] = useState(false);", picker);
+        Assert.Contains("const [open, setOpen] = useState(startOpen);", picker);
     }
 
     [Fact]
@@ -207,8 +207,11 @@ public class ScopeSwitchEvals
         // it again: each action's success path, plus the refresh's failure
         // path. A late failure is just as capable of writing into the wrong
         // Adventure as a late success, so the catch carries the same guard.
-        Assert.Equal(2, screen.Split("const startedIn = stateScope.current;").Length - 1);
-        Assert.Equal(3, screen.Split("if (stateScope.current !== startedIn) return;").Length - 1);
+        Assert.Equal(3, screen.Split("const startedIn = stateScope.current;").Length - 1);
+        // Five now: add, refresh success, refresh failure, and the suggestion
+        // stack's own success and failure paths. Every one of them can return
+        // after the user has moved to another Adventure.
+        Assert.Equal(5, screen.Split("if (stateScope.current !== startedIn) return;").Length - 1);
     }
 
     // ── 14-17. Cache keys ────────────────────────────────────────────────

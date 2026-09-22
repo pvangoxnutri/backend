@@ -405,6 +405,183 @@ public class PlaceRefreshEvals
         Assert.Contains("FAILURE_COPY[message.failureCode]", row);
     }
 
+    // ── The suggestion stack ─────────────────────────────────────────────
+
+    [Fact]
+    public void A_shortlist_is_shown_one_card_at_a_time()
+    {
+        var screen = Mobile("app", "gluno.tsx");
+        var stack = Mobile("components", "gluno", "GlunoSuggestionStack.tsx");
+
+        // One card, chosen by index, not a list the user scrolls.
+        Assert.Contains("session.places[session.currentIndex]", screen);
+        Assert.Contains("place={currentSuggestion}", screen);
+
+        // And it is the SAME card component the rest of Gluno renders, so a
+        // suggestion looks like a place everywhere else in SideQuest.
+        Assert.Contains("import GlunoPlaceCard from '@/components/gluno/GlunoPlaceCard';", stack);
+        Assert.Contains("<GlunoPlaceCard place={place} />", stack);
+    }
+
+    [Fact]
+    public void The_row_list_steps_aside_while_the_stack_is_live()
+    {
+        var screen = Mobile("app", "gluno.tsx");
+        var row = Mobile("components", "gluno", "GlunoMessageRow.tsx");
+
+        // The same six places as a list underneath would make the stack a
+        // decoration on top of the interface it replaced.
+        Assert.Contains("places.length > 1 && !stackOwnsPlaces", row);
+        Assert.Contains("stackOwnsPlaces={item.id === session?.messageId", screen);
+    }
+
+    [Fact]
+    public void Declining_advances_and_records_the_id()
+    {
+        var screen = Mobile("app", "gluno.tsx");
+
+        var start = screen.IndexOf("const handleDecline = useCallback", StringComparison.Ordinal);
+        Assert.True(start > 0);
+
+        var body = screen[start..(start + 700)];
+
+        Assert.Contains("currentIndex: current.currentIndex + 1", body);
+        Assert.Contains("declinedIds: [...current.declinedIds, place.externalId]", body);
+
+        // Nothing upstream: declining is an opinion, not a request.
+        Assert.DoesNotContain("await", body);
+    }
+
+    [Fact]
+    public void A_failed_add_keeps_the_card_on_screen()
+    {
+        var screen = Mobile("app", "gluno.tsx");
+
+        var start = screen.IndexOf("const handleAddSuggestion = useCallback", StringComparison.Ordinal);
+        Assert.True(start > 0);
+
+        var body = screen[start..(start + 1700)];
+
+        // currentIndex advances on the SUCCESS path only. Advancing past a
+        // place the user asked for and did not get is how a trip quietly ends
+        // up missing something.
+        var success = body.IndexOf("addedIds: [...current.addedIds", StringComparison.Ordinal);
+        var failure = body.IndexOf("catch (error)", StringComparison.Ordinal);
+
+        Assert.True(success > 0 && failure > success);
+        Assert.Contains("setAddFailure(", body);
+    }
+
+    [Fact]
+    public void An_add_posts_the_key_the_card_was_shown_under()
+    {
+        var screen = Mobile("app", "gluno.tsx");
+
+        // No search for identity: both ids are already known.
+        Assert.Contains("runAddPlace(session.messageId, place.optionKey)", screen);
+    }
+
+    [Fact]
+    public void A_scope_switch_drops_the_places_with_the_adventure()
+    {
+        var screen = Mobile("app", "gluno.tsx");
+
+        var start = screen.IndexOf("if (stateScope.current !== scope) {", StringComparison.Ordinal);
+        Assert.True(start > 0);
+
+        var body = screen[start..(start + 1400)];
+
+        // Both reasons: Trip A's suggestions must not show under Trip B, and
+        // provider content must not outlive the session allowed to show it.
+        Assert.Contains("setSession(null);", body);
+    }
+
+    [Fact]
+    public void A_late_add_cannot_land_in_the_adventure_that_replaced_it()
+    {
+        var screen = Mobile("app", "gluno.tsx");
+
+        var start = screen.IndexOf("const handleAddSuggestion = useCallback", StringComparison.Ordinal);
+        var body = screen[start..(start + 1700)];
+
+        Assert.Contains("const startedIn = stateScope.current;", body);
+
+        // Success, failure and the busy flag: all three check the scope they
+        // started in. A late failure can write into the wrong Adventure just
+        // as easily as a late success.
+        Assert.Equal(3, body.Split("stateScope.current").Length - 1 - 1);
+    }
+
+    [Fact]
+    public void Provider_content_never_leaves_the_screen_state()
+    {
+        var screen = Mobile("app", "gluno.tsx");
+
+        var start = screen.IndexOf("type SuggestionSession = {", StringComparison.Ordinal);
+        Assert.True(start > 0);
+
+        var body = screen[start..(start + 900)];
+
+        // Ids are what may be kept and what exclusions are built from; the
+        // places themselves are runtime only and are written nowhere.
+        Assert.Contains("shownIds: string[];", body);
+        Assert.Contains("declinedIds: string[];", body);
+        Assert.Contains("addedIds: string[];", body);
+
+        // USE, not the word: the comment above the state says "never written to
+        // AsyncStorage", and a substring test cannot tell an intention from a
+        // violation.
+        Assert.DoesNotContain("from '@react-native-async-storage/async-storage'", screen);
+        Assert.DoesNotContain("AsyncStorage.setItem", screen);
+
+        // The one thing this screen DOES persist is the transcript. The places
+        // must not ride along in it.
+        var cacheWrite = screen.IndexOf("writeGlunoCache(userId, tripId, {", StringComparison.Ordinal);
+        Assert.True(cacheWrite > 0);
+
+        var payload = screen[cacheWrite..(screen.IndexOf("});", cacheWrite, StringComparison.Ordinal) + 3)];
+
+        Assert.DoesNotContain("session", payload);
+        Assert.DoesNotContain("places", payload);
+    }
+
+    // ── Gluno starts inside an Adventure ─────────────────────────────────
+
+    [Fact]
+    public void One_adventure_is_chosen_without_asking()
+    {
+        var screen = Mobile("app", "gluno.tsx");
+
+        Assert.Contains("startupTrips?.length !== 1", screen);
+        Assert.Contains("params: { tripId: only.id", screen);
+    }
+
+    [Fact]
+    public void Several_adventures_ask_before_anything_loads()
+    {
+        var screen = Mobile("app", "gluno.tsx");
+
+        Assert.Contains("startOpen={!tripId && (startupTrips?.length ?? 0) > 1}", screen);
+
+        // The choice comes BEFORE the chat, not behind it: a conversation
+        // opened as "all Adventures" answers the question for the user, with
+        // the wrong answer.
+        var gate = screen.IndexOf("!tripId && startupTrips?.length === 0", StringComparison.Ordinal);
+        var loading = screen.IndexOf(") : loading ? (", StringComparison.Ordinal);
+
+        Assert.True(gate > 0 && loading > gate);
+    }
+
+    [Fact]
+    public void No_adventures_says_so_and_offers_the_way_out()
+    {
+        var screen = Mobile("app", "gluno.tsx");
+
+        Assert.Contains("gluno.trip.noneBody", screen);
+        // The route the app itself uses from the home tab.
+        Assert.Contains("router.push('/create-trip')", screen);
+    }
+
     [Fact]
     public void A_spent_button_does_not_stay_clickable()
     {

@@ -242,10 +242,16 @@ public class EdgeFailureAndComposerEvals
         // returned false, handing the user their own sentence back beside a
         // retry button that never needed it. One setDraft — the clear — and
         // no path that writes the text back.
+        // Asserted as INTENT rather than as a count: handleSend also clears the
+        // composer when it answers a named card from the stack itself, and a
+        // second clear is still a clear. What must never appear is a write
+        // BACK - anything that puts the sentence into the composer again.
         var clears = send.Split("setDraft(").Length - 1;
-        Assert.Equal(1, clears);
+        Assert.True(clears >= 1);
+        Assert.Equal(clears, send.Split("setDraft('');").Length - 1);
         Assert.DoesNotContain("setDraft((current)", send);
         Assert.DoesNotContain("? text : current", send);
+        Assert.DoesNotContain("setDraft(text)", send);
     }
 
     [Fact]
