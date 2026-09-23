@@ -3920,6 +3920,25 @@ public sealed class GlunoChatService : IGlunoChatService
 
         _diagnostics.ProviderStatus = result.Status.ToString();
 
+        // ── One line that answers "why did discovery not produce cards" ───
+        //
+        // WHY THIS EXISTS. The app renders one sentence for every way this can
+        // fail, so a report of "it could not fetch suggestions" was equally
+        // consistent with a rejected key, a quota, a timeout, a destination
+        // that resolved to nothing, and a search that simply matched nothing
+        // in that city. Those are four different fixes in four different
+        // places, and telling them apart meant reading code rather than logs.
+        //
+        // Machine values only: SideQuest own request and the provider status.
+        // No key, no place content, nothing the user typed beyond the
+        // destination their own Adventure resolved.
+        _logger.LogInformation(
+            "[GLUNO] place discovery requestId={RequestId} status={Status} near={Near} "
+            + "category={Category} limit={Limit} resultCount={ResultCount} excluded={Excluded}",
+            _diagnostics.RequestId, result.Status, near,
+            TravelPlaceCategories.ToWireValue(category), limit,
+            result.Places.Count, excludeLocationIds.Count);
+
         if (result.Status != TravelSearchStatus.Ok)
         {
             _logger.LogInformation(
@@ -3993,10 +4012,14 @@ public sealed class GlunoChatService : IGlunoChatService
                 ResponseOrigin = origin,
             }, ct);
 
+            // rankedCount separates "the provider returned nothing" from
+            // "ranking dropped everything it returned" - the same empty screen
+            // from two causes that are fixed in different places.
             _logger.LogInformation(
-                "[GLUNO] direct place search empty category={Category} provider={Provider} "
-                + "excluded={Excluded}",
-                category, providerCount, excludeLocationIds.Count);
+                "[GLUNO] direct place search empty requestId={RequestId} category={Category} "
+                + "provider={Provider} ranked={Ranked} excluded={Excluded}",
+                _diagnostics.RequestId, category, providerCount, ranked.Count,
+                excludeLocationIds.Count);
 
             workingState.Discovery = GlunoDiscoveryContexts.WithLifetime(new GlunoDiscoveryContext
             {
