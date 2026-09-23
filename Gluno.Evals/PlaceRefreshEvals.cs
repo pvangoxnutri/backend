@@ -589,6 +589,100 @@ public class PlaceRefreshEvals
         Assert.Contains("<ActivityIndicator", gate);
     }
 
+    // ── The Adventure Gluno was last used for ────────────────────────────
+
+    [Fact]
+    public void The_resolved_scope_is_what_gets_remembered()
+    {
+        var screen = Mobile("app", "gluno.tsx");
+
+        // Written from the RESOLVED scope rather than from the picker's own
+        // callback, so arriving from an Adventure screen counts too -- the
+        // next open should follow the user, not only their last use of the
+        // pill.
+        Assert.Contains("if (tripId) void writeLastGlunoTripId(userId, tripId);", screen);
+        Assert.Contains("}, [tripId, userId]);", screen);
+    }
+
+    [Fact]
+    public void A_remembered_adventure_wins_over_the_picker()
+    {
+        var screen = Mobile("app", "gluno.tsx");
+
+        var start = screen.IndexOf("const remembered = await readLastGlunoTripId(userId);", StringComparison.Ordinal);
+        Assert.True(start > 0);
+
+        var body = screen[start..(start + 1400)];
+
+        // Checked against the list the server just returned, and selected
+        // ahead of the 0/1/2+ rule -- so two Adventures and a valid hint is
+        // not a question.
+        Assert.Contains("startupTrips.find((trip) => trip.id === remembered)", body);
+
+        var select = body.IndexOf("tripId: match.id", StringComparison.Ordinal);
+        var countRule = body.IndexOf("startupTrips.length !== 1", StringComparison.Ordinal);
+
+        Assert.True(select > 0 && countRule > select);
+    }
+
+    [Fact]
+    public void A_hint_that_no_longer_exists_is_forgotten_not_retried()
+    {
+        var screen = Mobile("app", "gluno.tsx");
+
+        var start = screen.IndexOf("const remembered = await readLastGlunoTripId(userId);", StringComparison.Ordinal);
+        var body = screen[start..(start + 1400)];
+
+        // Leaving it would re-check a trip that will never come back on every
+        // single open, and a stale id must never loop or blank the screen.
+        Assert.Contains("if (remembered) await clearLastGlunoTripId(userId);", body);
+    }
+
+    [Fact]
+    public void The_hint_is_scoped_per_user_and_holds_only_a_trip_id()
+    {
+        var store = Mobile("lib", "gluno-last-trip.ts");
+
+        // A shared device that hydrated the previous account's Adventure would
+        // be a worse bug than the picker it saves.
+        Assert.Contains("function storageKey(userId: string)", store);
+        Assert.Contains("`${KEY_PREFIX}.${userId}`", store);
+
+        // Nothing but the id. No provider content reaches this file at all.
+        foreach (var forbidden in new[] { "imageUrl", "rating", "reviewCount", "address", "GlunoPlace", "messages" })
+        {
+            Assert.DoesNotContain(forbidden, store);
+        }
+    }
+
+    [Fact]
+    public void Signing_out_takes_the_hint_with_it()
+    {
+        var auth = Mobile("components", "auth-provider.tsx");
+
+        // Both paths: sign-out and account deletion. Keyed per user, so it
+        // could not hydrate the next account -- but a signed-out user's trip
+        // id has no reason to stay on the device either.
+        Assert.Equal(2, auth.Split("await clearLastGlunoTripId(user?.id ?? '');").Length - 1);
+    }
+
+    [Fact]
+    public void The_conversation_itself_is_still_memory_only()
+    {
+        var cache = Mobile("lib", "gluno-cache.ts");
+
+        // THE LINE THIS ROUND DID NOT CROSS. A Gluno conversation is whatever
+        // the user typed plus an answer built from their private trip data.
+        // Remembering WHICH Adventure they were in is a trip id; remembering
+        // what was said in it is not the same decision.
+        Assert.Contains("const cache = new Map<string, GlunoConversationCacheEntry>();", cache);
+        Assert.DoesNotContain("AsyncStorage", cache);
+
+        // And the disk allowlist still refuses everything but trips.
+        var persisted = Mobile("lib", "persisted-cache.ts");
+        Assert.Contains("return key.startsWith('/api/trips');", persisted);
+    }
+
     // ── A debug tool does not talk over the product ──────────────────────
 
     [Fact]
@@ -663,7 +757,10 @@ public class PlaceRefreshEvals
     {
         var screen = Mobile("app", "gluno.tsx");
 
-        Assert.Contains("startupTrips?.length !== 1", screen);
+        // The count rule now sits BEHIND the remembered-Adventure check, so it
+        // reads as an early return rather than a guard on the whole effect.
+        // One Adventure is still chosen rather than confirmed.
+        Assert.Contains("if (startupTrips.length !== 1) return;", screen);
         Assert.Contains("params: { tripId: only.id", screen);
     }
 
