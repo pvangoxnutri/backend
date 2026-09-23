@@ -545,6 +545,117 @@ public class PlaceRefreshEvals
         Assert.DoesNotContain("places", payload);
     }
 
+    // ── The picker must never be a title with nothing under it ──────────
+
+    [Fact]
+    public void The_sheet_opens_when_the_trips_arrive_not_only_at_mount()
+    {
+        var picker = Mobile("components", "gluno", "GlunoScopePicker.tsx");
+
+        // THE BUG. useState reads its argument on the FIRST render only. The
+        // caller computes startOpen from a list it is still loading, so the
+        // first render always said false -- and when the trips arrived and it
+        // turned true, the sheet had already decided. The screen showed
+        // "Which Adventure?" with nothing under it, permanently.
+        Assert.Contains("if (!startOpen || autoOpened.current) return;", picker);
+        Assert.Contains("setOpen(true);", picker);
+        Assert.Contains("}, [startOpen]);", picker);
+    }
+
+    [Fact]
+    public void The_sheet_renders_the_list_the_caller_already_loaded()
+    {
+        var picker = Mobile("components", "gluno", "GlunoScopePicker.tsx");
+        var screen = Mobile("app", "gluno.tsx");
+
+        // One fetch, not two: the startup gate has the Adventures already, and
+        // asking for them again is a second request for an answer we have.
+        Assert.Contains("const trips = providedTrips ?? ownTrips;", picker);
+        Assert.Contains("trips={!tripId ? startupTrips : null}", screen);
+    }
+
+    [Fact]
+    public void A_still_loading_trip_list_shows_progress_rather_than_a_choice()
+    {
+        var screen = Mobile("app", "gluno.tsx");
+
+        var start = screen.IndexOf("!tripId && startupTrips?.length === 0", StringComparison.Ordinal);
+        Assert.True(start > 0);
+
+        var gate = screen[start..(start + 1500)];
+
+        // null is "still counting", not "none" and not "several".
+        Assert.Contains("startupTrips == null ? (", gate);
+        Assert.Contains("<ActivityIndicator", gate);
+    }
+
+    // ── A debug tool does not talk over the product ──────────────────────
+
+    [Fact]
+    public void Copying_the_transcript_announces_nothing_on_success()
+    {
+        var screen = Mobile("app", "gluno.tsx");
+        var en = Mobile("components", "i18n-provider.tsx");
+
+        // The export button is development-only, and its confirmation was
+        // appearing where real answers about the trip appear.
+        Assert.DoesNotContain("gluno.debug.copied", screen);
+        Assert.DoesNotContain("gluno.debug.copied", en);
+
+        // The failure still says so: a silent failure looks identical to a
+        // silent success.
+        Assert.Contains("gluno.debug.copyFailed", screen);
+    }
+
+    // ── Why discovery produced no cards ──────────────────────────────────
+
+    [Fact]
+    public void Discovery_logs_enough_to_name_its_own_failure()
+    {
+        var chat = Chat();
+
+        // One sentence reaches the app for every way this can fail, so a
+        // report of "could not fetch suggestions" was equally consistent with
+        // a rejected key, a quota, a timeout, a destination that resolved to
+        // nothing, and a search that matched nothing in that city.
+        Assert.Contains("[GLUNO] place discovery requestId={RequestId} status={Status} near={Near}", chat);
+        Assert.Contains("resultCount={ResultCount}", chat);
+
+        // And ranking losing everything is not the provider returning nothing.
+        Assert.Contains("ranked={Ranked}", chat);
+    }
+
+    [Fact]
+    public void A_failed_lookup_is_named_rather_than_generic()
+    {
+        var row = Mobile("components", "gluno", "GlunoMessageRow.tsx");
+
+        // Unmapped, both rendered as "could not answer" -- advice that says
+        // nothing about what failed or whether waiting helps.
+        Assert.Contains("place_lookup_failed:", row);
+        Assert.Contains("place_lookup_busy: 'gluno.error.busy',", row);
+    }
+
+    [Fact]
+    public void A_transient_place_failure_keeps_its_retry()
+    {
+        var row = Mobile("components", "gluno", "GlunoMessageRow.tsx");
+
+        var start = row.IndexOf("const NEVER_RETRYABLE", StringComparison.Ordinal);
+        Assert.True(start > 0);
+
+        var terminal = row[start..(row.IndexOf("]);", start, StringComparison.Ordinal) + 3)];
+
+        // The backend calls these retryable and the row must agree, or the one
+        // failure waiting genuinely helps with loses its button.
+        // Asserted on the WIRE CODES rather than on a C# constant: the
+        // provider-unavailable code is mid-rename in the working tree, and a
+        // test about the app not marking a transient failure terminal should
+        // not break on what the backend calls that failure internally.
+        Assert.DoesNotContain("place_lookup_busy", terminal);
+        Assert.DoesNotContain("place_lookup_failed", terminal);
+    }
+
     // ── Gluno starts inside an Adventure ─────────────────────────────────
 
     [Fact]

@@ -204,7 +204,11 @@ public class DebugExportEvals
 
         Assert.Contains("t('gluno.debug.copyFailed')", screen);
         Assert.Contains("'gluno.debug.copyFailed': 'Kunde inte kopiera chatten',", translations);
-        Assert.Contains("'gluno.debug.copied': 'Chatten kopierad',", translations);
+        // Success says NOTHING. A development-only export button was
+        // announcing itself where real answers about the trip appear, so the
+        // string is gone from both dictionaries. The failure still speaks:
+        // a silent failure looks identical to a silent success.
+        Assert.DoesNotContain("gluno.debug.copied", translations);
 
         var start = screen.IndexOf("const handleCopyTranscript", StringComparison.Ordinal);
         var body = screen[start..(start + 1400)];

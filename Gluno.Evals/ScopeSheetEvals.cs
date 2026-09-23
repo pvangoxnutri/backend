@@ -125,7 +125,9 @@ public class ScopeSheetEvals
         // to somebody who knows they have four.
         Assert.Contains("{failed ? (", picker);
         Assert.Contains("setFailed(false);", picker);
-        Assert.Contains("setTrips(null);", picker);
+        // Clears the sheet OWN list. A list handed in by the caller is not
+        // this component to discard.
+        Assert.Contains("setOwnTrips(null);", picker);
     }
 
     [Fact]

@@ -60,8 +60,14 @@ public class ScopeSwitchEvals
 
         Assert.True(start > 0);
         Assert.Contains("setOpen(false);", body);
-        // The only effect keyed on `open` loads the list; nothing sets it true.
-        Assert.Equal(1, picker.Split("setOpen(true)").Length - 1);
+
+        // Two now: the pill, and the one-shot auto-open for a session that
+        // starts without an Adventure. The invariant is unchanged -- choosing
+        // must not reopen the sheet -- so the auto-open is guarded by a ref
+        // that latches, not merely by the flag that triggered it.
+        Assert.Equal(2, picker.Split("setOpen(true)").Length - 1);
+        Assert.Contains("if (!startOpen || autoOpened.current) return;", picker);
+        Assert.Contains("autoOpened.current = true;", picker);
     }
 
     [Fact]
@@ -285,7 +291,7 @@ public class ScopeSwitchEvals
         // Already correct before this round: a retry that clears the failure
         // and re-arms the fetch, without touching the sheet's visibility.
         Assert.Contains("setFailed(false);", picker);
-        Assert.Contains("setTrips(null);", picker);
+        Assert.Contains("setOwnTrips(null);", picker);
         Assert.Contains("t('gluno.error.retry')", picker);
         Assert.Contains("'gluno.error.retry'", translations);
     }

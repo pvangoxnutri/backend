@@ -306,8 +306,11 @@ public class TerraFixtureAndDiscoveryEvals
         Assert.Contains("tripadvisor_unavailable: 'gluno.error.placesUnavailable'", row);
 
         var translations = Mobile("components", "i18n-provider.tsx");
+
+        // Reworded to name what failed and to read alongside the retry button
+        // beside it, rather than describing a state the user cannot act on.
         Assert.Contains(
-            "'gluno.error.placesUnavailable': 'Jag kunde inte hämta verifierade platsförslag just nu.',",
+            "'gluno.error.placesUnavailable': 'Kunde inte hämta platsresultat just nu.',",
             translations);
     }
 

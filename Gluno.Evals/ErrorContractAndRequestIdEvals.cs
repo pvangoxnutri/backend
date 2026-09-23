@@ -241,8 +241,10 @@ public class ErrorContractAndRequestIdEvals
         Assert.Contains("tripadvisor_unavailable: 'gluno.error.placesUnavailable'", row);
 
         var i18n = Mobile("components", "i18n-provider.tsx");
-        Assert.Contains("'gluno.error.placesUnavailable': 'Jag kunde inte hämta verifierade platsförslag just nu.'", i18n);
-        Assert.Contains("'gluno.error.placesUnavailable': 'I couldn", i18n);
+        // Reworded to name what failed and to sit beside its retry button
+        // rather than describing a state the user cannot act on.
+        Assert.Contains("'gluno.error.placesUnavailable': 'Kunde inte hämta platsresultat just nu.'", i18n);
+        Assert.Contains("'gluno.error.placesUnavailable': 'Couldn", i18n);
     }
 
     // ── 7–8. Named codes never render generically; the generic line is only
